@@ -36,8 +36,13 @@ services:
     volumes:
       # 会话、设置、凭证。命名卷由 Docker 管理，1Panel 升级容器时不受影响。
       - dsh-home:/home/node/.dsh
-      # 工作区：1Panel 编排目录下的 workspace 子目录
-      - ./workspace:/workspace
+      # 工作区用【命名卷】而不是 ./workspace 绑定挂载。
+      # 原因：绑定挂载时宿主机目录的所有权会覆盖镜像里的设置。若 Docker 新建
+      # ./workspace 会得到 root:root 0755，而容器以 node(uid 1000) 运行，
+      # agent 就无法在该目录写入文件。
+      # 命名卷则会在首次挂载时从镜像继承 /workspace 的 node:node 属主，开箱可用。
+      # 想改用宿主机目录见 README「工作区用宿主机目录」一节。
+      - dsh-workspace:/workspace
 
     security_opt:
       - no-new-privileges:true
@@ -46,3 +51,4 @@ services:
 
 volumes:
   dsh-home:
+  dsh-workspace:

@@ -123,6 +123,32 @@ environment:
 
 ---
 
+## 工作区用宿主机目录（可选）
+
+默认用命名卷 `dsh-workspace`，好处是**开箱即可写**。如果你想直接在宿主机上看
+agent 生成的文件，改成绑定挂载：
+
+```yaml
+volumes:
+  - dsh-home:/home/node/.dsh
+  - /opt/dsh-workspace:/workspace
+```
+
+**必须先建目录并改属主**，否则 agent 无法写入：
+
+```sh
+mkdir -p /opt/dsh-workspace
+chown 1000:1000 /opt/dsh-workspace      # 容器内以 node(uid 1000) 运行
+```
+
+原因：绑定挂载时宿主机目录的属主会覆盖镜像里的设置。若让 Docker 自动新建，
+会得到 `root:root 0755`，而容器以 uid 1000 运行，写不进去——表现为 agent 报
+`EACCES: permission denied`，或无法创建任何文件。
+
+命名卷没有这个问题：首次挂载时会从镜像继承 `/workspace` 的 `node:node` 属主。
+
+---
+
 ## 升级版本
 
 1. 改 `Dockerfile` 里的 `ARG DSH_VERSION=新版`

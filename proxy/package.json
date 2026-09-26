@@ -1,0 +1,10 @@
+{
+  "name": "dsh-own-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Reverse proxy exposing loopback-only dsh to the LAN, with Host preservation and optional Basic Auth",
+  "main": "index.js",
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  }
+}

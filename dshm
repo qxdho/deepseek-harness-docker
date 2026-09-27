@@ -1,138 +1,304 @@
 #!/usr/bin/env bash
-# ./dshm — 宿主机上管理这套 compose 栈。
+# dshm — dsh 部署管理命令（在项目目录里运行：./dshm <命令>）
 #
-#   ./dshm up [--build]       启动（--build 先本地构建）
-#   ./dshm down               停止（保留 dsh-home 卷）
-#   ./dshm restart            重启
-#   ./dshm logs               跟随日志
-#   ./dshm status             健康/端口/登录地址
-#   ./dshm url                打印一次性 launch URL（排障用）
-#   ./dshm shell              进容器
-#   ./dshm password <用户名>   交互式改登录密码
-#   ./dshm update [版本]       改 .env 里的 DSH_VERSION 并重建
-#   ./dshm version            显示容器内 dsh 版本
+#   ./dshm              查看帮助
+#   ./dshm up [--build] 启动（--build 先本地构建）
+#   ./dshm down         停止（数据保留）
+#   ./dshm restart      重启
+#   ./dshm logs         看日志
+#   ./dshm status       健康 / 端口 / 登录用户
+#   ./dshm pw [用户]     改登录密码
+#   ./dshm user list    列出登录用户
+#   ./dshm user add 名字 [--admin]
+#   ./dshm totp enable [用户]
+#   ./dshm update [版本] 升级 dsh（重建镜像）
+#   ./dshm shell        进容器
+#   ./dshm version      显示容器内 dsh 版本
 set -euo pipefail
 cd "$(dirname "$0")"
 
 ENV_FILE=.env
 CONTAINER=dsh
+CLI_IN_CONTAINER=/home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js
 
-die() { printf './dshm: ERROR: %s\n' "$*" >&2; exit 1; }
-info() { printf './dshm: %s\n' "$*" >&2; }
+# ── 输出样式 ────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+	B=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; RED=$'\033[31m'; YEL=$'\033[33m'; RST=$'\033[0m'
+else
+	B=; DIM=; GRN=; RED=; YEL=; RST=
+fi
+hdr() { printf '\n%s==> %s%s\n' "$B" "$*" "$RST"; }
+info() { printf '    %s\n' "$*"; }
+ok() { printf '    %s✓%s %s\n' "$GRN" "$RST" "$*"; }
+die() { printf '\n%s错误：%s%s\n\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
 require_docker() {
 	command -v docker >/dev/null 2>&1 || die "未找到 docker"
 	docker compose version >/dev/null 2>&1 || die "未找到 docker compose v2"
 }
-require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env（先 cp .env.example .env 并填写）"; }
-
+require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env，请先运行 ./install.sh"; }
+require_running() {
+	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
+		|| die "容器 $CONTAINER 没在运行，先执行 ./dshm up"
+}
 env_value() {
 	local v
 	v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
 	printf '%s' "${v:-$2}"
 }
-
 set_env() {
 	local key="$1" value="$2" tmp
 	tmp="$(mktemp)"
-	awk -v k="$key" -v v="$value" '
-		BEGIN { done = 0 }
-		$0 ~ "^" k "=" { print k "=" v; done = 1; next }
-		{ print }
-		END { if (!done) print k "=" v }
-	' "$ENV_FILE" >"$tmp"
+	awk -v k="$key" -v v="$value" 'BEGIN{d=0} $0 ~ "^" k "=" {print k "=" v; d=1; next} {print} END{if(!d) print k "=" v}' "$ENV_FILE" >"$tmp"
 	mv "$tmp" "$ENV_FILE"
+}
+
+# ── 隐藏输入 + 星号回显 ─────────────────────────────────────────────────────
+# 用法：read_secret "提示文字"  → 结果在变量 SECRET 里
+SECRET=""
+read_secret() {
+	local prompt="$1" ch
+	SECRET=""
+	printf '%s' "$prompt"
+	if [ ! -t 0 ]; then
+		IFS= read -rs SECRET || true
+		printf '\n'
+		return
+	fi
+	while IFS= read -rs -n1 ch; do
+		[ -z "$ch" ] && break                     # 回车
+		if [ "$ch" = $'\x7f' ] || [ "$ch" = $'\b' ]; then
+			if [ -n "$SECRET" ]; then
+				SECRET="${SECRET%?}"
+				printf '\b \b'
+			fi
+			continue
+		fi
+		SECRET+="$ch"
+		printf '*'
+	done
+	printf '\n'
+}
+
+# 密码合规检查（与 dsh-auth-gate 的策略一致）
+check_password() {
+	local pw="$1" missing=""
+	[ "${#pw}" -ge 14 ] || missing="${missing} 至少14位;"
+	printf '%s' "$pw" | grep -q '[A-Z]' || missing="${missing} 大写字母;"
+	printf '%s' "$pw" | grep -q '[a-z]' || missing="${missing} 小写字母;"
+	printf '%s' "$pw" | grep -q '[0-9]' || missing="${missing} 数字;"
+	printf '%s' "$pw" | grep -q '[^A-Za-z0-9]' || missing="${missing} 特殊符号;"
+	[ -z "$missing" ] || die "密码不合规，缺少：${missing}"
+}
+
+PASSWORD=""
+ask_new_password() {
+	local p1 p2
+	while :; do
+		read_secret "  新密码（≥14位，含大写/小写/数字/符号）："
+		p1="$SECRET"
+		read_secret "  再输一次确认："
+		p2="$SECRET"
+		if [ "$p1" != "$p2" ]; then
+			printf '  %s两次输入不一致，请重新输入%s\n' "$YEL" "$RST"
+			continue
+		fi
+		check_password "$p1"
+		PASSWORD="$p1"
+		return
+	done
 }
 
 wait_healthy() {
 	local status
-	for _ in $(seq 1 60); do
+	for _ in $(seq 1 72); do
 		status="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo unknown)"
 		[ "$status" = "healthy" ] && return 0
 		sleep 5
 	done
-	info "容器未在预期时间内 healthy（当前：$status）"
+	printf '    %s容器未在预期时间内健康（当前：%s）%s\n' "$YEL" "$status" "$RST"
 	return 1
 }
 
-cmd="${1:-}"
+cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
 up)
 	require_docker; require_env
-	[ "${1:-}" = "--build" ] && docker compose build
+	if [ "${1:-}" = "--build" ]; then
+		hdr "本地构建镜像"
+		docker compose build
+	fi
+	hdr "启动服务"
 	docker compose up -d
-	wait_healthy && info "就绪：http://<主机>:$(env_value PROXY_PORT 3080)/"
+	hdr "等待健康检查"
+	if wait_healthy; then
+		bind="$(env_value DSH_BIND 127.0.0.1)"
+		port="$(env_value PROXY_PORT 3080)"
+		ok "服务已就绪"
+		if [ "$bind" = "0.0.0.0" ]; then
+			info "访问地址：http://<服务器IP>:${port}/"
+		else
+			info "只绑定了 127.0.0.1，请在宿主机反代到 127.0.0.1:${port}"
+		fi
+	fi
 	;;
+
 down)
 	require_docker
+	hdr "停止服务（数据保留）"
 	docker compose down
+	ok "已停止"
 	;;
+
 restart)
 	require_docker
+	hdr "重启服务"
 	docker compose restart
-	wait_healthy && info "已重启"
+	wait_healthy && ok "已重启并健康"
 	;;
+
 logs)
 	require_docker
 	docker compose logs -f --tail 100
 	;;
+
 status)
 	require_docker
+	hdr "服务状态"
 	state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
 	health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo -)"
-	printf '状态：%s（%s）\n' "$state" "$health"
-	printf '入口：http://<主机>:%s/  → 302 到 /auth/login\n' "$(env_value PROXY_PORT 3080)"
-	printf '登录用户：%s\n' "$(env_value DSH_AUTH_USER admin)"
+	restarts="$(docker inspect --format '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo -)"
+	info "状态：${state}    健康：${health}    重启次数：${restarts}"
+	info "端口：$(env_value DSH_BIND 127.0.0.1):$(env_value PROXY_PORT 3080) -> 容器 3080"
+	info "登录用户：$(env_value DSH_AUTH_USER admin)"
+	info "入口：http://<服务器IP>:$(env_value PROXY_PORT 3080)/"
 	;;
+
 url)
-	require_docker
-	docker exec "$CONTAINER" cat /home/node/.dsh/web-launch-url.txt
+	require_docker; require_running
+	hdr "一次性 launch URL（排障用）"
+	docker exec "$CONTAINER" cat /home/node/.dsh/web-launch-url.txt 2>/dev/null || info "（暂无）"
 	;;
+
 shell)
-	require_docker
+	require_docker; require_running
+	hdr "进入容器（输入 exit 退出）"
 	docker exec -it "$CONTAINER" bash
 	;;
-password)
-	require_docker
+
+pw | passwd | password)
+	require_docker; require_running
 	user="${1:-$(env_value DSH_AUTH_USER admin)}"
-	docker exec -it -e DSH_HOME=/home/node/.dsh "$CONTAINER" \
-		node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js user passwd "$user"
+	hdr "修改登录密码"
+	info "用户：${B}${user}${RST}"
+	info "规则：至少 14 位，且包含大写 / 小写 / 数字 / 特殊符号"
+	ask_new_password
+	if printf '%s\n' "$PASSWORD" \
+		| docker exec -i -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" \
+			user passwd "$user" --password-stdin; then
+		ok "密码已更新"
+	else
+		die "修改失败（用户可能不存在，或密码不合规）"
+	fi
 	;;
+
+user)
+	require_docker; require_running
+	sub="${1:-list}"; shift || true
+	case "$sub" in
+	list | ls)
+		hdr "登录用户列表"
+		docker exec -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" user list
+		;;
+	add)
+		[ -n "${1:-}" ] || die "用法：./dshm user add <用户名> [--admin]"
+		name="$1"; shift || true
+		hdr "新建用户：${name}"
+		extra=""
+		for a in "$@"; do
+			case "$a" in --admin | --disabled) extra="$extra $a" ;; esac
+		done
+		ask_new_password
+		# shellcheck disable=SC2086
+		if printf '%s\n' "$PASSWORD" \
+			| docker exec -i -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" \
+				user add "$name" --password-stdin $extra; then
+			ok "用户 ${name} 已创建"
+		else
+			die "创建失败（用户名或密码不符合要求）"
+		fi
+		;;
+	disable)
+		[ -n "${1:-}" ] || die "用法：./dshm user disable <用户名>"
+		hdr "禁用用户：${1}"
+		docker exec -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" user disable "$1"
+		ok "已禁用（并吊销其会话）"
+		;;
+	*)
+		die "未知子命令：user $sub（支持 list / add / disable）"
+		;;
+	esac
+	;;
+
+totp)
+	require_docker; require_running
+	action="${1:-}"; shift || true
+	case "$action" in enable | disable) ;; *) die "用法：./dshm totp <enable|disable> [用户名]" ;; esac
+	user="${1:-$(env_value DSH_AUTH_USER admin)}"
+	hdr "两步验证 ${action}：用户 ${user}"
+	docker exec -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" user totp "$action" "$user"
+	;;
+
 update)
 	require_docker; require_env
 	target="${1:-}"
 	if [ -z "$target" ]; then
-		command -v npm >/dev/null 2>&1 || die "没有 npm，无法自动解析版本；请显式指定：./dshm update <版本>"
+		command -v npm >/dev/null 2>&1 || die "本机没有 npm，无法自动取版本；请显式指定：./dshm update <版本>"
 		target="$(npm view @deepseek-ai/dsh dist-tags.latest 2>/dev/null | tr -d '[:space:]')"
 		[ -n "$target" ] || die "无法解析最新版本，请显式指定"
 	fi
-	info "DSH_VERSION $(env_value DSH_VERSION) -> $target"
+	hdr "升级 dsh 到 ${target}"
+	info "当前版本：$(env_value DSH_VERSION) -> ${target}"
 	set_env DSH_VERSION "$target"
 	docker compose build
 	docker compose up -d
-	wait_healthy && info "已更新到 dsh $target"
+	wait_healthy && ok "已升级到 ${target}"
 	;;
+
 version)
-	require_docker
+	require_docker; require_running
+	hdr "容器内 dsh 版本"
 	docker exec "$CONTAINER" dsh --version
 	;;
-*)
-	cat >&2 <<'USAGE'
-./dshm — 管理 dsh compose 栈
 
-  up [--build]        启动（--build 先本地构建）
-  down                停止（保留数据卷）
-  restart             重启
-  logs                跟随日志
-  status              健康 / 端口 / 登录用户
-  url                 打印一次性 launch URL（排障）
-  shell               进入容器
-  password [用户名]    交互式修改登录密码
-  update [版本]        更新 dsh 版本并重建
-  version             显示容器内 dsh 版本
-USAGE
-	exit 1
+help | -h | --help | "")
+	cat <<EOF
+
+${B}dshm${RST} — dsh 部署管理命令（在当前目录运行）
+
+  ${B}./dshm up${RST} [--build]      启动（--build 先本地构建）
+  ${B}./dshm down${RST}              停止（数据保留）
+  ${B}./dshm restart${RST}           重启
+  ${B}./dshm logs${RST}              看日志
+  ${B}./dshm status${RST}            健康 / 端口 / 登录用户
+  ${B}./dshm pw${RST} [用户名]        改登录密码（默认 $(env_value DSH_AUTH_USER admin)）
+  ${B}./dshm user list${RST}         列出登录用户
+  ${B}./dshm user add 名字${RST} [--admin]
+  ${B}./dshm user disable 名字${RST}
+  ${B}./dshm totp enable${RST} [用户名]    开启两步验证
+  ${B}./dshm totp disable${RST} [用户名]
+  ${B}./dshm update${RST} [版本]      升级 dsh（重建镜像）
+  ${B}./dshm version${RST}           显示容器内 dsh 版本
+  ${B}./dshm shell${RST}             进容器
+
+${DIM}改运行配置：编辑 .env 后执行 ./dshm restart${RST}
+
+EOF
+	;;
+
+*)
+	die "未知命令：${cmd}（运行 ./dshm 查看帮助）"
 	;;
 esac

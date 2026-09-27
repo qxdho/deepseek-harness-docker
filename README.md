@@ -100,14 +100,18 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 ## 常用命令
 
 ```bash
-./install.sh        # 部署
-./dshm logs       # 看日志
-./dshm status     # 健康 / 端口 / 登录用户
-./dshm restart    # 重启
-./dshm down       # 停止（数据保留）
-./dshm password   # 改登录密码
-./dshm update     # 升级 dsh
-./dshm shell      # 进容器
+./install.sh          # 一条命令部署
+./dshm                # 查看全部命令（帮助）
+./dshm status         # 健康 / 端口 / 登录用户
+./dshm logs           # 看日志
+./dshm restart        # 重启
+./dshm down           # 停止（数据保留）
+./dshm pw             # 改登录密码（输入有星号）
+./dshm user list      # 列出登录用户
+./dshm user add 张三   # 新建用户
+./dshm totp enable    # 开启两步验证
+./dshm update         # 升级 dsh
+./dshm shell          # 进容器
 ```
 
 ---

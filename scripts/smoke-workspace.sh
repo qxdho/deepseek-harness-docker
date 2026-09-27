@@ -41,7 +41,10 @@ wait_exit() {
 	echo "still-running"
 }
 
-echo "== A. /workspace 不可写时必须明确报错退出（而不是静默带病启动）=="
+echo "== A. /workspace 不可写时降级启动（默认行为，不能无限重启）=="
+# 默认不是 exit 1：compose 用的是 restart: unless-stopped，非 0 退出会被无限重拉，
+# 用户看到的是「docker 一直重启、网页打不开」，比带病运行更糟。默认应降级到
+# $DSH_HOME/workspace 继续启动，UI 可用 + 日志里一条醒目横幅。
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
 	--tmpfs /workspace:rw,mode=0755 \
@@ -49,11 +52,26 @@ docker run -d --name "$NAME" \
 	-e DSH_AUTH_PASSWORD="$LOGIN_PASS" \
 	"$IMAGE" >/dev/null
 
-code="$(wait_exit)"
-if [ "$code" = "1" ]; then
-	ok "容器以退出码 1 失败（快速失败生效）"
+# 判定「没有退出」：给它足够时间跑完启动流程，仍在跑或已 healthy 都算降级成功。
+degraded_ok=0
+status=starting
+for i in $(seq 1 60); do
+	if ! docker inspect --format '{{.State.Running}}' "$NAME" 2>/dev/null | grep -q true; then
+		status="exited($(docker inspect --format '{{.State.ExitCode}}' "$NAME" 2>/dev/null))"
+		break
+	fi
+	status="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
+	[ "$status" = "healthy" ] && {
+		degraded_ok=1
+		break
+	}
+	sleep 2
+done
+if [ "$degraded_ok" = "1" ]; then
+	ok "容器未退出，已降级并 healthy"
 else
-	bad "期望退出码 1，实际 $code"
+	bad "容器没有降级成功（状态：$status）"
+	docker logs "$NAME" 2>&1 | tail -20 || true
 fi
 
 logs="$(docker logs "$NAME" 2>&1 || true)"
@@ -69,10 +87,37 @@ case "$logs" in
 *DSH_WORKSPACE*) ok "日志含「换个目录」替代方案" ;;
 *) bad "日志缺少替代方案" ;;
 esac
-# 关键：不能等到 agent 干活时才失败。报错必须发生在启动早期。
+# 降级必须把「工作区换到哪」讲清楚，否则用户会以为文件写到了宿主目录
 case "$logs" in
-*"启动 dsh"*) bad "报错发生在启动之后，说明检查位置太晚" ;;
-*) ok "报错发生在启动 dsh 之前" ;;
+*"降级"*) ok "日志有降级横幅" ;;
+*) bad "日志缺少降级横幅" ;;
+esac
+# 降级目录建在 $DSH_HOME 下，随 dsh_home 卷持久化
+if docker exec "$NAME" test -d /home/node/.dsh/workspace 2>/dev/null; then
+	ok "降级目录 \$DSH_HOME/workspace 已创建"
+else
+	bad "降级目录没有创建"
+fi
+
+echo "== A2. DSH_WORKSPACE_STRICT=1 恢复 fail-fast =="
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+docker run -d --name "$NAME" \
+	--tmpfs /workspace:rw,mode=0755 \
+	-e DSH_WORKSPACE_STRICT=1 \
+	-e DSH_AUTH_USER=admin \
+	-e DSH_AUTH_PASSWORD="$LOGIN_PASS" \
+	"$IMAGE" >/dev/null
+
+code="$(wait_exit)"
+if [ "$code" = "1" ]; then
+	ok "严格模式下以退出码 1 失败"
+else
+	bad "严格模式期望退出码 1，实际 $code"
+fi
+logs="$(docker logs "$NAME" 2>&1 || true)"
+case "$logs" in
+*"启动 dsh"*) bad "严格模式的报错发生在启动之后，检查位置太晚" ;;
+*) ok "严格模式在启动 dsh 之前就退出" ;;
 esac
 
 echo "== B. /workspace 可写时正常启动并真的能写 =="

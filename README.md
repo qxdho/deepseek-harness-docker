@@ -14,14 +14,21 @@
 
 ## 快速开始
 
+**一条命令：**
+
 ```bash
 git clone https://github.com/qxdho/deepseek-harness-docker.git
 cd deepseek-harness-docker
+chmod +x install.sh
+./install.sh          # 只问你一次密码，其余全自动
+```
+
+**或者手动三步：**
+
+```bash
 cp .env.example .env
-# 编辑 .env：至少把 DSH_AUTH_PASSWORD 改成一个强密码
-docker compose pull
-docker compose up -d
-# 或使用封装命令： ./dshctl up
+# 编辑 .env：把 DSH_AUTH_PASSWORD 改成一个强密码
+docker compose up -d --build
 ```
 
 打开 `http://<服务器IP>:3080/`，会先看到登录页。默认用户名 `admin`，密码是你在 `.env` 里设的。

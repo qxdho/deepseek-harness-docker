@@ -114,6 +114,37 @@ The chosen approach, matching the rootless-container consensus
    (real container; uses `--tmpfs` so the fixture is root-owned even when the tests themselves run as
    root, which `chmod` cannot reproduce).
 
+### 5.2 One container UID, one source of truth
+
+A first fix for §5.1 judged writability with *the deployer's* write test. That is wrong whenever the
+deployer is not the container user — the common case being root (`sudo ./install.sh`, a root VPS, 1Panel):
+`./workspace` is then `root:root 0755`, root can write it, uid 1000 cannot. The preflight passed, the
+container's own check then failed, and `restart: unless-stopped` turned that into a restart loop.
+
+The correction is that every decision must be made against **the UID the container will actually run as**,
+and that value must have exactly one source. Two temptations both reproduce the original bug in a new
+shape, and both were rejected:
+
+- **A preflight-only override.** A `DSH_UID` that the preflight reads but `docker-compose.yml` ignores
+  makes the check reason about a UID the container will never use — a fresh false pass/fail. So
+  `DSH_UID`/`DSH_GID` are wired into `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` at the same time, and
+  read from `.env` first (like `DSH_WORKSPACE`) because `sudo ./install.sh` does not export `.env` into
+  the shell.
+- **Moving the container user.** Making the entrypoint run as root to `chown` and then drop privileges via
+  `setpriv` (available in the image) would silently defeat `DSH_PERMISSION_MODE=workspace-write`, since
+  Landlock does not confine root. Rejected for the same reason as in §5.1.
+
+Non-default UIDs have a second consequence the workspace check alone cannot see: the `dsh-home` named
+volume is seeded from the image directory, so it is owned by 1000. With no root inside the container,
+nobody can fix it and the agent cannot write its own config directory (sessions, credentials, login
+users). `check_home_volume()` therefore repairs it from the host with a one-shot **disposable root
+container** — root in a throwaway container is not the same trade as root in the long-lived one, and it
+keeps the running container non-root.
+
+A `DSH_HOME_VOLUME` override was deliberately **not** introduced: the volume name is fixed in
+`docker-compose.yml`, so a preflight-readable override would be the same mismatch again. Hard-coding
+`dsh-home` in both places is the invariant worth protecting.
+
 ## 6. Verification status
 
 Verified locally (no Docker on this machine, so image build is delegated to CI):
@@ -126,11 +157,12 @@ Verified locally (no Docker on this machine, so image build is delegated to CI):
   - following redirects → `200` and the page contains `__DSH_BOOT__`;
   - a second `GET /` with the cookie → `200`.
 - Verified the Host-rewrite cookie argument (see §3).
-- `scripts/test-preflight.sh` (offline, no Docker) — 25 assertions covering the workspace
+- `scripts/test-preflight.sh` (offline, no Docker) — 31 assertions covering the workspace
   ownership checks: writable, default value, absolute / `~` / quoted paths, non-writable rejection
   with actionable output, missing `.env`, the "deployer can write but the container UID cannot" false
-  pass, and both container-side `entrypoint.sh` paths (strict exit and fallback banner). Passes on a
-  machine with no Docker.
+  pass, `DSH_UID` resolution order (`.env` over shell environment, `1000` as fallback), the `dsh-home`
+  volume check staying offline when the UID is the default, and both container-side `entrypoint.sh`
+  paths (strict exit and fallback banner). Passes on a machine with no Docker.
 - `proxy/test-inject.js` (offline, `node`, needs `npm install`) — 10 assertions on the HTML
   injection point, including the `<header>` / `<headless-…>` false-positive that previously sent
   the injected script into the document body.

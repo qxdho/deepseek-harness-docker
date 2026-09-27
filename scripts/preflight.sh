@@ -55,10 +55,29 @@ absolute_workspace_path() {
 	esac
 }
 
-# 容器里的 agent 以哪个 uid/gid 运行。镜像是 USER node，即 1000:1000；
-# 用 DSH_UID/DSH_GID 覆盖以配合 `docker compose` 里的 user:。
-container_uid() { printf '%s' "${DSH_UID:-1000}"; }
-container_gid() { printf '%s' "${DSH_GID:-1000}"; }
+# 容器里的 agent 以哪个 uid/gid 运行。
+#
+# 默认 1000:1000（镜像 `USER node`）。可用 DSH_UID/DSH_GID 覆盖，docker-compose.yml
+# 里有对应的 `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` —— 这两处必须成对存在，
+# 否则就是「预检按 A 判断、容器按 B 运行」的假通过（这个 bug 曾经出现过）。
+#
+# 取值优先读 .env，与 DSH_WORKSPACE 一致：项目所有配置都在 .env 里，而
+# `sudo ./install.sh` 之类不会把 .env 导进 shell 环境。shell 环境变量作为回退，
+# 便于测试直接覆盖。
+#
+# 第一个参数是要读的 .env 路径；省略则用 $DSH_ENV_FILE 或当前目录的 .env。
+# 调用方**必须**显式传入自己项目的 .env —— 靠全局变量传会漏（函数被单独调用时
+# 就会去读当前工作目录的 .env，静默拿到错误的 uid）。
+container_uid() {
+	local ef="${1:-${DSH_ENV_FILE:-.env}}" v
+	v="$(env_file_value "$ef" DSH_UID)"
+	printf '%s' "${v:-${DSH_UID:-1000}}"
+}
+container_gid() {
+	local ef="${1:-${DSH_ENV_FILE:-.env}}" v
+	v="$(env_file_value "$ef" DSH_GID)"
+	printf '%s' "${v:-${DSH_GID:-1000}}"
+}
 
 # 目录对指定 uid:gid 是否有写权限 —— 只看权限位，与「当前是谁」无关。
 #
@@ -88,9 +107,10 @@ perm_for_uid() {
 
 # 容器 uid 能否写这个目录。若当前用户恰好就是该 uid，用真实写入验证（能识别 ACL）；
 # 否则用权限位推断 —— 当前用户不是容器用户时，他的写测试结论没有意义。
+# 参数：<目录> <项目 .env 路径>
 container_can_write() {
-	local dir="$1" cu cg
-	cu="$(container_uid)"; cg="$(container_gid)"
+	local dir="$1" ef="$2" cu cg
+	cu="$(container_uid "$ef")"; cg="$(container_gid "$ef")"
 	if [ "$(id -u)" = "$cu" ]; then
 		( : >"${dir}/.dsh-write-test" ) 2>/dev/null
 		return $?
@@ -98,15 +118,11 @@ container_can_write() {
 	perm_for_uid "$dir" "$cu" "$cg"
 }
 
-check_workspace() {
-	local project_dir="$1" allow_elevate="${2:-auto}" auto_fix="${3:-1}"
+# 工作区（bind mount）检查：返回 0 = 已就绪或已修复，1 = 有问题
+check_workspace_dir() {
+	local project_dir="$1" allow_elevate="$2" auto_fix="$3"
 	local env_file="$project_dir/.env" raw dir uid gid mode ver cu cg as_admin fixok
 	local elevate="" fixcmd
-
-	if [ ! -f "$env_file" ]; then
-		printf '%s\n' "缺少 ${env_file}（先运行 ./install.sh）" >&2
-		return 2
-	fi
 
 	raw="$(env_file_value "$env_file" DSH_WORKSPACE)"
 	dir="$(absolute_workspace_path "$project_dir" "$raw")"
@@ -122,14 +138,14 @@ check_workspace() {
 		return 1
 	fi
 
-	cu="$(container_uid)"; cg="$(container_gid)"
+	cu="$(container_uid "$env_file")"; cg="$(container_gid "$env_file")"
 
 	# 2) 容器里的 agent（uid ${cu}）能不能写？这里的判定必须针对容器 uid，
 	#    而不是「当前用户能不能写」：root 跑 ./install.sh 时目录是 root:root
 	#    0755，root 写得进，容器里的 ${cu} 却写不进 —— 这正是「预检通过、容器
 	#    却 crash-loop」的根因。当前用户恰好就是容器 uid 时才用真实写入验证
 	#    （能识别 ACL），否则只看权限位。
-	if container_can_write "$dir"; then
+	if container_can_write "$dir" "$env_file"; then
 		rm -f "${dir}/.dsh-write-test" 2>/dev/null || true
 		return 0
 	fi
@@ -167,7 +183,7 @@ check_workspace() {
 		else
 			if "$elevate" chown -R "${cu}:${cg}" "$dir"; then fixok=1; fi
 		fi
-		if [ "$fixok" = "1" ] && container_can_write "$dir"; then
+		if [ "$fixok" = "1" ] && container_can_write "$dir" "$env_file"; then
 			rm -f "${dir}/.dsh-write-test" 2>/dev/null || true
 			return 0
 		fi
@@ -197,6 +213,127 @@ check_workspace() {
 
 EOF
 	return 1
+}
+
+# ── dsh-home 命名卷 ─────────────────────────────────────────────────────────
+#
+# 容器里 $DSH_HOME(/home/node/.dsh) 的属主来自镜像的 1000:1000。命名卷首次使用时
+# 由 Docker 按镜像目录**播种**，所以默认也是 1000 —— DSH_UID 保持 1000 时一切都对。
+#
+# 一旦 DSH_UID 不是 1000（compose 的 user: 生效），容器里就没有任何进程是 root，
+# 没人能改这个卷的属主，agent 会写不进自己的配置目录（会话、凭据、登录用户），
+# 又是同一类故障换了个地方。所以要在宿主侧、启动前用一次性 root 容器把它改对。
+#
+# 这与工作区不同：工作区是 bind mount，在宿主上 chown 即可；命名卷只能通过
+# docker 操作，因此下面的路径需要 docker 可用。
+
+# 卷是否已存在（不存在就不用管：首次 up 时按 DSH_UID 初始化）
+volume_exists() { docker volume inspect "$1" >/dev/null 2>&1; }
+
+# 打印「卷内目录当前属主 uid」。卷不存在或读不到时输出空。
+volume_owner_uid() {
+	local vol="$1" target="$2"
+	docker run --rm --network none --entrypoint stat \
+		-v "${vol}:/dsh-home" \
+		"${DSH_PREFLIGHT_IMAGE:-ghcr.io/qxdho/deepseek-harness-docker:latest}" \
+		-c '%u' "$target" 2>/dev/null
+}
+
+# 用一次性 root 容器把卷内目录 chown 给容器 uid
+repair_volume_owner() {
+	local vol="$1" target="$2" cu="$3" cg="$4"
+	docker run --rm --network none --user 0:0 --entrypoint chown \
+		-v "${vol}:/dsh-home" \
+		"${DSH_PREFLIGHT_IMAGE:-ghcr.io/qxdho/deepseek-harness-docker:latest}" \
+		-R "${cu}:${cg}" "$target" >/dev/null 2>&1
+}
+
+# 返回 0 = 无需处理或已处理；1 = 处理不了（已打印指引）
+check_home_volume() {
+	local project_dir="$1" auto_fix="$2"
+	local env_file="$project_dir/.env" cu cg vol target owner img
+
+	# 显式把项目 .env 传给 uid 解析 —— 不要依赖全局变量：本函数会被单独调用
+	# （测试、排障），那时全局变量可能是空的，解析会静默回退到 1000。
+	cu="$(container_uid "$env_file")"; cg="$(container_gid "$env_file")"
+	# 默认 uid 时镜像播种的属主就是对的，不必碰 docker。
+	[ "$cu" = "1000" ] && [ "$cg" = "1000" ] && return 0
+
+	# 卷名写死，与 docker-compose.yml 的 `dsh-home:` 保持一致。
+	# 刻意不做成可配置项 —— 若这里能改而 compose 不能，就又是「预检按 A 检查、
+	# 实际用 B」的假通过（这个 bug 已经踩过一次，详见 container_uid 的注释）。
+	vol="dsh-home"
+	# 容器内的挂载点固定是 /home/node/.dsh，对应卷内的路径就是 .dsh
+	# （镜像里该卷挂载点下的顶层内容就是 .dsh 这个目录）。
+	target="/dsh-home/.dsh"
+
+	command -v docker >/dev/null 2>&1 || {
+		printf '%s\n' "提示：DSH_UID=${cu}，但本机没有 docker，无法检查命名卷 ${vol} 的属主。" >&2
+		return 0
+	}
+
+	# 卷不存在 → 首次 up 时会按 compose 的新 user: 初始化，没问题。
+	volume_exists "$vol" || return 0
+
+	img="${DSH_IMAGE:-ghcr.io/qxdho/deepseek-harness-docker:latest}"
+	DSH_PREFLIGHT_IMAGE="$img"
+	if ! docker image inspect "$img" >/dev/null 2>&1; then
+		printf '%s\n' "提示：DSH_UID=${cu}，但镜像 ${img} 还不存在，无法检查命名卷 ${vol} 的属主。" >&2
+		printf '%s\n' "      先 ./dshm up 拉起一次，再执行一次 ./dshm up 让预检修正卷属主。" >&2
+		return 0
+	fi
+
+	owner="$(volume_owner_uid "$vol" "$target")"
+	[ "$owner" = "$cu" ] && return 0
+
+	if [ "$auto_fix" = "1" ]; then
+		printf '    命名卷 %s 属主为 %s，容器内 uid 是 %s，尝试修正…\n' \
+			"$vol" "${owner:-未知}" "$cu"
+		if repair_volume_owner "$vol" "$target" "$cu" "$cg" &&
+			[ "$(volume_owner_uid "$vol" "$target")" = "$cu" ]; then
+			return 0
+		fi
+		printf '    卷属主修正失败。\n'
+	fi
+
+	cat >&2 <<EOF
+
+错误：命名卷 ${vol} 的属主不是容器内的 uid ${cu}
+
+  卷内目录：${target}（容器内即 \$DSH_HOME）
+  现状属主：${owner:-未知}
+  影响：agent 写不进自己的配置目录（会话 / 凭据 / 登录用户）。
+  原因：命名卷首次使用时由 Docker 按镜像目录播种，镜像里是 1000:1000。
+        DSH_UID 改成 ${cu} 后，容器内没有 root，没人能改这个卷。
+
+  修复（用一次性 root 容器改属主）：
+
+    docker run --rm --user 0:0 --entrypoint chown \\
+      -v ${vol}:/dsh-home ${img} -R ${cu}:${cg} ${target}
+
+  或者把 DSH_UID/DSH_GID 去掉、用 `--user` 手动指定时一并处理卷属主。
+
+EOF
+	return 1
+}
+
+# 启动前总检查。返回 0 = 可以启动，1 = 有问题（已打印指引），2 = 缺 .env
+check_workspace() {
+	local project_dir="$1" allow_elevate="${2:-auto}" auto_fix="${3:-1}"
+	local env_file="$project_dir/.env"
+
+	if [ ! -f "$env_file" ]; then
+		printf '%s\n' "缺少 ${env_file}（先运行 ./install.sh）" >&2
+		return 2
+	fi
+
+	# 工作区不可写就没必要再查卷 —— 那是更根本的问题，先解决它。
+	check_workspace_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
+
+	# 工作区 OK，再管容器自己的配置卷（只在 DSH_UID 非 1000 时才需要）。
+	check_home_volume "$project_dir" "$auto_fix" || return 1
+
+	return 0
 }
 
 # 供直接运行（排障 / CI 用）：

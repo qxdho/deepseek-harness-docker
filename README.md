@@ -78,7 +78,8 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 | `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号用（**≥14 位且含大小写/数字/符号**）；之后改密码用 `./dshm password` |
 | `PROXY_PORT` | `3080` | 宿主机端口 |
 | `DSH_BIND` | `127.0.0.1` | `127.0.0.1`=只有宿主机能访问（配反代）；`0.0.0.0`=局域网可直连 |
-| `DSH_WORKSPACE` | `./workspace` | agent 的工作目录（**属主必须是 uid 1000**，见「工作区权限」） |
+| `DSH_WORKSPACE` | `./workspace` | agent 的工作目录（**属主必须是容器内的 uid**，见「工作区权限」） |
+| `DSH_UID` / `DSH_GID` | `1000` / `1000` | 容器内以哪个 uid/gid 运行。宿主用户不是 1000 时改成 `id -u` / `id -g` |
 | `DSH_TOTP` | `optional` | 两步验证：`off` / `optional` / `required` |
 | `DSH_COOKIE_SECURE` | `0` | **HTTP 必须 0**；上 HTTPS 建议改 `1` |
 | `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名（可选，不影响功能） |
@@ -184,24 +185,36 @@ docker compose down && docker compose up -d
 > **注意**：改了 `DSH_WORKSPACE` 必须 `down` + `up`，不能只 `restart`。
 > 环境变量只在创建容器时生效，`./dshm restart` 不会重建容器。
 
-**宿主机用户不是 uid 1000？**（常见于 macOS Docker Desktop、群晖等）用 `--user`
-直接以你的 uid 运行容器。注意此时挂载的目录要归你所有：
+**宿主机用户不是 uid 1000？**（常见于 macOS Docker Desktop、群晖等）在 `.env` 里
+写上你自己的 uid/gid 即可，不需要 `sudo chown`：
 
 ```bash
-docker run --user "$(id -u):$(id -g)" \
-  -e HOME=/home/node -e DSH_HOME=/home/node/.dsh \
-  -v "$HOME/dsh-home:/home/node/.dsh" \
-  -v "$HOME/dsh-workspace:/workspace" \
-  -p 127.0.0.1:3080:3080 \
-  --env-file .env \
-  ghcr.io/qxdho/deepseek-harness-docker:latest
+# .env
+DSH_UID=1001          # 填 id -u 的结果
+DSH_GID=1001          # 填 id -g 的结果
 ```
 
-`docker compose` 也可以，在 `docker-compose.yml` 的 `dsh` 服务下加一行
-`user: "${MY_UID}:${MY_GID}"`，并在 `.env` 里设 `MY_UID=$(id -u)`、`MY_GID=$(id -g)`。
+`docker-compose.yml` 里已经有对应的 `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"`，
+容器就会以你的身份运行，bind mount 的属主天然对得上。此时宿主机上的工作区目录
+直接归你所有，agent 写的文件你也能直接读写。
 
-也可以改用命名卷（Docker 会按镜像内属主自动初始化，无需 chown），代价是
-宿主上不能直接看到文件。
+> 改 `DSH_UID` 后必须 `down` + `up`（`restart` 不重建容器，环境变量不会重新生效）。
+
+**它还会自动处理 `dsh-home` 卷。** 那个命名卷在首次使用时由 Docker 按镜像目录
+播种，属主是 1000；`DSH_UID` 改成别的值时容器里没有 root，没人能改它，agent 会
+写不进自己的配置目录（会话 / 凭据 / 登录用户）。所以 `./dshm up` 的预检会用一次性
+root 容器把卷属主改对：
+
+```
+docker run --rm --user 0:0 --entrypoint chown \
+  -v dsh-home:/dsh-home <镜像> -R <你的uid>:<你的gid> /dsh-home/.dsh
+```
+
+这一步是幂等的，属主已经正确时不会做任何事。若本机没有 docker 或镜像还没拉下来，
+预检会打印提示但不阻断，下次 `./dshm up` 再修正。
+
+不想让容器以你的身份运行的话，也可以沿用命名卷的默认行为（属主 1000，无需任何
+配置），代价是宿主上不能直接看到 agent 写的文件。
 
 ---
 

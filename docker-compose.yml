@@ -11,6 +11,12 @@ services:
         DEV_TOOLS: ${DEV_TOOLS:-none}
     container_name: qxdho-dsh
     restart: unless-stopped
+    # 容器内以哪个 uid/gid 运行。默认 1000:1000（镜像的 USER node）。
+    # 宿主用户不是 1000 时（NAS、部分桌面发行版等）在 .env 里设 DSH_UID/DSH_GID
+    # 为你的 uid/gid，这样 bind mount 的属主天然对得上，不用 chown 成 1000。
+    # 注意：scripts/preflight.sh 会按同一组值检查工作区与 dsh-home 卷的属主，
+    # 两边必须一致 —— 改这里的同时预检就已随之调整，无需额外操作。
+    user: "${DSH_UID:-1000}:${DSH_GID:-1000}"
     # .env 里的变量都会传进容器，所以可以直接在 .env 里加
     # DEEPSEEK_API_KEY=sk-... 来配置模型（也可以登录后在网页设置里配）
     env_file: .env

@@ -144,22 +144,39 @@ docker compose down && docker compose up -d
 > Changing `DSH_WORKSPACE` requires `down` + `up`, not `restart` — environment variables are
 > only read when the container is created.
 
-**Host user is not UID 1000?** (common on macOS Docker Desktop and NAS boxes) run the
-container as your own user instead:
+**Host user is not UID 1000?** (common on macOS Docker Desktop and NAS boxes) just put your
+own UID/GID in `.env` — no `sudo chown` needed:
 
 ```bash
-docker run --user "$(id -u):$(id -g)" \
-  -e HOME=/home/node -e DSH_HOME=/home/node/.dsh \
-  -v "$HOME/dsh-home:/home/node/.dsh" \
-  -v "$HOME/dsh-workspace:/workspace" \
-  -p 127.0.0.1:3080:3080 \
-  --env-file .env \
-  ghcr.io/qxdho/deepseek-harness-docker:latest
+# .env
+DSH_UID=1001          # the output of `id -u`
+DSH_GID=1001          # the output of `id -g`
 ```
 
-With `docker compose`, add `user: "${MY_UID}:${MY_GID}"` to the `dsh` service and set
-`MY_UID=$(id -u)` / `MY_GID=$(id -g)` in `.env`. A named volume is also a no-chown option —
-Docker seeds it with the image's ownership — at the cost of not seeing files on the host.
+`docker-compose.yml` already maps this with `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"`, so
+the container runs as you and the bind mount matches your ownership. Files the agent writes
+are directly readable and writable by you on the host.
+
+> After changing `DSH_UID`, run `down` + `up` (`restart` does not recreate the container, so
+> the environment variable is not re-read).
+
+**The `dsh-home` volume is handled for you.** That named volume is seeded by Docker from the
+image directory on first use, so it is owned by 1000; with `DSH_UID` set to anything else there
+is no root inside the container to change it, and the agent cannot write its own config
+directory (sessions, credentials, login users). So the `./dshm up` preflight repairs it with a
+one-shot root container:
+
+```
+docker run --rm --user 0:0 --entrypoint chown \
+  -v dsh-home:/dsh-home <image> -R <your-uid>:<your-gid> /dsh-home/.dsh
+```
+
+That step is idempotent — when the owner is already correct it does nothing. If Docker is not
+available or the image has not been pulled yet, the preflight prints a note and continues; the
+next `./dshm up` will fix it.
+
+If you would rather not run the container as yourself, you can keep the default (the volume is
+owned by 1000, zero configuration) at the cost of not seeing the agent's files on the host.
 
 ## Update
 

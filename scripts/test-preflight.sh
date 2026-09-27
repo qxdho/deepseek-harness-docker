@@ -24,10 +24,23 @@ have_sudo() { command -v sudo >/dev/null 2>&1; }
 # shellcheck source=scripts/preflight.sh
 . "$PREFLIGHT"
 
-# 判定针对的是「容器内 uid」，而测试机的当前用户是谁不确定。凡预期成功的用例，
-# 都把容器 uid 设成当前用户（等价于部署者本人就是容器 uid）；「两者不一致」的
-# 场景由第 6b 节专门验证 —— 那正是 root 部署出问题的那条路径。
-export DSH_UID="$(id -u)" DSH_GID="$(id -g)"
+# 判定针对的是「容器内 uid」。测试机的当前用户是谁不确定，所以凡预期成功的用例，
+# 都用 write_env 把 DSH_UID/DSH_GID 写成当前用户 —— 等价于「部署者本人就是容器
+# uid」，此时目录属主天然对得上。「两者不一致」的场景由第 6b 节专门验证，那正是
+# root 部署出问题的那条路径。
+#
+# 注意 DSH_UID 的取值优先来自 .env（与 DSH_WORKSPACE 一致），所以这里写进 .env
+# 而不是 export。不再 export DSH_UID，以便第 6c 节能验证「shell 环境不会意外生效」。
+write_env() {
+	local project="$1" ws="$2" uid="$3" gid="$4"
+	{
+		[ -n "$ws" ] && printf 'DSH_WORKSPACE=%s\n' "$ws"
+		printf 'DSH_UID=%s\nDSH_GID=%s\n' "$uid" "$gid"
+	} >"${project}/.env"
+}
+
+TEST_UID="$(id -u)"
+TEST_GID="$(id -g)"
 
 sandbox="$(mktemp -d)"
 cleanup() {
@@ -40,7 +53,7 @@ trap cleanup EXIT
 echo "== 1. 工作区存在且可写 =="
 project="$sandbox/ok"
 mkdir -p "$project/workspace"
-printf 'DSH_WORKSPACE=./workspace\n' >"$project/.env"
+write_env "$project" ./workspace "$TEST_UID" "$TEST_GID"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "可写目录返回 0"
 else
@@ -55,7 +68,7 @@ fi
 echo "== 2. 默认值：.env 未设 DSH_WORKSPACE =="
 project="$sandbox/default"
 mkdir -p "$project"
-: >"$project/.env"
+write_env "$project" "" "$TEST_UID" "$TEST_GID"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "默认目录 ./workspace 自动创建并通过"
 else
@@ -66,7 +79,7 @@ fi
 echo "== 3. 绝对路径 + ~ 展开 =="
 project="$sandbox/abs"
 mkdir -p "$project"
-printf 'DSH_WORKSPACE=%s\n' "$sandbox/abs-target" >"$project/.env"
+write_env "$project" "$sandbox/abs-target" "$TEST_UID" "$TEST_GID"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "绝对路径可用"
 else
@@ -84,7 +97,7 @@ echo "== 4. 不可写目录必须被拦下 =="
 project="$sandbox/ro"
 mkdir -p "$project/workspace"
 chmod 000 "$project/workspace"
-printf 'DSH_WORKSPACE=./workspace\n' >"$project/.env"
+write_env "$project" ./workspace "$TEST_UID" "$TEST_GID"
 set +e
 out="$(check_workspace "$project" never 0 2>&1)"
 rc=$?
@@ -107,7 +120,8 @@ esac
 echo "== 4b. .env 里带引号 / DSH_WORKSPACE_DIR 输出 =="
 project="$sandbox/quoted"
 mkdir -p "$project"
-printf 'DSH_WORKSPACE="%s"\n' "$sandbox/quoted-target" >"$project/.env"
+# 故意把值加上双引号，验证解析时会剥掉
+write_env "$project" "\"$sandbox/quoted-target\"" "$TEST_UID" "$TEST_GID"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "带引号的值可解析"
 else
@@ -137,7 +151,7 @@ if [ "$(id -u)" = "0" ]; then
 else
 	project="$sandbox/rootwned"
 	mkdir -p "$project/workspace"
-	printf 'DSH_WORKSPACE=./workspace\n' >"$project/.env"
+	write_env "$project" ./workspace "$TEST_UID" "$TEST_GID"
 
 	if have_sudo && sudo -n true 2>/dev/null; then
 		sudo chown 0:0 "$project/workspace"
@@ -173,29 +187,82 @@ fi
 echo "== 6b. 部署者能写、容器 uid 不能写（root 部署的核心回归）=="
 # 旧实现拿「当前用户」的写测试当结论：root 部署时 ./workspace 是 root:root 0755，
 # root 写得进 → 预检假通过 → 容器里的 node(1000) 写不进 → crash-loop。
-# 这里构造「当前用户可写、容器 uid 不可写」，必须被拦下。
+# 这里构造「部署者可写、容器 uid 不可写」，必须被拦下。
+# 容器 uid 走 .env 设置（与 DSH_WORKSPACE 一致的取值来源）。
 project="$sandbox/foreign-uid"
 mkdir -p "$project/workspace"
 chmod 700 "$project/workspace"
-printf 'DSH_WORKSPACE=./workspace\n' >"$project/.env"
-foreign_uid=$(( $(id -u) == 1000 ? 1001 : 1000 ))
+foreign_uid=$(( TEST_UID == 1000 ? 1001 : 1000 ))
 foreign_gid="$foreign_uid"
+write_env "$project" ./workspace "$foreign_uid" "$foreign_gid"
 if ( : >"$project/workspace/.dsh-write-test" ) 2>/dev/null; then
 	rm -f "$project/workspace/.dsh-write-test"
-	ok "前置条件成立：当前用户可写"
+	ok "前置条件成立：部署者可写"
 else
-	bad "前置条件失败：当前用户本应可写"
+	bad "前置条件失败：部署者本应可写"
 fi
 set +e
-out="$(DSH_UID="$foreign_uid" DSH_GID="$foreign_gid" check_workspace "$project" never 0 2>&1)"
+out="$(check_workspace "$project" never 0 2>&1)"
 rc=$?
 set -e
-[ "$rc" -ne 0 ] && ok "容器 uid($foreign_uid) 不可写 → 被拦下（rc=$rc）" \
+[ "$rc" -ne 0 ] && ok "部署者可写但容器 uid($foreign_uid) 不可写 → 被拦下（rc=$rc）" \
 	|| bad "只看当前用户可写，会放过 root 部署的假通过"
 case "$out" in
 *"${foreign_uid}"*) ok "报错指明了容器 uid" ;;
 *) bad "报错未提容器 uid：$out" ;;
 esac
+
+echo "== 6c. DSH_UID 优先取自 .env，与 compose 同源 =="
+project="$sandbox/env-precedence"
+mkdir -p "$project/workspace"
+write_env "$project" ./workspace 1111 2222
+if [ "$(container_uid "$project/.env")" = "1111" ] &&
+	[ "$(container_gid "$project/.env")" = "2222" ]; then
+	ok ".env 里的 DSH_UID/DSH_GID 生效"
+else
+	bad ".env 里的值没生效：$(container_uid "$project/.env"):$(container_gid "$project/.env")"
+fi
+if [ "$(DSH_UID=9999 container_uid "$project/.env")" = "1111" ]; then
+	ok ".env 的值优先于 shell 环境变量"
+else
+	bad "shell 环境变量错误地覆盖了 .env"
+fi
+project2="$sandbox/env-default"
+mkdir -p "$project2"
+: >"$project2/.env"
+if [ "$(container_uid "$project2/.env")" = "1000" ]; then
+	ok "未配置时回退到 1000"
+else
+	bad "未配置时应回退到 1000，实际 $(container_uid "$project2/.env")"
+fi
+
+echo "== 6d. dsh-home 卷检查（仅 DSH_UID 非 1000 时涉入 docker）=="
+# 直接调 check_home_volume：这里要验的是卷检查自身。若走 check_workspace，
+# 工作区检查会先失败（uid 1001 写不进测试机属主的目录）而根本到不了卷检查。
+project="$sandbox/vol-default"
+mkdir -p "$project/workspace"
+write_env "$project" ./workspace 1000 1000
+if check_home_volume "$project" 0 >/dev/null 2>&1; then
+	ok "DSH_UID=1000 时直接返回 0（不触碰 docker）"
+else
+	bad "DSH_UID=1000 时不该失败"
+fi
+project="$sandbox/vol-nodocker"
+mkdir -p "$project/workspace"
+write_env "$project" ./workspace 1001 1001
+if command -v docker >/dev/null 2>&1; then
+	echo "  SKIP 本机有 docker，无法验证「无 docker」分支"
+else
+	set +e
+	out="$(check_home_volume "$project" 0 2>&1)"
+	rc=$?
+	set -e
+	[ "$rc" -eq 0 ] && ok "无 docker 时给提示但不阻断（rc=0）" || bad "不该阻断（rc=$rc）"
+	case "$out" in
+	*docker*) ok "提示里说明了缺少 docker" ;;
+	*) bad "提示不明确：[$out]" ;;
+	esac
+fi
 
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。

@@ -27,6 +27,12 @@ services:
     environment:
       DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}
       DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?请在 .env 中设置 DSH_AUTH_PASSWORD}
+      # HOME 指向持久卷而不是镜像里的 /home/node。两个原因：
+      #   1. 镜像里 /home/node 是 node(1000) 的 755 目录，DSH_UID 不是 1000 时
+      #      容器用户对它没有写权限，npm / pnpm / git 想往 $HOME 写缓存或配置就会失败。
+      #   2. 这个卷的属主由 preflight 按 DSH_UID 修正过，保证容器用户可写。
+      # DSH_HOME 本来就是绝对路径，不依赖 HOME，所以这样改不影响 dsh 自身。
+      HOME: ${DSH_HOME:-/home/node/.dsh}
       # off | optional | required
       DSH_TOTP: ${DSH_TOTP:-optional}
       # 走 HTTPS 时设为 1（否则会话 cookie 不带 Secure）

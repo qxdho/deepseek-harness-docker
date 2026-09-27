@@ -40,7 +40,6 @@ mkdir -p "$DSH_HOME/profiles"
 # 「docker 一直重启、网页打不开」，比带病运行还糟。所以这里退回到容器内可写的
 # 持久目录继续启动，让 UI 先能用，同时用醒目日志暴露宿主工作区不可用。
 # 需要旧的 fail-fast 行为时设 DSH_WORKSPACE_STRICT=1。
-WORKSPACE=/workspace
 WORKSPACE_STRICT="${DSH_WORKSPACE_STRICT:-0}"
 FALLBACK_WORKSPACE="${DSH_HOME}/workspace"
 
@@ -141,7 +140,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "等待 dsh 就绪（首次启动可能要 1-2 分钟）..."
+log "等待 dsh 就绪…"
 for i in $(seq 1 180); do
   if ! kill -0 "$DSH_PID" 2>/dev/null; then
     log "dsh 已退出，日志尾部："

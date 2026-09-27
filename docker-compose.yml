@@ -9,7 +9,7 @@ services:
         DSH_VERSION: ${DSH_VERSION:-0.1.7-rc.2}
         AUTH_GATE_VERSION: ${AUTH_GATE_VERSION:-0.15.0}
         DEV_TOOLS: ${DEV_TOOLS:-none}
-    container_name: dsh
+    container_name: qxdho-dsh
     restart: unless-stopped
     # .env 里的变量都会传进容器，所以可以直接在 .env 里加
     # DEEPSEEK_API_KEY=sk-... 来配置模型（也可以登录后在网页设置里配）

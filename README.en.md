@@ -93,6 +93,22 @@ the in-container proxy rewrites Host/Origin to loopback consistently.
 `dsh-home` volume → `/home/node/.dsh` (config, credentials, sessions, login users) and
 `./workspace` → `/workspace`. Recreating the container does not log you out.
 
+The container is named **`qxdho-dsh`** (it was `dsh` in earlier versions). When upgrading from an
+old version, stop the old container before starting the new one, or both compete for the same port:
+
+```bash
+./dshm down
+./dshm up
+```
+
+If startup reports the port is already in use, an orphaned old container is still around (after a
+container rename Compose does not always recognize it):
+
+```bash
+docker rm -f dsh          # the old name; data lives in the named volume and is not lost
+./dshm up
+```
+
 ## Workspace permissions
 
 `./workspace` is a **bind mount** at `/workspace`, and a bind mount shadows the ownership

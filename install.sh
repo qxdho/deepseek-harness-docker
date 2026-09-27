@@ -122,11 +122,11 @@ docker compose up -d
 # ── 5. 等健康 ───────────────────────────────────────────────────────────────
 hdr "等待健康检查（首次启动可能要 1-2 分钟）"
 for i in $(seq 1 72); do
-	s="$(docker inspect --format '{{.State.Health.Status}}' dsh 2>/dev/null || echo unknown)"
+	s="$(docker inspect --format '{{.State.Health.Status}}' qxdho-dsh 2>/dev/null || echo unknown)"
 	[ "$s" = "healthy" ] && break
 	if [ "$i" = "72" ]; then
 		printf '    未在预期时间内健康（当前：%s），下面是日志尾部：\n\n' "$s"
-		docker compose logs --tail 60 dsh || true
+		docker compose logs --tail 60 qxdho-dsh || true
 		exit 1
 	fi
 	sleep 5

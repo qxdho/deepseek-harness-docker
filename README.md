@@ -132,6 +132,21 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 重建容器不丢，也不用重新登录。
 
+容器名是 **`qxdho-dsh`**（早期版本叫 `dsh`）。如果你是从旧版本升级上来的，
+先停掉旧容器再启动，否则两者会抢同一个端口：
+
+```bash
+./dshm down
+./dshm up
+```
+
+若启动报端口被占用，说明旧容器还留着（换了容器名后 compose 不一定能自动认出它）：
+
+```bash
+docker rm -f dsh          # 旧的容器名，数据在命名卷里不会丢
+./dshm up
+```
+
 ---
 
 ## 工作区权限
@@ -211,7 +226,7 @@ sudo chown -R 1000:1000 ./workspace && docker compose up -d
 
 **怎么开两步验证？**
 ```bash
-docker exec -it dsh node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js user totp enable admin
+docker exec -it qxdho-dsh node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js user totp enable admin
 ```
 
 ---

@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ENV_FILE=.env
-CONTAINER=dsh
+CONTAINER=qxdho-dsh
 CLI_IN_CONTAINER=/home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────

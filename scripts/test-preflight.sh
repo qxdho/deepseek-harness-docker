@@ -390,6 +390,15 @@ case "$out2" in
 *) ok "第二次启动跳过补齐（幂等）" ;;
 esac
 
+# 磁盘预检：把阈值抬到不可能满足，应给出明确提示（只告警、不退出）
+set +e
+out3="$(DSH_DISK_MIN_MB=99999999 DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+set -e
+case "$out3" in
+*"阈值"*) ok "磁盘余量不足时给出提示" ;;
+*) bad "磁盘检查未触发：$out3" ;;
+esac
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

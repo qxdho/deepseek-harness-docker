@@ -219,6 +219,26 @@ status)
 	info "入口：http://<服务器IP>:$(env_value PROXY_PORT 3080)/"
 	;;
 
+disk | df)
+	require_docker
+	hdr "磁盘占用"
+	info "宿主："
+	df -h / 2>/dev/null | sed 's/^/    /' || true
+	if docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+		info "容器内 /home/node/.dsh 所在卷："
+		docker exec "$CONTAINER" df -h /home/node/.dsh 2>/dev/null | sed 's/^/    /' || true
+		info "占用最大的目录："
+		docker exec "$CONTAINER" sh -c \
+			'du -xh /home/node/.dsh --max-depth=2 2>/dev/null | sort -h | tail -10' | sed 's/^/    /' || true
+		info "npm 缓存：$(docker exec "$CONTAINER" sh -c 'du -sh /tmp/npm-cache 2>/dev/null | cut -f1' 2>/dev/null || true)"
+	else
+		info "容器未运行，只显示宿主磁盘。"
+	fi
+	info "清理："
+	info "  docker exec $CONTAINER rm -rf /home/node/.dsh/.npm /tmp/npm-cache"
+	info "  docker image prune -a && docker builder prune"
+	;;
+
 url)
 	require_docker; require_running
 	hdr "一次性 launch URL（排障用）"
@@ -332,6 +352,7 @@ ${B}dshm${RST} — dsh 部署管理命令（在当前目录运行）
   ${B}./dshm restart${RST}           重启
   ${B}./dshm logs${RST}              看日志
   ${B}./dshm status${RST}            健康 / 端口 / 登录用户
+  ${B}./dshm disk${RST}              磁盘占用 / 清理命令（装插件写满磁盘时用）
   ${B}./dshm pw${RST} [用户名]        改登录密码（默认 $(env_value DSH_AUTH_USER admin)）
   ${B}./dshm user list${RST}         列出登录用户
   ${B}./dshm user add 名字${RST} [--admin]

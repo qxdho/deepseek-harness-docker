@@ -31,6 +31,32 @@ WORKSPACE=/workspace
 
 mkdir -p "$DSH_HOME/profiles"
 
+# 插件安装的 npm 缓存落在 /tmp/npm-cache（见 Dockerfile），不写进持久卷；每次启动
+# 清掉，重启即可回收这部分空间，也避免缓存无限增长把磁盘写满。
+rm -rf /tmp/npm-cache 2>/dev/null || true
+
+# ── 磁盘空间预检 ────────────────────────────────────────────────────────────
+# 装插件会把依赖写进 profile/node_modules、把 npm 缓存写进 $HOME/.npm，很容易把
+# 卷/磁盘塞满。满了之后的表象是 ENOSPC、dsh 起来又退出、代理只刷 ECONNREFUSED，
+# 离病因十万八千里。这里提前报出来并给出清理命令。
+DISK_MIN_MB="${DSH_DISK_MIN_MB:-256}"
+disk_free_mb() {
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 {print int($4 / 1024)}'
+}
+for mount in "$DSH_HOME" "$WORKSPACE"; do
+  free_mb="$(disk_free_mb "$mount" 2>/dev/null || true)"
+  case "$free_mb" in '' | *[!0-9]*) continue ;; esac
+  if [ "$free_mb" -lt "$DISK_MIN_MB" ]; then
+    log "ERROR: $mount 所在磁盘仅剩 ${free_mb}MB（阈值 ${DISK_MIN_MB}MB）"
+    log "        装插件 / npm 缓存写满磁盘后，会 ENOSPC，dsh 起来又退出、代理刷 ECONNREFUSED。"
+    log "        清理（在宿主机执行）："
+    log "          docker exec <容器> sh -c 'du -xh /home/node/.dsh --max-depth=2 | sort -h | tail -15'"
+    log "          docker exec <容器> rm -rf /home/node/.dsh/.npm    # npm 下载缓存"
+    log "          docker system prune -a                            # 镜像 / 构建缓存"
+    log "        或把 Docker 数据目录换到更大的盘上。"
+  fi
+done
+
 # /workspace 通常是 bind mount，属主由宿主机决定，镜像里的 chown 会被它遮蔽。
 # 若宿主目录是 root 创建的（dockerd 自动创建源目录时就会这样），容器里的
 # node(1000) 就写不进去。宿主侧由 scripts/preflight.sh 兜底；这里再兜一层。
@@ -121,8 +147,11 @@ for peer in dsh-storage-domain cordis; do
   dst="$PROFILE/node_modules/@deepseek-ai/$peer"
   if [ ! -f "$dst/package.json" ]; then
     log "补齐 profile peer 依赖：$peer -> $src"
-    rm -rf "$dst"
-    ln -sfn "$src" "$dst"
+    rm -rf "$dst" 2>/dev/null || true
+    if ! ln -sfn "$src" "$dst" 2>/dev/null || [ ! -f "$dst/package.json" ]; then
+      log "ERROR: 无法创建 peer 软链 $peer（目标 $src）"
+      log "        常见原因是磁盘写满（ENOSPC）；磁盘一满，dsh 起来后也会退出。"
+    fi
   fi
 done
 
@@ -210,4 +239,19 @@ log "启动代理: 0.0.0.0:${PROXY_PORT} -> http://${DSH_HOST}:${DSH_PORT}"
 cd /app/proxy
 node index.js &
 PROXY_PID=$!
-wait "$PROXY_PID"
+
+# 同时监督 dsh 和代理：只 wait 代理的话，dsh 中途挂掉无人察觉，代理会一直对外
+# 转发一个死掉的后端，日志只剩刷屏的 ECONNREFUSED，真正的死因（比如 ENOSPC）被淹没。
+# dsh 先退出就把它的日志尾部打出来并让容器退出（trap 收掉代理），重启策略会带着
+# 现场重来。
+set +e
+wait -n "$DSH_PID" "$PROXY_PID"
+status=$?
+set -e
+if ! kill -0 "$DSH_PID" 2>/dev/null; then
+  log "dsh 已退出（status $status），dsh 日志尾部："
+  tail -n 30 "$WEB_LOG" >&2 || true
+else
+  log "代理已退出（status $status），停止容器"
+fi
+exit "$status"

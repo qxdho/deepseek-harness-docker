@@ -73,7 +73,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PROXY_PORT=3080 \
     DSH_PERMISSION_MODE=workspace-write \
     DSH_TELEMETRY_DISABLED=1 \
-    NARB_DISABLE_NATIVE_CACHE=1
+    NARB_DISABLE_NATIVE_CACHE=1 \
+    npm_config_cache=/tmp/npm-cache \
+    npm_config_fund=false \
+    npm_config_audit=false
 
 # 基础运行/agent 工具。DEV_TOOLS=full 时再加编译链，供容器内现场安装带
 # 原生依赖的插件（dsh-auth-gate 已预装，不需要它）。

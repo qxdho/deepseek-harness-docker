@@ -141,6 +141,18 @@ DSH_GID=1001          # id -g
 docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web && ./dshm up
 ```
 
+**装了插件后崩了 / 代理刷 `ECONNREFUSED` / 日志含 `No space left on device`** → 磁盘被插件依赖
+和 npm 缓存写满了。满了之后 dsh 起来也会退出，代理只会刷连接被拒。看占用并清理：
+
+```bash
+./dshm disk                                                   # 宿主 + 卷 + 最占空间的目录
+docker exec qxdho-dsh rm -rf /home/node/.dsh/.npm /tmp/npm-cache
+docker image prune -a && docker builder prune                 # 宿主上的镜像/构建缓存
+```
+
+新版已把插件安装的 npm 缓存移到 `/tmp/npm-cache`（不写持久卷）并在每次启动清掉，启动时也会
+检查剩余空间并给出提示；但根治仍是给 Docker 数据目录留足磁盘。
+
 **密码对但弹回登录页** → `DSH_COOKIE_SECURE=1` 却在用 HTTP，改回 `0`。
 
 **旧版本升级** → 容器名已从 `dsh` 改为 `qxdho-dsh`，先清理旧容器：

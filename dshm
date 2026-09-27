@@ -195,7 +195,9 @@ pw | passwd | password)
 	info "用户：${B}${user}${RST}"
 	info "规则：至少 14 位，且包含大写 / 小写 / 数字 / 特殊符号"
 	ask_new_password
-	if printf '%s\n' "$PASSWORD" \
+	# 插件的 user passwd --password-stdin 在管道模式下读两行（密码 + 确认），
+	# 只喂一行会报 "passwords do not match"，所以这里喂两行。
+	if printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" \
 		| docker exec -i -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" \
 			user passwd "$user" --password-stdin; then
 		ok "密码已更新"

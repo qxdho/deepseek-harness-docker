@@ -17,6 +17,8 @@
  *        否则实时通道会一直 pending）；
  *      - globalThis.__DSH_TRANSPORT__.ownsHost = true（dsh 官方预留的注入口），
  *        让浏览器认为"页面是本机"，从而在域名/局域网访问下也能编辑设置页。
+ *      - 一个"重启 DSH"悬浮按钮，配合 /__dsh_restart 接口：装/更新插件后点一下就
+ *        重启（鉴权复用 dsh-auth-gate，见下）。
  */
 'use strict';
 
@@ -40,6 +42,37 @@ if(c&&typeof c.randomUUID!=="function"){
   };
 }
 globalThis.__DSH_TRANSPORT__=Object.assign({},globalThis.__DSH_TRANSPORT__||{},{ownsHost:true});
+}catch(e){}})();</script><script id="dsh-restart-button">(function(){try{
+if(globalThis.__dshRestartButtonReady) return; globalThis.__dshRestartButtonReady=true;
+function boot(){
+  if(document.getElementById("dsh-restart-button-ui")) return;
+  var b=document.createElement("button");
+  b.id="dsh-restart-button-ui"; b.type="button";
+  b.title="安装/更新插件后点这里重启，使其生效（等价于 ./dshm restart）";
+  b.textContent="重启 DSH";
+  b.style.cssText="position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:8px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:rgba(28,28,30,.86);color:#fff;font:13px/1.2 system-ui,-apple-system,sans-serif;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35);opacity:.8";
+  b.addEventListener("mouseenter",function(){b.style.opacity="1";});
+  b.addEventListener("mouseleave",function(){b.style.opacity=".8";});
+  b.addEventListener("click",function(){
+    if(!confirm("重启 DSH？页面会短暂断开，约十几秒后自动恢复。")) return;
+    b.disabled=true; b.textContent="正在重启…";
+    fetch("/__dsh_restart",{method:"POST",headers:{"X-DSH-Restart":"1"},credentials:"same-origin",cache:"no-store"})
+      .then(function(r){
+        if(!r.ok) throw new Error("HTTP "+r.status);
+        var n=0;
+        var t=setInterval(function(){
+          n++;
+          fetch("/",{method:"GET",credentials:"same-origin",cache:"no-store"}).then(function(rr){
+            if(rr.ok){clearInterval(t);location.reload();}
+          }).catch(function(){});
+          if(n>90){clearInterval(t);b.disabled=false;b.textContent="重启 DSH";}
+        },1000);
+      })
+      .catch(function(e){b.disabled=false;b.textContent="重启 DSH";alert("重启请求失败："+e.message);});
+  });
+  (document.body||document.documentElement).appendChild(b);
+}
+if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",boot); else boot();
 }catch(e){}})();</script>`;
 
 function injectHead(html) {
@@ -131,7 +164,81 @@ proxy.on('error', (err, req, res) => {
   console.error(`[proxy] ${message.trim()}`);
 });
 
-const server = http.createServer((req, res) => proxy.web(req, res));
+// ── 界面重启入口 ────────────────────────────────────────────────────────────
+// 装/更新插件后需要重启 dsh 才会生效。与其让用户回命令行敲 ./dshm restart，
+// 不如在注入的页面上放一个按钮，POST /__dsh_restart 即可。
+//
+// 鉴权不自己做，而是复用 dsh-auth-gate：把这个请求的 Cookie 原样拿去问 dsh 的 `/`，
+// 已登录才会是 200（未登录是 302/401）。代理因此不需要理解会话 cookie。
+const RESTART_PATH = '/__dsh_restart';
+let restarting = false;
+
+function isAuthenticated(req) {
+  return new Promise((resolve) => {
+    const probe = http.request(
+      {
+        host: DSH_HOST,
+        port: DSH_PORT,
+        path: '/',
+        method: 'GET',
+        headers: {
+          host: UPSTREAM_AUTHORITY,
+          cookie: req.headers.cookie || '',
+          accept: 'text/html',
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      },
+    );
+    probe.on('error', () => resolve(false));
+    probe.end();
+  });
+}
+
+function handleRestart(req, res) {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'POST' });
+    res.end('method not allowed\n');
+    return;
+  }
+  // 自定义头是 CSRF 防线：跨站的表单/fetch 带不了它，浏览器会先发 CORS 预检，
+  // 而我们不回任何 CORS 头，跨站请求就到此为止。
+  if (req.headers['x-dsh-restart'] !== '1') {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('missing X-DSH-Restart header\n');
+    return;
+  }
+  if (restarting) {
+    res.writeHead(429, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('restart already requested\n');
+    return;
+  }
+  isAuthenticated(req).then((authenticated) => {
+    if (!authenticated) {
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('unauthorized\n');
+      return;
+    }
+    restarting = true;
+    res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end('{"ok":true}\n');
+    console.log('[proxy] 收到界面重启请求，退出容器由 restart 策略重新拉起');
+    // 留一点时间让 202 发出去，然后退出：entrypoint 监督到代理退出 → 容器退出 →
+    // restart: unless-stopped 重新拉起，等于完整执行一次 ./dshm restart
+    //（重跑 entrypoint：清缓存、补 peer 软链、重新加载插件）。
+    setTimeout(() => process.exit(0), 400);
+  });
+}
+
+const server = http.createServer((req, res) => {
+  if (req.url && req.url.split('?')[0] === RESTART_PATH) {
+    handleRestart(req, res);
+    return;
+  }
+  proxy.web(req, res);
+});
 server.on('upgrade', (req, socket, head) => proxy.ws(req, socket, head));
 
 server.listen(LISTEN_PORT, '0.0.0.0', () => {

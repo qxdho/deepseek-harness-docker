@@ -65,6 +65,7 @@ cd deepseek-harness-docker
 ```bash
 ./dshm                # 全部命令
 ./dshm status         # 健康 / 端口 / 登录用户
+./dshm disk           # 磁盘占用（装插件写满磁盘时用）
 ./dshm logs           # 日志
 ./dshm up             # 启动 / 应用 .env 改动
 ./dshm restart        # 重启
@@ -75,6 +76,17 @@ cd deepseek-harness-docker
 ./dshm update         # 升级 dsh
 ./dshm shell          # 进容器
 ```
+
+## 界面重启
+
+页面右下角有一个悬浮的「重启 DSH」按钮：**装/更新插件后点一下即可**，不用回命令行。
+
+- 等价于 `./dshm restart`：容器会重建，约十几秒，页面自动刷新回来。
+- 鉴权复用登录插件：代理拿浏览器的 Cookie 去问 dsh 的 `/`，只有已登录（200）才允许；
+  未登录 401。接口还要求自定义头 `X-DSH-Restart: 1`，跨站请求带不了它（防 CSRF）。
+- 依赖 compose 里的 `restart: unless-stopped`（本仓库默认）。若改成 `restart: "no"`，
+  点按钮会变成"停止"而不是重启。
+- 不想要这个按钮：删掉 `proxy/index.js` 中 `dsh-restart-button` 那段注入再重建镜像。
 
 ## HTTPS
 

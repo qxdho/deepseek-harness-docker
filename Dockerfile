@@ -95,9 +95,11 @@ COPY scripts/dsh-wrapper.sh /usr/local/bin/dsh
 RUN chmod 0755 /usr/local/bin/dsh
 
 # 对外代理（只转发 + 注入，不做鉴权）
+# 用 `npm ci` 并带上 package-lock.json：锁定 http-proxy 的确切版本与传递依赖，
+# 构建可复现，也避免 lockfile 与 package.json 漂移时被静默忽略。
 WORKDIR /app/proxy
-COPY proxy/package.json /app/proxy/package.json
-RUN npm install --omit=dev --no-fund --no-audit && npm cache clean --force
+COPY proxy/package.json proxy/package-lock.json /app/proxy/
+RUN npm ci --omit=dev --no-fund --no-audit && npm cache clean --force
 COPY proxy/index.js /app/proxy/index.js
 
 COPY entrypoint.sh /app/entrypoint.sh

@@ -100,6 +100,11 @@ ask_new_password() {
 		p1="$SECRET"
 		read_secret "  再输一次确认："
 		p2="$SECRET"
+		# 非交互模式（管道）下 stdin 耗尽会一直读到空串，p1 != p2 永远成立 →
+		# 无限循环。检测到空输入直接报错，别让调用方挂住。
+		if [ ! -t 0 ] && { [ -z "$p1" ] || [ -z "$p2" ]; }; then
+			die "非交互模式下读取密码失败（输入为空或已到 EOF）；改密码请交互执行 ./dshm pw"
+		fi
 		if [ "$p1" != "$p2" ]; then
 			printf '  %s两次输入不一致，请重新输入%s\n' "$YEL" "$RST"
 			continue
@@ -170,6 +175,10 @@ up)
 		else
 			info "只绑定了 127.0.0.1，请在宿主机反代到 127.0.0.1:${port}"
 		fi
+	else
+		# 不加 else 的话，失败时这个 if 返回 0，整个 ./dshm up 会以成功退出 ——
+		# 脚本化调用会把「起不来」当成「已就绪」。
+		die "容器未在预期时间内健康，请查看 ./dshm logs"
 	fi
 	;;
 
@@ -182,9 +191,15 @@ down)
 
 restart)
 	require_docker
-	hdr "重启服务"
-	docker compose restart
-	wait_healthy && ok "已重启并健康"
+	hdr "重启服务（会重新读取 .env）"
+	# 用 `up -d` 而不是 `docker compose restart`：后者只是把现有容器里的进程重启，
+	# **不会**重读 .env，也不会因 compose 配置变化而重建容器。也就是说改了
+	# DSH_UID / DSH_WORKSPACE / 端口之后 `restart` 看着成功了、实际毫无变化。
+	# `up -d` 会按当前 .env 重建有变化的容器，符合「重启使新配置生效」的直觉；
+	# 配置没变时它等价于什么都不做（已是最新）。
+	docker compose up -d
+	wait_healthy || die "容器未在预期时间内健康，请查看 ./dshm logs"
+	ok "已重启并健康"
 	;;
 
 logs)
@@ -327,7 +342,7 @@ ${B}dshm${RST} — dsh 部署管理命令（在当前目录运行）
   ${B}./dshm version${RST}           显示容器内 dsh 版本
   ${B}./dshm shell${RST}             进容器
 
-${DIM}改运行配置：编辑 .env 后执行 ./dshm restart${RST}
+${DIM}改运行配置：编辑 .env 后执行 ./dshm up（restart 不重建容器，环境变量不会重新读取）${RST}
 
 EOF
 	;;

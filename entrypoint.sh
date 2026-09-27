@@ -135,6 +135,8 @@ TAIL_PID=$!
 
 cleanup() {
   log "退出中，停止子进程"
+  # 代理是最后启动的，先停它，避免它继续对外转发一个正在关闭的后端。
+  [ -n "${PROXY_PID:-}" ] && kill "$PROXY_PID" 2>/dev/null || true
   kill "$DSH_PID" "$TAIL_PID" 2>/dev/null || true
   wait "$DSH_PID" 2>/dev/null || true
 }
@@ -163,6 +165,15 @@ grep -oE "http://${DSH_HOST}:[0-9]+/\?token=[A-Za-z0-9_-]+" "$WEB_LOG" | head -n
 chmod 600 "$DSH_HOME/web-launch-url.txt" 2>/dev/null || true
 
 # ── 5. 前台启动代理 ─────────────────────────────────────────────────────────
+#
+# 这里**故意不用 exec**。用 exec 的话 shell 被 node 取代，上面注册的 cleanup trap
+# 随之失效：docker stop 发的 SIGTERM 只会到达代理进程，而它不管 dsh 子进程，
+# 于是 dsh 变成孤儿，stop 要熬满 stop_grace_period(20s) 再被 SIGKILL。
+#
+# 保持 shell 作为监督者：tini(PID 1) 把 SIGTERM 转发给本脚本 → trap 命中 →
+# 一次性收掉 dsh、tail 和代理。用 `wait` 常驻并返回代理的退出码。
 log "启动代理: 0.0.0.0:${PROXY_PORT} -> http://${DSH_HOST}:${DSH_PORT}"
 cd /app/proxy
-exec node index.js
+node index.js &
+PROXY_PID=$!
+wait "$PROXY_PID"

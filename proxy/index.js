@@ -65,15 +65,32 @@ const proxy = httpProxy.createProxyServer({
   selfHandleResponse: true,
 });
 
+// 客户端真实地址：TCP 连接的对端。Unix socket 等没有对端地址时为 undefined。
+function peerAddress(req) {
+  const addr = req && req.socket && req.socket.remoteAddress;
+  return typeof addr === 'string' && addr.length > 0 ? addr : undefined;
+}
+
 // 统一改写 Host/Origin，并请求不压缩的响应，便于安全地注入 HTML。
-proxy.on('proxyReq', (proxyReq) => {
+//
+// X-Forwarded-For 必须由代理**重算**，不能让客户端自带的值漏到上游：
+// dsh-auth-gate 的限流键就取自这个头（rightmostUntrusted：从右往左第一个非受信地址），
+// 而它信任的 peer 只有回环。http-proxy 的 `xfwd: true` 只是在客户端自带值后面**追加**
+// 真实地址，所以最右侧仍是攻击者可控的伪造值 —— 每次换一个假 IP 就能绕过登录限流。
+// 这里显式覆盖，只写真实 peer。
+function setForwardHeaders(proxyReq, req) {
   proxyReq.setHeader('host', UPSTREAM_AUTHORITY);
   proxyReq.setHeader('origin', `http://${UPSTREAM_AUTHORITY}`);
+  const peer = peerAddress(req);
+  if (peer !== undefined) proxyReq.setHeader('x-forwarded-for', peer);
+}
+
+proxy.on('proxyReq', (proxyReq, req) => {
+  setForwardHeaders(proxyReq, req);
   proxyReq.setHeader('accept-encoding', 'identity');
 });
-proxy.on('proxyReqWs', (proxyReq) => {
-  proxyReq.setHeader('host', UPSTREAM_AUTHORITY);
-  proxyReq.setHeader('origin', `http://${UPSTREAM_AUTHORITY}`);
+proxy.on('proxyReqWs', (proxyReq, req) => {
+  setForwardHeaders(proxyReq, req);
 });
 
 proxy.on('proxyRes', (proxyRes, req, res) => {

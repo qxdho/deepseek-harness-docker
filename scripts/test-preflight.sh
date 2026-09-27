@@ -264,6 +264,35 @@ else
 	esac
 fi
 
+echo "== 6e. 卷名与卷内路径必须与实际挂载一致 =="
+# 两个曾经出错的地方（会让整个 DSH_UID 修复静默失效）：
+#   1. 卷名不能写死 dsh-home —— Compose 会加项目名前缀（<项目名>_dsh-home），
+#      必须从运行中的容器读实际挂载名。
+#   2. 卷挂在 /home/node/.dsh，所以卷根目录就是 DSH_HOME；
+#      检查目标应是 /dsh-home，而不是 /dsh-home/.dsh。
+stubdir="$sandbox/stub-bin"
+mkdir -p "$stubdir"
+cat >"$stubdir/docker" <<'STUB'
+#!/usr/bin/env bash
+# 模拟：compose ps -q 返回一个容器 id；inspect 该容器时报告卷 <项目>_dsh-home
+case "$1 $2" in
+"compose ps") echo "deadbeefcafe" ;;
+"inspect deadbeefcafe") echo "myproj_dsh-home" ;;
+*) exit 0 ;;
+esac
+STUB
+chmod +x "$stubdir/docker"
+got="$(PATH="$stubdir:$PATH" dsh_home_volume_from_container)"
+[ "$got" = "myproj_dsh-home" ] && ok "卷名从容器实际挂载读取（${got}），不靠猜" \
+	|| bad "卷名解析错误：[$got]"
+
+# 卷内检查路径：必须是卷根 /dsh-home
+if grep -q '^	target="/dsh-home"$' scripts/preflight.sh; then
+	ok "卷内检查路径为卷根 /dsh-home（而非 /dsh-home/.dsh）"
+else
+	bad "卷内检查路径不对：$(grep -n 'target=' scripts/preflight.sh | head -2)"
+fi
+
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。
 # 覆盖两条路径：DSH_WORKSPACE_STRICT=1 时 fail-fast；默认时降级到容器内目录 ——

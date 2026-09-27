@@ -34,6 +34,12 @@ const upstream = http.createServer((req, res) => {
     // 既有真 <head> 又有 <header>：必须注进 <head>，而不是被 <header> 抢先
     '/both': '<!doctype html><html><head><meta charset="utf-8"></head><body><header>h</header></body></html>',
   }[req.url.split('?')[0]];
+  if (req.url.startsWith('/echo-xff')) {
+    // 回显代理实际转发的 X-Forwarded-For，用于验证客户端伪造的头不会抵达上游。
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ xff: req.headers['x-forwarded-for'] ?? null }));
+    return;
+  }
   if (req.url.startsWith('/plain')) {
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('plain body');
@@ -48,9 +54,9 @@ const upstream = http.createServer((req, res) => {
   res.end(body);
 });
 
-function get(port, p) {
+function get(port, p, extraHeaders) {
   return new Promise((resolve, reject) => {
-    const req = http.get({ host: '127.0.0.1', port, path: p }, (res) => {
+    const req = http.get({ host: '127.0.0.1', port, path: p, headers: extraHeaders || {} }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -143,6 +149,41 @@ const INJECT_ID = 'dsh-forward-inject';
   else bad(`响应头不合法（content-length=${cl} transfer-encoding=${te}）`);
   if (Number(cl) === Buffer.byteLength(normal.body, 'utf8')) ok('content-length 与实际长度一致');
   else bad(`content-length 不一致（${cl} != ${Buffer.byteLength(normal.body, 'utf8')}）`);
+
+  // 8. XFF 伪造防护：dsh-auth-gate 按「从右往左第一个非受信地址」定限流桶，
+  //    而它信任 peer=127.0.0.1（trustedProxyCidrs 只含回环）。代理若把客户端
+  //    自带的 X-Forwarded-For 原样转发，上游最右侧就是攻击者可伪造的值 →
+  //    每次换一个假 IP 就能绕过登录限流。代理必须自己重算该头。
+  const spoof = await get(PROXY_PORT, '/echo-xff', { 'x-forwarded-for': '9.9.9.9' });
+  let spoofed = null;
+  try {
+    spoofed = JSON.parse(spoof.body).xff;
+  } catch {
+    spoofed = null;
+  }
+  if (spoofed === null) {
+    bad('上游没有收到 X-Forwarded-For，无法判断客户端 IP');
+  } else if (spoofed.includes('9.9.9.9')) {
+    bad(`客户端伪造的 X-Forwarded-For 被转发到上游：${spoofed}（限流可被绕过）`);
+  } else if (/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(spoofed)) {
+    ok(`XFF 被代理重算为真实 peer（${spoofed}）`);
+  } else {
+    bad(`XFF 既不是真实 peer 也不含伪造值，语义不明：${spoofed}`);
+  }
+
+  // 同一条请求再确认：没有客户端 XFF 时，代理也应写入真实 peer
+  const noSpoof = await get(PROXY_PORT, '/echo-xff');
+  let plainXff = null;
+  try {
+    plainXff = JSON.parse(noSpoof.body).xff;
+  } catch {
+    plainXff = null;
+  }
+  if (plainXff && /127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(plainXff)) {
+    ok(`未伪造时 XFF 也是真实 peer（${plainXff}）`);
+  } else {
+    bad(`未伪造时 XFF 不正常：${plainXff}`);
+  }
 
   proxy.kill('SIGTERM');
   upstream.close();

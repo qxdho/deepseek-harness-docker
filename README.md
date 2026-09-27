@@ -18,7 +18,7 @@ cd deepseek-harness-docker
 然后浏览器打开 `http://<服务器IP>:3080/`，用 `admin` + 你的密码登录。
 
 登录后第一件事：**配置模型**——在网页「设置 → 模型」里填 DeepSeek API Key，
-或者直接在 `.env` 里加一行 `DEEPSEEK_API_KEY=sk-...` 再 `./dshm restart`。
+或者直接在 `.env` 里加一行 `DEEPSEEK_API_KEY=sk-...` 再 `./dshm up`（改了环境变量要用 up，`restart` 不重建容器）。
 
 > 默认只绑 `127.0.0.1`（给宿主机反代用）。想先用 IP 直接访问：把 `.env` 的 `DSH_BIND` 改成 `0.0.0.0`，再跑一次 `./install.sh`。
 
@@ -69,7 +69,7 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 ## 配置项
 
-全部在 `.env`。**改完运行 `./dshm restart` 生效。**
+全部在 `.env`。**改完运行 `./dshm up` 生效**（`restart` 只重启进程、不重建容器，环境变量不会重新读取）。
 
 **你会用到的：**
 
@@ -95,6 +95,15 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 > ⚠️ `DSH_AUTH_USER` / `DSH_AUTH_PASSWORD` 只在**首次启动**（还没有用户文件时）生效；
 > 之后改密码用 `./dshm password`。
+
+> ⚠️ `AUTH_GATE_VERSION` 只在**卷里还没有 profile** 时决定装哪个版本。profile 存放在
+> `dsh-home` 命名卷里（首次启动从镜像播种），所以改了 `AUTH_GATE_VERSION` 重建镜像后，
+> 已有部署用的仍是卷里的旧插件。要让新版本真正生效，需删掉 profile 让它重新播种：
+>
+> ```bash
+> docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web
+> ./dshm restart          # 重新从镜像播种（登录用户/会话在卷里，不受影响）
+> ```
 
 ---
 

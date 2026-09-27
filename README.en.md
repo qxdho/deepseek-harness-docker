@@ -21,7 +21,7 @@ web UI into a deployable Docker image with a built-in login page and optional TO
 | Management CLI | `./dshm` up/down/logs/status/password/update |
 | Update | `./dshm update` (rebuilds the pinned image) |
 | Hardened | Non-root, `cap_drop: ALL`, `no-new-privileges`, `workspace-write` (Landlock) |
-| Agent toolchain | git, ripgrep, jq, curl, rsync, python3, pnpm preinstalled |
+| Agent toolchain | git, ripgrep, jq, curl, unzip, pnpm preinstalled (python3/make/g++ only with `DEV_TOOLS=full`) |
 | CI | Multi-arch (amd64/arm64) build to GHCR + real container smoke test |
 | Host-level HTTPS | TLS is terminated by your host proxy (Nginx/BaoTa/Cloudflare) |
 

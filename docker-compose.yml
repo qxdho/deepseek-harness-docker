@@ -33,6 +33,13 @@ services:
       #   2. 这个卷的属主由 preflight 按 DSH_UID 修正过，保证容器用户可写。
       # DSH_HOME 本来就是绝对路径，不依赖 HOME，所以这样改不影响 dsh 自身。
       HOME: ${DSH_HOME:-/home/node/.dsh}
+      # 容器内代理固定监听 3080，与上面 ports: 的容器侧一致。
+      # 必须在这里钉死：`env_file: .env` 会把 .env 里的 PROXY_PORT（它表示**宿主
+      # 端口**）也注入容器，覆盖镜像的 ENV PROXY_PORT=3080，于是代理会去监听
+      # 9090 之类，而 ports: 仍然映射宿主 9090 -> 容器 3080 —— 结果容器自称健康、
+      # 外部却连不上。environment 的优先级高于 env_file，所以这里写 3080 即可让
+      # PROXY_PORT 只表示宿主端口。
+      PROXY_PORT: 3080
       # off | optional | required
       DSH_TOTP: ${DSH_TOTP:-optional}
       # 走 HTTPS 时设为 1（否则会话 cookie 不带 Secure）

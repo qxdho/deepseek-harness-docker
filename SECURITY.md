@@ -15,7 +15,7 @@ is effectively a remote control plane for the container it runs in. Treat this i
 ## What this does NOT protect you from
 
 - **Plain HTTP.** Passwords and session cookies travel in cleartext. Use this only on a trusted LAN,
-  or terminate TLS in front and set `DSH_COOKIE_SECURE=1` (see `docker-compose.tls.yml`).
+  or terminate TLS in front and set `DSH_COOKIE_SECURE=1`.
 - **Hostile code inside the container.** The sandbox limits the agent's own mistakes, not a determined
   attacker. Upstream `SAFETY.md` says sandboxing/prompts reduce risk but do not guarantee isolation.
 - **Provider keys.** They live in `$DSH_HOME/.credentials.yaml`; anyone who can read that volume or run

@@ -85,6 +85,15 @@ container_gid() {
 # root 的 VPS、1Panel 等）。root 建的 ./workspace 是 root:root 0755 —— root 写得进，
 # 容器里的 node(uid 1000) 写不进。若拿当前用户的写测试当结论，就会给出假通过，
 # 随后容器 entrypoint 退出、restart 策略把它拉进无限重启。
+# 目录对指定 uid:gid 是否有写权限 —— 只看权限位，与「当前是谁」无关。
+#
+# 目录要能写入，需要同时具备**写位和执行位**（进入目录需要 x）。只查写位会把
+# mode 0200 这类目录误判为可写，实际上连 cd 都进不去。所以两边都要查。
+#
+# 为什么不能只用「当前用户能不能写」来判断：部署者常常是 root（sudo ./install.sh、
+# root 的 VPS、1Panel 等）。root 建的 ./workspace 是 root:root 0755 —— root 写得进，
+# 容器里的 node(uid 1000) 写不进。若拿当前用户的写测试当结论，就会给出假通过，
+# 随后容器 entrypoint 退出、restart 策略把它拉进无限重启。
 perm_for_uid() {
 	local dir="$1" want_uid="$2" want_gid="$3"
 	local o_uid o_gid mode m u g o
@@ -97,11 +106,11 @@ perm_for_uid() {
 	g=$(((m / 10) % 10))
 	o=$((m % 10))
 	if [ "$want_uid" = "$o_uid" ]; then
-		[ $((u & 2)) -eq 2 ]
+		[ $((u & 3)) -eq 3 ]
 	elif [ "$want_gid" = "$o_gid" ]; then
-		[ $((g & 2)) -eq 2 ]
+		[ $((g & 3)) -eq 3 ]
 	else
-		[ $((o & 2)) -eq 2 ]
+		[ $((o & 3)) -eq 3 ]
 	fi
 }
 
@@ -230,6 +239,21 @@ EOF
 # 卷是否已存在（不存在就不用管：首次 up 时按 DSH_UID 初始化）
 volume_exists() { docker volume inspect "$1" >/dev/null 2>&1; }
 
+# 从运行中的 compose 容器里读出 dsh-home 卷的**真实名字**。
+#
+# Compose 会给声明的卷加项目名前缀（`<项目名>_dsh-home`），项目名又取决于目录名或
+# COMPOSE_PROJECT_NAME，所以猜不得。这里直接问 Docker：该容器挂了哪个卷到
+# /home/node/.dsh。容器不存在时输出空（此时卷也没被创建，无需处理）。
+dsh_home_volume_from_container() {
+	command -v docker >/dev/null 2>&1 || return 0
+	local cid
+	cid="$(docker compose ps -q dsh 2>/dev/null | head -n1)"
+	[ -n "$cid" ] || return 0
+	docker inspect "$cid" \
+		--format '{{range .Mounts}}{{if eq .Destination "/home/node/.dsh"}}{{.Name}}{{end}}{{end}}' \
+		2>/dev/null || true
+}
+
 # 打印「卷内目录当前属主 uid」。卷不存在或读不到时输出空。
 volume_owner_uid() {
 	local vol="$1" target="$2"
@@ -259,18 +283,28 @@ check_home_volume() {
 	# 默认 uid 时镜像播种的属主就是对的，不必碰 docker。
 	[ "$cu" = "1000" ] && [ "$cg" = "1000" ] && return 0
 
-	# 卷名写死，与 docker-compose.yml 的 `dsh-home:` 保持一致。
-	# 刻意不做成可配置项 —— 若这里能改而 compose 不能，就又是「预检按 A 检查、
-	# 实际用 B」的假通过（这个 bug 已经踩过一次，详见 container_uid 的注释）。
-	vol="dsh-home"
-	# 容器内的挂载点固定是 /home/node/.dsh，对应卷内的路径就是 .dsh
-	# （镜像里该卷挂载点下的顶层内容就是 .dsh 这个目录）。
-	target="/dsh-home/.dsh"
-
+	# 缺少 docker 的提示必须放在最前面：这个预检要检查的是容器自己的卷，只能在
+	# 宿主上用 docker 操作。本机没有 docker 时**不能静默跳过** —— 否则用户按
+	# DSH_UID 部署后会遇到「复述不清的权限错误」，而预检什么都没说。
 	command -v docker >/dev/null 2>&1 || {
-		printf '%s\n' "提示：DSH_UID=${cu}，但本机没有 docker，无法检查命名卷 ${vol} 的属主。" >&2
+		printf '%s\n' "提示：DSH_UID=${cu}，但本机没有 docker，无法检查 dsh-home 命名卷的属主。" >&2
+		printf '%s\n' "      容器内没有 root，卷属主不对时 agent 会写不进自己的配置目录。" >&2
 		return 0
 	}
+
+	# 卷名不能靠猜：docker-compose.yml 里声明的是 `dsh-home:`，但 Compose 会给它
+	# 加上项目名前缀（实际是 <项目名>_dsh-home），项目名又取决于目录名 /
+	# COMPOSE_PROJECT_NAME。写死 "dsh-home" 会 volume inspect 不到 → 直接跳过修复，
+	# 整个 DSH_UID 修复静默失效。所以从运行中的容器读它实际挂的是哪个卷。
+	vol="$(dsh_home_volume_from_container)"
+	if [ -z "$vol" ]; then
+		# 容器还没创建：卷也不存在，首次 up 会按新 user: 初始化，无事可做。
+		return 0
+	fi
+	# 注意：compose 把这个卷挂在 /home/node/.dsh，所以**卷的根目录就是 DSH_HOME**，
+	# 容器内看到的 /home/node/.dsh 的属主就是这个卷根目录的属主。
+	# （早期版本写成 /dsh-home/.dsh，等于检查一个不存在的子目录，永远修不到。）
+	target="/dsh-home"
 
 	# 卷不存在 → 首次 up 时会按 compose 的新 user: 初始化，没问题。
 	volume_exists "$vol" || return 0
@@ -283,14 +317,17 @@ check_home_volume() {
 		return 0
 	fi
 
-	owner="$(volume_owner_uid "$vol" "$target")"
+	# 末尾的 `|| true` 是必需的：volume_owner_uid 内部 docker run 失败时（例如目标
+	# 路径不存在），在 `set -euo pipefail` 下这个赋值会让整个预检**无声中止**，
+	# 用户只看到脚本突然退出。这里改为把失败交给下面的 owner 为空判断。
+	owner="$(volume_owner_uid "$vol" "$target" || true)"
 	[ "$owner" = "$cu" ] && return 0
 
 	if [ "$auto_fix" = "1" ]; then
-		printf '    命名卷 %s 属主为 %s，容器内 uid 是 %s，尝试修正…\n' \
-			"$vol" "${owner:-未知}" "$cu"
+		printf '    命名卷 %s 对容器内 uid %s 不可写（当前属主 %s），尝试修正…\n' \
+			"$vol" "$cu" "${owner:-未知}"
 		if repair_volume_owner "$vol" "$target" "$cu" "$cg" &&
-			[ "$(volume_owner_uid "$vol" "$target")" = "$cu" ]; then
+			[ "$(volume_owner_uid "$vol" "$target" || true)" = "$cu" ]; then
 			return 0
 		fi
 		printf '    卷属主修正失败。\n'
@@ -300,7 +337,8 @@ check_home_volume() {
 
 错误：命名卷 ${vol} 的属主不是容器内的 uid ${cu}
 
-  卷内目录：${target}（容器内即 \$DSH_HOME）
+  卷内目录：${target}（这个卷根目录在容器内就是 \$DSH_HOME）
+  卷内路径：容器内 \$DSH_HOME = /home/node/.dsh
   现状属主：${owner:-未知}
   影响：agent 写不进自己的配置目录（会话 / 凭据 / 登录用户）。
   原因：命名卷首次使用时由 Docker 按镜像目录播种，镜像里是 1000:1000。

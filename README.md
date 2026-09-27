@@ -22,6 +22,27 @@ DeepSeek Harness（简称 dsh）是一个能在你机器上跑命令、读写文
 
 ---
 
+## 与官方 dsh 的区别
+
+官方 `@deepseek-ai/dsh` 是一个命令行工具；**本项目是它的部署外壳，不改它的源码**，只利用它官方的扩展机制
+（profile bundle、`--patch`、`__DSH_TRANSPORT__` 注入口）。
+
+| 能力 | 官方 dsh | 本项目 |
+|---|---|---|
+| 安装/部署 | `npm i -g @deepseek-ai/dsh`、`npx`，无官方 Docker 方案 | Docker 镜像 + compose，`./install.sh` 一条命令 |
+| 对外监听 | **只允许回环**，明确拒绝 `--host 0.0.0.0` | 代理对外，dsh 仍只监听回环 |
+| 认证 | 一次性 token 换签名 Cookie；**没有登录页、没有用户、没有 TOTP** | 登录页 + 密码 + 可选 TOTP + 限速 + 用户管理（由插件提供） |
+| token 体验 | 要手动复制启动 URL | 自动桥接，用户全程看不到 token |
+| 局域网/域名访问 | 非 localhost 下设置页不可用；非安全上下文缺 `randomUUID` | 注入补丁修复，IP/域名访问功能完整 |
+| Docker 支持 | 官方无镜像、无 Dockerfile、无容器指南 | 本项目的核心 |
+| 加固默认值 | 有沙箱，但需使用者自行配置 | 预设非 root / `cap_drop` / `workspace-write` |
+| 升级 | `npm update -g` | `./dshctl update` 或容器内 `dsh-update` |
+| 构建/发布 | 无 | 多架构构建 + GHCR + 真实容器冒烟测试 |
+
+> 两者是**互补**关系：dsh 提供 Agent 能力，本项目负责"把它安全地放到服务器上"。
+
+---
+
 ## 能干什么（功能总览）
 
 | 功能 | 说明 |
@@ -142,6 +163,30 @@ dsh 原生流程是：启动时生成一个一次性 token，打印成 `http://.
 
 镜像里预装了 `git`、`ripgrep`、`jq`、`curl`、`rsync`、`sqlite3`、`python3` 等常用命令，以及 `pnpm`。
 需要更完整的编译环境（给带原生依赖的插件用）时，用 `DEV_TOOLS=full` 重新构建。
+
+---
+
+## 本项目在官方与插件之上做了什么
+
+刻意分层说清楚，避免把别人的功劳算到自己头上：
+
+- **官方 dsh 提供**：Agent 运行时、Web UI、一次性 token 认证、文件沙箱、插件机制。
+- **`dsh-auth-gate` 插件提供**（第三方，详见文末致谢）：登录页、会话、TOTP、登录限速、用户管理 CLI、
+  以及 launch token → 会话 Cookie 的自动桥接。
+- **本项目自己做的**（其余所有）：
+
+  1. **对外代理层**：监听 `0.0.0.0`、转发 HTTP/WebSocket，并把 `Host`/`Origin` **一致改写**为回环
+     authority——因此**不需要配置 `--trusted-host`**，也修正了上一版"改写 Host 会丢 Cookie"的错误论断。
+  2. **前端兼容注入**：往 HTML 注入 `crypto.randomUUID` 补丁和 `__DSH_TRANSPORT__.ownsHost`
+     （插件明确**不**解决"域名下设置页不可用"，官方也把这块留给部署者）。
+  3. **镜像工程**：多阶段构建、把带插件的 profile **预置**进镜像、空卷/bind mount 首启自动播种、
+     首次启动按环境变量建管理员、配置全部由 `.env` 驱动。
+  4. **dsh 启动 wrapper**：自动补 `--expose-internals`（否则 `dsh web` 会因 HMR 插件直接崩，这是实测坑）。
+  5. **加固默认值**：非 root、`cap_drop: ALL`、`no-new-privileges`、
+     `NARB_DISABLE_NATIVE_CACHE=1`、构建期版本断言。
+  6. **运维工具**：`install.sh`、`dshctl`、`dsh-update`、`healthcheck`、`smoke-test`。
+  7. **CI**：多架构（amd64/arm64）构建推 GHCR + 真实容器冒烟测试。
+  8. **文档与实测**：`SECURITY.md` / `DESIGN.md`，并记录了对真实 dsh 的行为验证。
 
 ---
 
@@ -296,6 +341,34 @@ docker exec -it dsh node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate
 
 **Q：不把它放在公网可以吗？**
 可以。默认只绑 `127.0.0.1`，本机或 SSH 隧道访问都行。
+
+---
+
+## 使用的第三方组件与致谢
+
+本项目**大量依赖他人的成果**，特此说明：
+
+| 组件 | 来源 | 许可 | 在本项目里的作用 |
+|---|---|---|---|
+| `@deepseek-ai/dsh` | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | 见上游 | 本体：Agent 运行时 + Web UI |
+| **`dsh-auth-gate`** | [TecFancy/dsh-auth-gate](https://github.com/TecFancy/dsh-auth-gate)（npm `0.15.0`） | MIT | **登录门禁**：登录页、会话、TOTP、限速、用户 CLI、token 桥接 |
+| `http-proxy` | [http-party/node-http-proxy](https://github.com/http-party/node-http-proxy) | MIT | 对外转发代理 |
+| `tini` | [krallin/tini](https://github.com/krallin/tini) | MIT | 容器 init，转发信号、回收子进程 |
+| `pnpm` | [pnpm/pnpm](https://github.com/pnpm/pnpm) | MIT | 安装/管理 dsh 插件 |
+| `node:24-bookworm-slim` | [Node.js 官方镜像](https://hub.docker.com/_/node) | 见上游 | 基础镜像 |
+
+**本项目没有修改以上任何组件的源码**（唯一一处是对 dsh 客户端注入一小段脚本，属于运行时页面注入，不改文件）。
+
+### 设计参考的社区项目
+
+调研阶段参考了这些社区的思路与踩坑记录，一并致谢：
+[Xidong-AI](https://github.com/Xidong-AI/deepseek-harness-web-docker)、
+[smanx](https://github.com/smanx/deepseek-harness-docker)、
+[runzhliu](https://github.com/runzhliu/deepseek-harness-docker)、
+[misaka-link](https://github.com/misaka-link/deepseek-harness-docker)、
+[Sovea](https://github.com/Sovea/deepseek-harness-docker)、
+[gehennawu](https://github.com/gehennawu/dsh-nas)、
+[okxlin/release-factory](https://github.com/okxlin/release-factory)。
 
 ---
 

@@ -35,6 +35,31 @@ cd deepseek-harness-docker
 
 Open `http://<host>:3080/`, sign in with `admin` + your password.
 
+## Relationship to official dsh
+
+Official `@deepseek-ai/dsh` is a CLI. This project is a **deployment shell around it** and does not modify its
+source; it only uses dsh's official extension points (profile bundles, `--patch`, the `__DSH_TRANSPORT__` seam).
+
+| Capability | Official dsh | This project |
+|---|---|---|
+| Deployment | npm/npx; no official Docker support | Docker image + compose, `./install.sh` |
+| Network | loopback only; `--host 0.0.0.0` rejected | proxy exposes it, dsh stays on loopback |
+| Auth | one-time token → signed cookie; no login page/users/TOTP | login page + password + optional TOTP + rate limiting + user management (via plugin) |
+| Token UX | you copy the startup URL | bridged automatically; the token is never shown |
+| LAN/domain | Settings unavailable off-localhost; no `randomUUID` in non-secure contexts | injected patch fixes both |
+| Hardening | sandbox available but you configure it | non-root, `cap_drop`, `workspace-write` defaults |
+
+## What this project adds (on top of dsh and the plugin)
+
+- **Official dsh** provides the agent runtime, Web UI, token auth, sandbox and plugin system.
+- **`dsh-auth-gate`** (third party) provides the login page, sessions, TOTP, rate limiting, user CLI and the
+  launch-token bridge.
+- **This project provides everything else**: the forward proxy (Host/Origin rewrite to loopback, so no
+  `--trusted-host` config), the front-end injection (`randomUUID` + `ownsHost`, which the plugin deliberately
+  does not do), the image engineering (multi-stage build, pre-installed plugin profile, first-boot seeding and
+  admin creation, `.env`-driven config), the `--expose-internals` wrapper, hardening defaults, the ops CLI
+  (`install.sh`, `dshctl`, `dsh-update`, healthcheck, smoke test), the CI pipeline, and the docs.
+
 ## Architecture
 
 ```
@@ -74,5 +99,17 @@ the in-container proxy rewrites Host/Origin to loopback consistently.
 ./dshctl update [version]          # host-side, reproducible
 docker exec -it dsh dsh-update     # in-place, persisted under $DSH_HOME/npm-global
 ```
+
+## Third-party components
+
+| Component | Source | License | Role here |
+|---|---|---|---|
+| `@deepseek-ai/dsh` | DeepSeek Harness | upstream | the agent runtime + Web UI |
+| `dsh-auth-gate` | [TecFancy/dsh-auth-gate](https://github.com/TecFancy/dsh-auth-gate) | MIT | login page, sessions, TOTP, rate limiting, token bridge |
+| `http-proxy` | http-party | MIT | forward proxy |
+| `tini` | krallin | MIT | container init |
+| `pnpm` | pnpm | MIT | plugin management |
+
+No source of these components is modified.
 
 See [README.md](README.md) (Chinese) for the full documentation. MIT licensed.

@@ -247,6 +247,10 @@ dshctl                   宿主机管理命令
 
 - **页面打不开 / 502**：`./dshctl logs` 看是不是 dsh 还没起来（首次启动可能要 1–2 分钟）。
 - **一直停在登录页**：确认 `.env` 里的密码和用户名；改密码用 `./dshctl password admin`。
+  如果密码没错却总被弹回登录页，先检查是不是 **`DSH_COOKIE_SECURE=1` 却在用 HTTP 访问**：
+  `Secure` Cookie 在非 localhost 的 HTTP 页面会被浏览器拒收，导致登录态存不下来。
+  解决：改成 `DSH_COOKIE_SECURE=0`，或真的上 HTTPS。（浏览器 F12 → Cookies 里看不到 `dsh_auth` 即是此因；
+  用 curl 测不出来，因为 curl 不遵守 `Secure`。）
 - **设置页提示 "settings are unavailable in this browser"**：正常情况不会出现——代理已注入
   `__DSH_TRANSPORT__.ownsHost`。若出现，说明代理注入没生效，检查 `proxy/index.js` 是否在运行。
 - **升级后登录插件报错**：插件的兼容区间是 dsh `^0.1.0-rc.6 || ^0.1.5-rc.2 || ^0.1.7-alpha.1`，

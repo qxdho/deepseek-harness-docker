@@ -63,8 +63,6 @@ ensure_env DSH_AUTH_USER "登录用户名" "admin" 0 env_validate_username
 ensure_env PROXY_PORT "对外端口" "3080" 0 env_validate_port
 ensure_env DSH_BIND "监听地址（127.0.0.1=仅本机，0.0.0.0=局域网可访问）" "127.0.0.1" 0 env_validate_bind
 ensure_env DSH_WORKSPACE "工作区目录（挂到容器 /workspace）" "./workspace" 0 ""
-ensure_env DSH_TOTP "两步验证 off/optional/required" "optional" 0 env_validate_totp
-ensure_env DEEPSEEK_API_KEY "DeepSeek API Key（可留空，之后也能在界面配置）" "" 1 ""
 
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────
 hdr "获取镜像"

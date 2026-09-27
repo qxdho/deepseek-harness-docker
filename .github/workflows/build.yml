@@ -75,6 +75,18 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # 离线检查先跑：不需要 docker，几秒出结果，避免白等一轮镜像构建。
+      - name: 工作区预检离线测试
+        run: |
+          chmod +x scripts/preflight.sh scripts/test-preflight.sh
+          ./scripts/test-preflight.sh
+
+      - name: 代理注入单元测试
+        run: |
+          cd proxy
+          npm install --omit=dev --no-fund --no-audit
+          node test-inject.js
+
       - uses: docker/build-push-action@v6
         with:
           context: .

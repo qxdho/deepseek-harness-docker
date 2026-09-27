@@ -105,6 +105,9 @@ COPY scripts/healthcheck.sh /usr/local/bin/dsh-healthcheck
 RUN chmod 0755 /app/entrypoint.sh /usr/local/bin/dsh-healthcheck
 
 # 让空命名卷/空 bind mount 首启就有可用的已装插件 profile
+# 注意：/workspace 的这次 chown 只对「命名卷」有效。生产用的是 bind mount
+# （docker-compose.yml），挂载会遮蔽这里的属主 —— 宿主目录的属主才是决定性的，
+# 因此运行时用 scripts/preflight.sh 和 entrypoint.sh 的检查兜底。详见 DESIGN.md §5.1。
 RUN set -eux; \
     mkdir -p "${DSH_HOME}/profiles" /workspace; \
     cp -a /opt/dsh-seed/profiles/web "${DSH_HOME}/profiles/web"; \

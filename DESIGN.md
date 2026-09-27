@@ -80,6 +80,37 @@ Rewriting Host to loopback also removes the need to configure `--trusted-host` p
   and empty volumes), writes the plugin config from environment variables, and creates the admin user
   only when no `auth/users.yaml` exists.
 
+### 5.1 The `/workspace` bind-mount ownership trap
+
+`${DSH_WORKSPACE:-./workspace}:/workspace` is a bind mount, and **a bind mount shadows whatever the
+image set up underneath it**. The `chown -R node:node … /workspace` in the Dockerfile is therefore a
+no-op at runtime. Worse, when the host-side source directory does not exist, the Docker daemon creates
+it **as root** (Compose ignores `bind.create_host_path: false` —
+[docker/compose#13602](https://github.com/docker/compose/issues/13602)). The agent then runs as
+`node` (UID 1000) against a `root:root 0755` directory, and the failure surfaces far from its cause:
+
+```
+EACCES: permission denied, mkdir '/workspace/xxx'
+```
+
+There is no way to fix this from inside the container, and there should not be: `cap_drop: ALL`
+removes `CAP_CHOWN` and `CAP_DAC_OVERRIDE`, the image is `USER node`, and `DSH_PERMISSION_MODE=workspace-write`
+(Landlock) does not confine a root process — so a root entrypoint that chowns and then drops privileges
+would silently disable the sandbox this project advertises. The tempting "just add back
+`DAC_OVERRIDE`/`CHOWN`" fix (as some peer projects do) has the same effect.
+
+The chosen approach, matching the rootless-container consensus
+([hindsight #2010](https://github.com/vectorize-io/hindsight/pull/2010)):
+
+1. **Host side** — `scripts/preflight.sh` runs from `install.sh` and `dshm up` *before* `compose up`.
+   Creating the directory while the user still owns it is the whole fix. If it already exists with the
+   wrong owner, it chowns via `sudo` when available and otherwise prints the exact command.
+2. **Container side** — `entrypoint.sh` probes writability of `/workspace` early (before dsh starts) and
+   exits with an actionable message instead of letting the failure appear mid-task.
+3. **Tests** — `scripts/test-preflight.sh` (offline, no Docker) and `scripts/smoke-workspace.sh`
+   (real container; uses `--tmpfs` so the fixture is root-owned even when the tests themselves run as
+   root, which `chmod` cannot reproduce).
+
 ## 6. Verification status
 
 Verified locally (no Docker on this machine, so image build is delegated to CI):
@@ -92,7 +123,19 @@ Verified locally (no Docker on this machine, so image build is delegated to CI):
   - following redirects → `200` and the page contains `__DSH_BOOT__`;
   - a second `GET /` with the cookie → `200`.
 - Verified the Host-rewrite cookie argument (see §3).
+- `scripts/test-preflight.sh` (offline, no Docker) — 19 assertions covering the workspace
+  ownership checks: writable, default value, absolute / `~` / quoted paths, non-writable rejection
+  with actionable output, missing `.env`, and the container-side `entrypoint.sh` check. Passes on a
+  machine with no Docker.
+- `proxy/test-inject.js` (offline, `node`, needs `npm install`) — 10 assertions on the HTML
+  injection point, including the `<header>` / `<headless-…>` false-positive that previously sent
+  the injected script into the document body.
 
 CI (`.github/workflows/build.yml`) builds amd64+arm64 and pushes to GHCR, and runs
 `scripts/smoke-test.sh` against a locally loaded image (container health, unauthenticated redirect,
 login round-trip, session persistence, injected polyfill, unauthenticated `/api` rejection).
+
+The **workspace permission regression** needs a real container and lives in
+`scripts/smoke-workspace.sh`, invoked by `smoke-test.sh`. Its failure fixture uses
+`--tmpfs /workspace:mode=0755` rather than `chmod` on a host directory, because the CI runner is
+root and root ignores permission bits — a `chmod`-based fixture would pass even with the bug present.

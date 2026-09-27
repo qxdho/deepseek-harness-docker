@@ -93,6 +93,51 @@ the in-container proxy rewrites Host/Origin to loopback consistently.
 `dsh-home` volume → `/home/node/.dsh` (config, credentials, sessions, login users) and
 `./workspace` → `/workspace`. Recreating the container does not log you out.
 
+## Workspace permissions
+
+`./workspace` is a **bind mount** at `/workspace`, and a bind mount shadows the ownership
+set inside the image. The agent runs as `node` (UID 1000), so the host directory must be
+writable by UID 1000. If Docker created the directory for you (a missing bind-mount source
+is created by the daemon **as root**), the agent fails with:
+
+```
+EACCES: permission denied, mkdir '/workspace/xxx'
+```
+
+`./install.sh` and `./dshm up` check this before starting the container and fix it when
+`sudo` is available; otherwise they fail with the exact command to run instead of starting a
+broken container. To fix it by hand:
+
+```bash
+# Option 1 — take ownership (directory already exists)
+sudo chown -R 1000:1000 ./workspace
+
+# Option 2 — point DSH_WORKSPACE at a directory you own (no sudo needed)
+mkdir -p ~/dsh-workspace
+echo 'DSH_WORKSPACE=~/dsh-workspace' >> .env
+docker compose down && docker compose up -d
+```
+
+> Changing `DSH_WORKSPACE` requires `down` + `up`, not `restart` — environment variables are
+> only read when the container is created.
+
+**Host user is not UID 1000?** (common on macOS Docker Desktop and NAS boxes) run the
+container as your own user instead:
+
+```bash
+docker run --user "$(id -u):$(id -g)" \
+  -e HOME=/home/node -e DSH_HOME=/home/node/.dsh \
+  -v "$HOME/dsh-home:/home/node/.dsh" \
+  -v "$HOME/dsh-workspace:/workspace" \
+  -p 127.0.0.1:3080:3080 \
+  --env-file .env \
+  ghcr.io/qxdho/deepseek-harness-docker:latest
+```
+
+With `docker compose`, add `user: "${MY_UID}:${MY_GID}"` to the `dsh` service and set
+`MY_UID=$(id -u)` / `MY_GID=$(id -g)` in `.env`. A named volume is also a no-chown option —
+Docker seeds it with the image's ownership — at the cost of not seeing files on the host.
+
 ## Update
 
 ```bash

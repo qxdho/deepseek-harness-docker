@@ -46,6 +46,12 @@ function injectHead(html) {
   const lower = html.toLowerCase();
   const i = lower.indexOf('<head');
   if (i === -1) return INJECT + html;
+  // `<head` 必须正好是 head 标签（后跟 `>` 或空白），否则 `<header>` /
+  // `<headless-…>` 这类元素也会被当成插入点，把脚本注进文档正文。
+  const next = lower[i + 5];
+  if (next !== '>' && next !== undefined && !/\s/.test(next)) {
+    return INJECT + html;
+  }
   const e = html.indexOf('>', i);
   if (e === -1) return INJECT + html;
   return html.slice(0, e + 1) + INJECT + html.slice(e + 1);

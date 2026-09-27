@@ -103,6 +103,19 @@ else
 	bad "登录页响应头同时带 Content-Length 和 Transfer-Encoding（Nginx 会 502）"
 fi
 
+# 工作区权限回归：默认 `docker run` 容器里 /workspace 是 root 属主，只读。
+# 这正是宿主上「bind mount 源目录被 dockerd 以 root 自动创建」时的状态，
+# 由独立的 smoke-workspace.sh 检查（它需要自己控制挂载方式）。
+if [ -x "$(dirname "$0")/smoke-workspace.sh" ]; then
+	echo
+	echo "== 工作区权限回归 =="
+	if "$(dirname "$0")/smoke-workspace.sh" "$IMAGE"; then
+		ok "工作区权限回归通过"
+	else
+		bad "工作区权限回归失败"
+	fi
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

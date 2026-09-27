@@ -131,6 +131,15 @@ up)
 		hdr "本地构建镜像"
 		docker compose build
 	fi
+	# 工作区预检：/workspace 是 bind mount，属主不对的话容器里的 agent 写不进去。
+	# 必须在 compose up 之前跑 —— 源目录被 dockerd 自动创建时属主是 root。
+	hdr "准备工作区"
+	# shellcheck source=scripts/preflight.sh
+	. ./scripts/preflight.sh
+	if ! check_workspace "$PWD" auto 1; then
+		die "工作区未就绪，请按上面的提示处理后重试"
+	fi
+	ok "工作区就绪：${DSH_WORKSPACE_DIR}"
 	hdr "启动服务"
 	docker compose up -d
 	hdr "等待健康检查"

@@ -27,8 +27,29 @@ die() { log "ERROR: $*"; exit 1; }
 SEED=/opt/dsh-seed
 PROFILE="$DSH_HOME/profiles/web"
 WEB_LOG=/tmp/dsh-web.log
+WORKSPACE=/workspace
 
-mkdir -p "$DSH_HOME/profiles" /workspace
+mkdir -p "$DSH_HOME/profiles"
+
+# /workspace 通常是 bind mount，属主由宿主机决定，镜像里的 chown 会被它遮蔽。
+# 若宿主目录是 root 创建的（dockerd 自动创建源目录时就会这样），必须在这里
+# 就报错：否则要等 agent 干活时才蹦 `EACCES: permission denied, mkdir ...`，
+# 报错点离病因很远。这里不尝试自行提权 —— 修属主是宿主机的事，容器内既没有
+# CAP_CHOWN 也不该有。
+mkdir -p "$WORKSPACE" 2>/dev/null || true
+if ! ( : >"${WORKSPACE}/.dsh-write-test" ) 2>/dev/null; then
+  ws_owner="$(stat -c '%U:%G (%a)' "$WORKSPACE" 2>/dev/null || echo '未知')"
+  log "ERROR: /workspace 不可写（属主 ${ws_owner}，当前用户 $(id -un) $(id -u):$(id -g)）"
+  log "        /workspace 是 bind mount，属主由宿主机决定，镜像里的 chown 会被遮蔽。"
+  log "        在宿主机上二选一："
+  log "          A. sudo chown -R 1000:1000 <宿主机上 DSH_WORKSPACE 指向的目录>"
+  log "          B. 换成一个你自己拥有的目录："
+  log "             mkdir -p \"\$HOME/dsh-workspace\""
+  log "             echo \"DSH_WORKSPACE=\$HOME/dsh-workspace\" >> .env"
+  log "             docker compose down && docker compose up -d   # 必须 down+up，restart 不生效"
+  exit 1
+fi
+rm -f "${WORKSPACE}/.dsh-write-test" 2>/dev/null || true
 
 # ── 1. 播种 profile ─────────────────────────────────────────────────────────
 if [ ! -f "$PROFILE/package.json" ]; then

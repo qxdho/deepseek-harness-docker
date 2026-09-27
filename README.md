@@ -78,7 +78,7 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 | `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号用（**≥14 位且含大小写/数字/符号**）；之后改密码用 `./dshm password` |
 | `PROXY_PORT` | `3080` | 宿主机端口 |
 | `DSH_BIND` | `127.0.0.1` | `127.0.0.1`=只有宿主机能访问（配反代）；`0.0.0.0`=局域网可直连 |
-| `DSH_WORKSPACE` | `./workspace` | agent 的工作目录 |
+| `DSH_WORKSPACE` | `./workspace` | agent 的工作目录（**属主必须是 uid 1000**，见「工作区权限」） |
 | `DSH_TOTP` | `optional` | 两步验证：`off` / `optional` / `required` |
 | `DSH_COOKIE_SECURE` | `0` | **HTTP 必须 0**；上 HTTPS 建议改 `1` |
 | `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名（可选，不影响功能） |
@@ -134,9 +134,62 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 ---
 
+## 工作区权限
+
+`./workspace` 通过 bind mount 挂进容器的 `/workspace`。**bind mount 会遮蔽镜像里
+设置的属主**，而容器内的 agent 以 `node`（uid 1000）运行，所以宿主机上这个目录
+必须让 uid 1000 能写。
+
+如果目录是 Docker 自动创建的（源目录不存在时，由 dockerd 以 root 身份创建），
+属主就是 `root:root`，agent 一动手就报：
+
+```
+EACCES: permission denied, mkdir '/workspace/xxx'
+```
+
+`./install.sh` 和 `./dshm up` 会在启动前检查并自动修正（有 `sudo` 时）；修正不了
+会直接报错并给出命令，不会带着问题启动。手工处理方式：
+
+```bash
+# 方式一：改属主（如果目录已存在）
+sudo chown -R 1000:1000 ./workspace
+
+# 方式二：换一个你自己拥有的目录，不需要 sudo
+mkdir -p ~/dsh-workspace
+echo 'DSH_WORKSPACE=~/dsh-workspace' >> .env
+docker compose down && docker compose up -d
+```
+
+> **注意**：改了 `DSH_WORKSPACE` 必须 `down` + `up`，不能只 `restart`。
+> 环境变量只在创建容器时生效，`./dshm restart` 不会重建容器。
+
+**宿主机用户不是 uid 1000？**（常见于 macOS Docker Desktop、群晖等）用 `--user`
+直接以你的 uid 运行容器。注意此时挂载的目录要归你所有：
+
+```bash
+docker run --user "$(id -u):$(id -g)" \
+  -e HOME=/home/node -e DSH_HOME=/home/node/.dsh \
+  -v "$HOME/dsh-home:/home/node/.dsh" \
+  -v "$HOME/dsh-workspace:/workspace" \
+  -p 127.0.0.1:3080:3080 \
+  --env-file .env \
+  ghcr.io/qxdho/deepseek-harness-docker:latest
+```
+
+`docker compose` 也可以，在 `docker-compose.yml` 的 `dsh` 服务下加一行
+`user: "${MY_UID}:${MY_GID}"`，并在 `.env` 里设 `MY_UID=$(id -u)`、`MY_GID=$(id -g)`。
+
+也可以改用命名卷（Docker 会按镜像内属主自动初始化，无需 chown），代价是
+宿主上不能直接看到文件。
+
+---
+
 ## 常见问题
 
 **页面打不开？** `./dshm logs`。首次启动要 1–2 分钟。
+
+**agent 报 `EACCES: permission denied, mkdir '/workspace/xxx'`？** 工作区属主不对，
+见上面的「工作区权限」。快速修复：`sudo chown -R 1000:1000 ./workspace` 后重启。
 
 **密码对但一直弹回登录页？** 多半是 `DSH_COOKIE_SECURE=1` 却在用 HTTP，改回 `0`。
 

@@ -125,11 +125,15 @@ docker exec -it dsh node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate
        proxy_buffering off;
    }
    ```
-2. 在 `.env` 里设置：
+2. **以上做完就能用，下面两个变量都是可选的**（推荐设，但不是必须）：
+   ```ini
+   DSH_COOKIE_SECURE=1                 # 可选：会话 Cookie 带 Secure（更安全）
+   DSH_PUBLIC_HOST=dsh.example.com     # 可选：登录页显示你的域名（否则显示回环地址）
    ```
-   DSH_COOKIE_SECURE=1                 # 会话 Cookie 带 Secure
-   DSH_PUBLIC_HOST=dsh.example.com     # 登录页显示正确域名
-   ```
+   不设这两个，HTTPS 下登录和使用也完全正常——它们只是安全加固和显示优化。
+
+   > 唯一要记住的相反情况：如果你**用 HTTP 访问**，`DSH_COOKIE_SECURE` 必须是 `0`（默认就是 `0`），
+   > 否则浏览器会拒收 `Secure` Cookie 导致登不上。
 
 因为容器内的代理会把 Host/Origin 一致改写成回环地址，**你不需要给 dsh 配 `--trusted-host`**，
 宿主机反代转发什么 Host 都不会导致 403。
@@ -197,8 +201,8 @@ docker exec -it dsh dsh-update 0.1.7-rc.2
 | `DSH_AUTH_USER` | `admin` | 管理员用户名（**只在首次建号时**生效） | 想换用户名（首次启动前改） |
 | `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动用它创建管理员 | `install.sh` 会问；之后改密码用 `./dshctl password` |
 | `DSH_TOTP` | `optional` | 两步验证：`off` / `optional` / `required` | 想强制所有用户开 TOTP 时设 `required` |
-| `DSH_COOKIE_SECURE` | `0` | 设 `1` 时登录会话 Cookie 带 `Secure` | **走 HTTPS 时设 1** |
-| `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名，防钓鱼提示 | 用域名访问时设成你的域名 |
+| `DSH_COOKIE_SECURE` | `0` | 设 `1` 时登录会话 Cookie 带 `Secure` | **可选**：走 HTTPS 时建议设 1；纯 HTTP 必须保持 0 |
+| `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名，防钓鱼提示 | **可选**：用域名访问时填，不填只是显示回环地址 |
 
 ### 容器内的进阶项（默认已设好，一般不用动）
 

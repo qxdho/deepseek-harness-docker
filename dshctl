@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# dshctl — 宿主机上管理这套 compose 栈。
+#
+#   ./dshctl up [--build]       启动（--build 先本地构建）
+#   ./dshctl down               停止（保留 dsh-home 卷）
+#   ./dshctl restart            重启
+#   ./dshctl logs               跟随日志
+#   ./dshctl status             健康/端口/登录地址
+#   ./dshctl url                打印一次性 launch URL（排障用）
+#   ./dshctl shell              进容器
+#   ./dshctl password <用户名>   交互式改登录密码
+#   ./dshctl update [版本]       改 .env 里的 DSH_VERSION 并重建
+#   ./dshctl version            显示容器内 dsh 版本
+set -euo pipefail
+cd "$(dirname "$0")"
+
+ENV_FILE=.env
+CONTAINER=dsh
+
+die() { printf 'dshctl: ERROR: %s\n' "$*" >&2; exit 1; }
+info() { printf 'dshctl: %s\n' "$*" >&2; }
+
+require_docker() {
+	command -v docker >/dev/null 2>&1 || die "未找到 docker"
+	docker compose version >/dev/null 2>&1 || die "未找到 docker compose v2"
+}
+require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env（先 cp .env.example .env 并填写）"; }
+
+env_value() {
+	local v
+	v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+	printf '%s' "${v:-$2}"
+}
+
+set_env() {
+	local key="$1" value="$2" tmp
+	tmp="$(mktemp)"
+	awk -v k="$key" -v v="$value" '
+		BEGIN { done = 0 }
+		$0 ~ "^" k "=" { print k "=" v; done = 1; next }
+		{ print }
+		END { if (!done) print k "=" v }
+	' "$ENV_FILE" >"$tmp"
+	mv "$tmp" "$ENV_FILE"
+}
+
+wait_healthy() {
+	local status
+	for _ in $(seq 1 60); do
+		status="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo unknown)"
+		[ "$status" = "healthy" ] && return 0
+		sleep 5
+	done
+	info "容器未在预期时间内 healthy（当前：$status）"
+	return 1
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+up)
+	require_docker; require_env
+	[ "${1:-}" = "--build" ] && docker compose build
+	docker compose up -d
+	wait_healthy && info "就绪：http://<主机>:$(env_value PROXY_PORT 3080)/"
+	;;
+down)
+	require_docker
+	docker compose down
+	;;
+restart)
+	require_docker
+	docker compose restart
+	wait_healthy && info "已重启"
+	;;
+logs)
+	require_docker
+	docker compose logs -f --tail 100
+	;;
+status)
+	require_docker
+	state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
+	health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo -)"
+	printf '状态：%s（%s）\n' "$state" "$health"
+	printf '入口：http://<主机>:%s/  → 302 到 /auth/login\n' "$(env_value PROXY_PORT 3080)"
+	printf '登录用户：%s\n' "$(env_value DSH_AUTH_USER admin)"
+	;;
+url)
+	require_docker
+	docker exec "$CONTAINER" cat /home/node/.dsh/web-launch-url.txt
+	;;
+shell)
+	require_docker
+	docker exec -it "$CONTAINER" bash
+	;;
+password)
+	require_docker
+	user="${1:-$(env_value DSH_AUTH_USER admin)}"
+	docker exec -it -e DSH_HOME=/home/node/.dsh "$CONTAINER" \
+		node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js user passwd "$user"
+	;;
+update)
+	require_docker; require_env
+	target="${1:-}"
+	if [ -z "$target" ]; then
+		command -v npm >/dev/null 2>&1 || die "没有 npm，无法自动解析版本；请显式指定：./dshctl update <版本>"
+		target="$(npm view @deepseek-ai/dsh dist-tags.latest 2>/dev/null | tr -d '[:space:]')"
+		[ -n "$target" ] || die "无法解析最新版本，请显式指定"
+	fi
+	info "DSH_VERSION $(env_value DSH_VERSION) -> $target"
+	set_env DSH_VERSION "$target"
+	docker compose build
+	docker compose up -d
+	wait_healthy && info "已更新到 dsh $target"
+	;;
+version)
+	require_docker
+	docker exec "$CONTAINER" dsh --version
+	;;
+*)
+	cat >&2 <<'USAGE'
+dshctl — 管理 dsh compose 栈
+
+  up [--build]        启动（--build 先本地构建）
+  down                停止（保留数据卷）
+  restart             重启
+  logs                跟随日志
+  status              健康 / 端口 / 登录用户
+  url                 打印一次性 launch URL（排障）
+  shell               进入容器
+  password [用户名]    交互式修改登录密码
+  update [版本]        更新 dsh 版本并重建
+  version             显示容器内 dsh 版本
+USAGE
+	exit 1
+	;;
+esac

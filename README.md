@@ -1,161 +1,187 @@
-# dsh 自建镜像（学习 smanx 架构，修正其 cookie 缺陷）
+# dsh 一键部署镜像（DeepSeek Harness + 登录门禁）
 
-从零搭一个 dsh 的 Docker 镜像，跑 **`0.1.7-rc.2`**。架构借鉴
-[smanx/deepseek-harness-docker](https://github.com/smanx/deepseek-harness-docker)
-（内部回环 + 外部代理 + 多阶段构建），但修掉了它导致
-`ERR_TOO_MANY_REDIRECTS` 的那个 bug。
+把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`@deepseek-ai/dsh`）的 Web UI
+打包成一个可直接部署的 Docker 镜像，并内置登录页与两步验证。
+
+- **不用再手动贴 token**：dsh 的启动 token 由登录插件在容器内部自动换成会话 Cookie。
+- **有正经登录页**：用户名 + 密码，可选 TOTP 两步验证，带限速与防爆破。
+- **开箱即用**：GitHub Actions 自动构建多架构镜像并推送到 GHCR，服务器上 `docker compose pull && up -d` 即可。
+- **非 root、最小权限**：`cap_drop: ALL` + `no-new-privileges`，文件沙箱默认 `workspace-write`（Landlock）。
+
+> 非官方项目。dsh 仍处于预发布阶段，请阅读 [SECURITY.md](SECURITY.md)。
+
+---
 
 ## 快速开始
 
-```sh
-cp .env.example .env       # 填 PROXY_PASSWORD，必要时填 DSH_TRUSTED_HOSTS
-docker compose up -d --build
-docker compose logs -f dsh
+```bash
+git clone https://github.com/qxdho/deepseek-harness-docker.git
+cd deepseek-harness-docker
+cp .env.example .env
+# 编辑 .env：至少把 DSH_AUTH_PASSWORD 改成一个强密码
+docker compose pull
+docker compose up -d
+# 或使用封装命令： ./dshctl up
 ```
 
-访问 `http://127.0.0.1:3080/`（或你的局域网地址）。
+打开 `http://<服务器IP>:3080/`，会先看到登录页。默认用户名 `admin`，密码是你在 `.env` 里设的。
+登录后即可正常使用 dsh。
 
-## 三个必须理解的设计点
-
-### 1. 为什么需要代理
-
-`dsh web --host 0.0.0.0` 被官方**故意拒绝**：
-
-> `--host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network`
-
-所以 dsh 只能监听回环，对外监听必须由代理承担。这一点 smanx 和本实现一致。
-
-### 2. 为什么必须注入 polyfill
-
-dsh 前端用 `crypto.randomUUID()`，该 API **只在安全上下文**（`https` 或
-`localhost`）可用。通过局域网 IP 访问时是非安全上下文，`randomUUID` 不存在，
-实时通道会一直 pending。代理往 HTML 的 `<head>` 注入一个基于
-`crypto.getRandomValues` 的实现。
-
-### 3. 为什么绝不能改写 Host（本实现与 smanx 的核心差异）
-
-这是整个项目的关键。dsh 的浏览器会话 cookie 与请求 **authority(Host)** 强绑定：
-
-```js
-// dsh-client-connection 源码
-function cookieName(authority) {
-  return COOKIE_PREFIX + encodeBase64Url(sha256(authority));   // cookie 名 = hash(authority)
-}
-function sessionCookie(name, value, ...) {
-  return `${name}=${value}; Max-Age=...; Path=/; HttpOnly; SameSite=Strict`;  // 无 Domain
-}
+```bash
+./dshctl logs       # 跟随日志
+./dshctl status     # 健康状态 / 端口 / 登录用户
+./dshctl down       # 停止（保留数据卷）
 ```
 
-**cookie 名是 Host 的哈希，签名负载里也含 authority。**
-
-smanx 的代理用了 `changeOrigin: true`，会把 Host 改写成 `127.0.0.1:3079`。
-后果链条：
-
-```
-浏览器访问 192.168.1.10:3080
-  → 代理把 Host 改成 127.0.0.1:3079
-  → dsh 按 127.0.0.1:3079 签发 cookie（名字 = sha256("127.0.0.1:3079")）
-  → 303 + Set-Cookie 回到浏览器
-  → 浏览器发现 cookie 名与当前站点不符，直接丢弃
-  → 跟随 Location: / 重新请求，仍无凭据 → 又 401
-  → 代理又换 token → 无限循环 → ERR_TOO_MANY_REDIRECTS
-```
-
-**本实现用 `changeOrigin: false` 全程保留原始 Host**，包括内部换 token 那次
-请求（用 `node:http` 显式设 `host` 头）。这样 dsh 会用浏览器的真实 authority
-签 cookie，浏览器才会接受。
-
-### 实测验证
-
-用一个模拟 dsh cookie 行为的假上游做过端到端验证：
-
-| 检查项 | 结果 |
-|---|---|
-| 非回环 Host 访问 → 上游收到的 Host | `192.168.1.10:3180`（未被改写）✅ |
-| 代理换 token 后下发的 cookie 名 | `== sha256("192.168.1.10:3180")` ✅ |
-| 带该 cookie 再访问 | `200 OK` ✅ |
-| 错误 authority 的 cookie | `401`（正确拒绝）✅ |
-| HTML polyfill 注入 | 已注入 ✅ |
-| 对照：`changeOrigin:true` 的 cookie 名 | `== sha256("127.0.0.1:3181")` ❌ 复现 bug |
-
-## 配置
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `DSH_VERSION` | `0.1.7-rc.2` | 构建参数 |
-| `DSH_PORT` | `3079` | dsh 容器内监听（回环） |
-| `PROXY_PORT` | `3080` | 代理对外端口；`-p` 要对应 |
-| `PROXY_USERNAME` / `PROXY_PASSWORD` | 空 | **两个都设才启用** Basic Auth |
-| `DSH_TRUSTED_HOSTS` | 空 | 浏览器用的 authority，空格分隔 |
-| `DEV_TOOLS` | `none` | `full` = 额外装 python3/make/g++ 等 |
-| `DSH_WORKSPACE` | `./workspace` | 工作区挂载 |
-
-### ⚠️ `DSH_TRUSTED_HOSTS` 必须填对
-
-因为代理保留原始 Host，浏览器带来的 authority 会原样到达 dsh。而 dsh 的
-`/api` 信任栅栏**只接受回环地址和显式声明的 `trustedHosts`**。
-
-**症状**：页面能打开，但所有 API 调用 403、实时通道连不上。
-
-**修法**：把浏览器实际使用的地址填进去（多个空格分隔）：
-
-```sh
-DSH_TRUSTED_HOSTS="192.168.1.10:3080 dsh.example.com"
-```
-
-用 `127.0.0.1` 或 `localhost` 访问时可留空（回环天然被信任）。
-
-## ⚠️ 没有 HTTPS
-
-本实现只提供 HTTP + Basic Auth。**Basic Auth 是 Base64 编码，不是加密**——
-裸 HTTP 下密码等于明文传输。
-
-公网访问必须在前面套一层 HTTPS 反代（1Panel 的 OpenResty/nginx 站点即可）。
-那种情况下建议让 **nginx 负责认证**、这里不设密码，否则会弹两次验证框。
+---
 
 ## 架构
 
 ```
-浏览器 :3080
-   ↓  (Host 原样保留)
-proxy/index.js  ──  Basic Auth（可选）
-   ├─ HTML → 注入 polyfill
-   ├─ 根路径无 cookie → 自动用 launch token 换会话 → 303 透传
-   └─ 其余 → 原样转发（含 SSE / WebSocket）
-   ↓
-dsh web --port 3079 --trusted-host <你填的>
-   (仅 127.0.0.1)
+浏览器 ──▶ 代理 0.0.0.0:3080 ──▶ dsh 127.0.0.1:3079（web profile + dsh-auth-gate）
+             │
+             ├─ 把 Host/Origin 一致改写成 127.0.0.1:3079
+             └─ 往 HTML 注入 crypto.randomUUID 补丁 + __DSH_TRANSPORT__.ownsHost
 ```
 
-`entrypoint.sh` 先起 dsh，轮询就绪后再 `exec` 代理成为主进程。
+- dsh 官方**拒绝** `--host 0.0.0.0`（防止可执行代码的 Web 接口被误暴露），所以 dsh 只监听回环，
+  对外监听由容器内的代理承担。
+- **登录、会话、TOTP、以及 launch token → 会话 Cookie 的桥接，全部由 dsh-auth-gate 插件在 dsh 进程内完成**。
+- 代理只做转发和注入，**不做鉴权**，也**不改 dsh 任何文件**。
 
-### 比 smanx 改进的两处细节
+---
 
-1. **`tail -F` 而非 `-f`**：`-f` 在日志文件尚未创建时会立刻报错退出，导致
-   dsh 自身日志再也看不到（smanx 的日志里就留着这个错）。`-F` 会等待并重试。
-2. **`selfHandleResponse: true`**：`http-proxy` 默认自己写响应头，若在
-   `proxyRes` 里再写会抛 `ERR_HTTP_HEADERS_SENT`。必须显式接管。
+## 关于 token 与 Cookie（重要，请读）
+
+dsh 启动时会生成一个**一次性 token**，打印成 `http://127.0.0.1:3079/?token=…`。用这个 URL 访问一次，
+dsh 会签发一个**会话 Cookie**（默认 30 天），之后的访问都靠这个 Cookie。
+
+**本项目里你永远不会看到这个 token**：登录成功后，dsh-auth-gate 会自动做一次相对跳转
+`/?token=…` 完成交换，然后回到干净的 `/`。
+
+### 常见误解：改写 Host 会不会让浏览器丢掉 Cookie？
+
+**不会。** 这是本项目上一版说明里的错误论断，已在真实 dsh 上实测推翻：
+
+- dsh 的会话 Cookie **不带 `Domain` 属性**，因此浏览器按**它访问的网址**（例如 `dsh.example.com`）
+  存放 Cookie，而不是按 dsh 收到的 `Host` 头。
+- Cookie 的**名字**由 dsh 按收到的 `Host` 计算。只要代理**每次都用同一个 Host 转发**，
+  名字就始终对得上，Cookie 一直有效。
+- 实测：浏览器在 `lan.test:3099` 访问、代理把 Host 改写成 `127.0.0.1:3080`，
+  带 Cookie 再访问得到 **HTTP 200**。
+
+真正会导致 `ERR_TOO_MANY_REDIRECTS` 的是**代理在每个请求上都重新注入 token**（于是
+`/` → `/?token=` → 303 → `/` → … 死循环）。本项目通过"只在插件内部做一次桥接"避免了这个坑。
+
+改写 Host 为回环还有个好处：**不需要为每个访问域名配置 `--trusted-host`**。
+
+---
+
+## 登录与两步验证（TOTP）
+
+登录由 [`dsh-auth-gate`](https://github.com/TecFancy/dsh-auth-gate) 提供，配置由 `.env` 驱动：
+
+| 变量 | 取值 | 说明 |
+|---|---|---|
+| `DSH_AUTH_USER` | 默认 `admin` | 首次启动创建的管理员用户名 |
+| `DSH_AUTH_PASSWORD` | 必填 | 首次启动用它建号；之后改密码用 `./dshctl password` |
+| `DSH_TOTP` | `off` / `optional` / `required` | 默认 `optional`：绑定了 TOTP 的用户登录时要输验证码 |
+
+给管理员开启 TOTP：
+
+```bash
+docker exec -it dsh node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js \
+  user totp enable admin
+# 按提示把 otpauth:// 链接导入验证器应用（Google Authenticator / 1Password 等）
+```
+
+> 用户列表在 `$DSH_HOME/auth/users.yaml`，随数据卷持久化。
+
+---
+
+## HTTPS（默认是纯 HTTP）
+
+默认镜像只提供 HTTP，适合可信内网。**Basic/密码登录在明文 HTTP 下不安全**，公网部署请务必加 TLS。
+最简单的方式是在前面再放一个 TLS 反代（Caddy / Nginx / Cloudflare Tunnel），并：
+
+1. 把 `DSH_COOKIE_SECURE=1`（让会话 Cookie 带 `Secure`）；
+2. 把 `DSH_PUBLIC_HOST=你的域名`（登录页显示正确域名，而不是回环地址）。
+
+仓库提供了一份可选覆盖（`docker-compose.tls.yml` + `Caddyfile`）用于在本机加一层 Caddy HTTPS，
+详见文件内注释。
+
+---
 
 ## 数据持久化
 
-| 位置 | 内容 |
-|---|---|
-| `dsh-home` 卷 → `/home/node/.dsh` | 会话、设置、凭证 |
-| `./workspace` → `/workspace` | 代码 |
+| 容器内路径 | 内容 | 卷 |
+|---|---|---|
+| `/home/node/.dsh` | 配置、凭据、会话、工作区索引、登录用户 | 命名卷 `dsh-home` |
+| `/workspace` | agent 的工作目录（bind mount） | `./workspace` |
 
-重建容器不丢数据（卷在宿主机上）。**升级前**仍建议备份：
+登录用户、dsh 的 Cookie 签名密钥都在 `dsh-home` 卷里，**重建容器不会丢**，所以不需要重新登录。
 
-```sh
-docker run --rm -v dsh-own_dsh-home:/d -v "$PWD:/b" alpine \
-  tar czf /b/dsh-home-backup.tgz -C /d .
+---
+
+## 自更新
+
+```bash
+# 宿主侧（推荐，可复现）：改 .env 里的 DSH_VERSION → 重建 → 等待健康
+./dshctl update
+./dshctl update 0.1.7-rc.2
+
+# 容器内就地升级（写入持久化 npm prefix，重建容器也不丢）
+docker exec -it dsh dsh-update
+docker exec -it dsh dsh-update 0.1.7-rc.2
+./dshctl restart
 ```
 
-## 测试工具
+升级 dsh 后，登录插件会照常工作（它跟随 dsh 版本维护，并在启动时校验语义）。若升级后访问异常，
+先看 `./dshctl logs`。
 
-`fake-dsh.js` 模拟 dsh 的 cookie 签发行为，用于验证代理，不参与镜像构建：
+---
 
-```sh
-FAKE_PORT=3181 node fake-dsh.js > /tmp/fake-dsh.log 2>&1 &
-DSH_PORT=3181 PROXY_PORT=3280 DSH_WEB_LOG=/tmp/fake-dsh.log node proxy/index.js &
-curl -i -H "Host: 192.168.1.10:3280" http://127.0.0.1:3280/   # 应 303 + Set-Cookie
+## 配置项
+
+见 [.env.example](.env.example)。常用：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PROXY_PORT` | `3080` | 宿主机端口 |
+| `DSH_AUTH_USER` / `DSH_AUTH_PASSWORD` | `admin` / — | 登录账号 |
+| `DSH_TOTP` | `optional` | 两步验证档位 |
+| `DSH_COOKIE_SECURE` | `0` | 走 HTTPS 时设 `1` |
+| `DSH_PUBLIC_HOST` | 空 | 登录页显示域名 |
+| `DSH_WORKSPACE` | `./workspace` | agent 工作目录 |
+| `DSH_VERSION` | `0.1.7-rc.2` | 本地构建时内置的 dsh 版本 |
+| `DEV_TOOLS` | `none` | `full` 时额外装编译链，供容器内装带原生依赖的插件 |
+
+---
+
+## 目录结构
+
 ```
+Dockerfile               多阶段构建：装 dsh + 预置 dsh-auth-gate 的 profile
+docker-compose.yml       拉 GHCR 镜像（或本地构建）并启动
+docker-compose.tls.yml   可选：加一层 Caddy HTTPS
+entrypoint.sh            播种 profile、建管理员、起 dsh 与代理
+proxy/index.js           薄转发 + Host/Origin 改写 + HTML 注入（不做鉴权）
+scripts/                 健康检查、自更新、冒烟测试、dsh wrapper
+dshctl                   宿主机管理命令
+.github/workflows/       GHCR 多架构构建 + 真实冒烟测试
+```
+
+---
+
+## 排障
+
+- **页面打不开 / 502**：`./dshctl logs` 看是不是 dsh 还没起来（首次启动可能要 1–2 分钟）。
+- **一直停在登录页**：确认 `.env` 里的密码和用户名；改密码用 `./dshctl password admin`。
+- **设置页提示 "settings are unavailable in this browser"**：正常情况不会出现——代理已注入
+  `__DSH_TRANSPORT__.ownsHost`。若出现，说明代理注入没生效，检查 `proxy/index.js` 是否在运行。
+- **升级后登录插件报错**：插件的兼容区间是 dsh `^0.1.0-rc.6 || ^0.1.5-rc.2 || ^0.1.7-alpha.1`，
+  换到区间外的版本需要同步升级插件（`AUTH_GATE_VERSION`）。
+
+## 许可证
+
+MIT。DeepSeek Harness 与其插件按其各自许可单独授权。

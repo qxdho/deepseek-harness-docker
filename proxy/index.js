@@ -1,263 +1,112 @@
 #!/usr/bin/env node
 /**
- * dsh 反向代理：把容器内回环监听的 dsh 暴露到局域网。
+ * dsh 对外代理（薄转发层）。
  *
- * 为什么需要它（而不是直接 `dsh web --host 0.0.0.0`）：
- *   1. dsh 官方明确拒绝 --host 0.0.0.0，只允许回环。
- *   2. dsh 前端用 crypto.randomUUID()，该 API 只在安全上下文
- *      (https / localhost) 可用。局域网 IP 访问时是非安全上下文，
- *      实时通道会一直 pending，所以必须注入 polyfill。
- *   3. dsh 的浏览器会话 cookie 与请求 authority(Host) 强绑定：
- *        cookie 名 = sha256(authority)，签名负载里也含 authority。
- *      因此代理【绝不能】改写 Host。一旦改写，Set-Cookie 带回的 cookie
- *      名与浏览器当前站点不符，会被浏览器直接丢弃，根路径永远 401，
- *      陷入 401 -> 换 token -> 303 -> 401 的无限重定向
- *      （这正是 smanx 的 changeOrigin:true 导致的 ERR_TOO_MANY_REDIRECTS）。
+ * 它只做三件事，**不做鉴权**（鉴权由 dsh 进程内的 dsh-auth-gate 插件完成）：
  *
- * 本实现与 smanx 的核心差异：全程保留原始 Host，包括内部换 token 的那次
- * 请求。这样 dsh 会用浏览器的 authority 签发 cookie，浏览器才会接受。
+ *   1. 监听 0.0.0.0:PROXY_PORT，转发到 dsh 的 127.0.0.1:DSH_PORT（HTTP + WebSocket）。
+ *   2. 把 Host 和 Origin 一致地改写成回环 authority。
+ *      - 为什么必须一致：dsh 的 /api 信任栅栏要求 Host 是回环或受信 authority，
+ *        且 Origin（若有）必须等于 Host。
+ *      - 为什么改写 Host 不会破坏会话 Cookie：dsh 的会话 Cookie 不带 Domain，
+ *        浏览器按"它访问的网址"存放；Cookie 名由 dsh 按收到的 Host 计算，
+ *        只要代理每次都用同一个 Host 转发，名字就对得上，Cookie 一直有效。
+ *      - 好处：不需要为每个访问域名配置 --trusted-host。
+ *   3. 往 HTML 的 <head> 注入一小段脚本：
+ *      - crypto.randomUUID 补丁（局域网 IP 是浏览器非安全上下文，原 API 不存在，
+ *        否则实时通道会一直 pending）；
+ *      - globalThis.__DSH_TRANSPORT__.ownsHost = true（dsh 官方预留的注入口），
+ *        让浏览器认为"页面是本机"，从而在域名/局域网访问下也能编辑设置页。
  */
 'use strict';
 
 const http = require('node:http');
-const fs = require('node:fs');
-const crypto = require('node:crypto');
 const httpProxy = require('http-proxy');
 
-// ── 配置 ────────────────────────────────────────────────────────────────────
 const DSH_HOST = process.env.DSH_HOST || '127.0.0.1';
 const DSH_PORT = Number(process.env.DSH_PORT) || 3079;
 const LISTEN_PORT = Number(process.env.PROXY_PORT) || 3080;
 const TARGET = `http://${DSH_HOST}:${DSH_PORT}`;
-const WEB_LOG = process.env.DSH_WEB_LOG || '/tmp/dsh-web.log';
+const UPSTREAM_AUTHORITY = `${DSH_HOST}:${DSH_PORT}`;
 
-const AUTH_USER = process.env.PROXY_USERNAME || '';
-const AUTH_PASS = process.env.PROXY_PASSWORD || '';
-const AUTH_ENABLED = Boolean(AUTH_USER && AUTH_PASS);
-const AUTH_REALM = 'dsh';
-
-/** 不参与 Basic Auth 的静态资源：浏览器抓 manifest 时不带凭据。 */
-const PUBLIC_PATHS = new Set(['/manifest.webmanifest', '/favicon.svg', '/favicon.ico']);
-
-// ── Basic Auth ──────────────────────────────────────────────────────────────
-/** 恒定时间比较，避免通过响应时间逐字节猜密码。 */
-function safeEqual(a, b) {
-  const ba = Buffer.from(String(a), 'utf8');
-  const bb = Buffer.from(String(b), 'utf8');
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
-}
-
-function checkAuth(req) {
-  if (!AUTH_ENABLED) return true;
-  const m = /^Basic\s+(.+)$/i.exec(req.headers.authorization || '');
-  if (!m) return false;
-  let decoded;
-  try {
-    decoded = Buffer.from(m[1], 'base64').toString('utf8');
-  } catch {
-    return false;
-  }
-  const i = decoded.indexOf(':');
-  if (i === -1) return false;
-  return safeEqual(decoded.slice(0, i), AUTH_USER) && safeEqual(decoded.slice(i + 1), AUTH_PASS);
-}
-
-function rejectHttp(res) {
-  res.writeHead(401, {
-    'WWW-Authenticate': `Basic realm="${AUTH_REALM}", charset="UTF-8"`,
-    'Content-Type': 'text/plain; charset=utf-8',
-  });
-  res.end('401 Unauthorized\n');
-}
-
-function rejectUpgrade(socket) {
-  socket.end(
-    `HTTP/1.1 401 Unauthorized\r\n` +
-      `WWW-Authenticate: Basic realm="${AUTH_REALM}", charset="UTF-8"\r\n` +
-      `Connection: close\r\n\r\n`,
-  );
-}
-
-// ── 前端 polyfill ───────────────────────────────────────────────────────────
-const POLYFILL = `<script>(function(){
-if(typeof crypto!=="undefined"&&!crypto.randomUUID){
-  crypto.randomUUID=function(){
-    var b=crypto.getRandomValues(new Uint8Array(16));
+const INJECT = `<script id="dsh-forward-inject">(function(){try{
+var c=globalThis.crypto;
+if(c&&typeof c.randomUUID!=="function"){
+  c.randomUUID=function(){
+    var b=c.getRandomValues(new Uint8Array(16));
     b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;
     var h=[];for(var i=0;i<16;i++)h.push((b[i]+0x100).toString(16).slice(1));
-    return h.slice(0,4).join("")+"-"+h.slice(4,6).join("")+"-"+h.slice(6,8).join("")
-      +"-"+h.slice(8,10).join("")+"-"+h.slice(10,16).join("");
+    return h.slice(0,4).join("")+"-"+h.slice(4,6).join("")+"-"+h.slice(6,8).join("")+"-"+h.slice(8,10).join("")+"-"+h.slice(10,16).join("");
   };
 }
-})();</script>`;
+globalThis.__DSH_TRANSPORT__=Object.assign({},globalThis.__DSH_TRANSPORT__||{},{ownsHost:true});
+}catch(e){}})();</script>`;
 
-function injectIntoHead(html) {
-  const i = html.toLowerCase().indexOf('<head');
-  if (i !== -1) {
-    const e = html.indexOf('>', i);
-    if (e !== -1) return html.slice(0, e + 1) + POLYFILL + html.slice(e + 1);
-  }
-  return POLYFILL + html;
+function injectHead(html) {
+  const lower = html.toLowerCase();
+  const i = lower.indexOf('<head');
+  if (i === -1) return INJECT + html;
+  const e = html.indexOf('>', i);
+  if (e === -1) return INJECT + html;
+  return html.slice(0, e + 1) + INJECT + html.slice(e + 1);
 }
 
-// ── launch token 打捞与自动换会话 ───────────────────────────────────────────
-// dsh 启动时会打印 http://127.0.0.1:3079/?token=xxxx。浏览器首次访问根路径
-// 会拿到 401，必须带这个 token 访问一次，dsh 才会签发会话 cookie 并 303 到 /。
-// 代理自动完成这一步，用户直接访问 / 即可。
-const TOKEN_RE = /[?&]token=([A-Za-z0-9._~-]{16,})/;
-let cachedToken = null;
-let tokenScanned = false;
-
-function scrapeToken() {
-  if (cachedToken) return cachedToken;
-  try {
-    const text = fs.readFileSync(WEB_LOG, 'utf8');
-    const m = TOKEN_RE.exec(text); // 取第一个即可
-    if (m) {
-      cachedToken = m[1];
-      console.log(`[token] 已从日志捕获 launch token（长度 ${cachedToken.length}）`);
-    }
-  } catch {
-    /* 文件还不存在 */
-  }
-  tokenScanned = true;
-  return cachedToken;
-}
-
-/**
- * 用 node:http 直接请求上游，显式设置 Host。
- * 这是与 smanx 最关键的区别：换 token 的这次请求也必须带上浏览器的 Host，
- * 否则 dsh 会用 127.0.0.1:3079 作为 authority 签 cookie，浏览器会丢弃它。
- */
-function requestUpstream(pathWithQuery, originalHost, cookieHeader) {
-  return new Promise((resolve, reject) => {
-    const headers = { host: originalHost, accept: 'text/html,application/xhtml+xml' };
-    if (cookieHeader) headers.cookie = cookieHeader;
-    const req = http.request(
-      { host: DSH_HOST, port: DSH_PORT, path: pathWithQuery, method: 'GET', headers },
-      (up) => {
-        const chunks = [];
-        up.on('data', (c) => chunks.push(c));
-        up.on('end', () =>
-          resolve({
-            status: up.statusCode || 500,
-            headers: up.headers,
-            body: Buffer.concat(chunks),
-          }),
-        );
-      },
-    );
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-// ── 代理 ────────────────────────────────────────────────────────────────────
-// selfHandleResponse: true —— 由我们自己写响应，否则 http-proxy 会先写一次
-// 响应头，我们再写就会抛 ERR_HTTP_HEADERS_SENT。
 const proxy = httpProxy.createProxyServer({
   target: TARGET,
+  changeOrigin: true,
   ws: true,
-  changeOrigin: false, // 关键：保留浏览器原始 Host
   xfwd: true,
   selfHandleResponse: true,
 });
 
-proxy.on('error', (err, req, res) => {
-  console.error(`[proxy] 上游 ${TARGET} 出错：${err.code || err.message}`);
-  if (res && typeof res.writeHead === 'function') {
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('502 Bad Gateway: dsh 不可达或已退出\n');
-    } else {
-      res.end();
-    }
-  } else if (res && typeof res.destroy === 'function') {
-    res.destroy();
-  }
+// 统一改写 Host/Origin，并请求不压缩的响应，便于安全地注入 HTML。
+proxy.on('proxyReq', (proxyReq) => {
+  proxyReq.setHeader('host', UPSTREAM_AUTHORITY);
+  proxyReq.setHeader('origin', `http://${UPSTREAM_AUTHORITY}`);
+  proxyReq.setHeader('accept-encoding', 'identity');
+});
+proxy.on('proxyReqWs', (proxyReq) => {
+  proxyReq.setHeader('host', UPSTREAM_AUTHORITY);
+  proxyReq.setHeader('origin', `http://${UPSTREAM_AUTHORITY}`);
 });
 
-/** 原样透传上游响应（含 3xx 的 location/set-cookie，SSE 等）。 */
-function passthrough(proxyRes, res) {
-  const headers = { ...proxyRes.headers };
-  res.writeHead(proxyRes.statusCode || 200, headers);
-  proxyRes.pipe(res);
-}
-
 proxy.on('proxyRes', (proxyRes, req, res) => {
-  const ct = String(proxyRes.headers['content-type'] || '');
-  if (!ct.includes('text/html')) {
-    passthrough(proxyRes, res);
+  const type = String(proxyRes.headers['content-type'] || '');
+  const isHtml = /text\/html/i.test(type);
+  const noBody = req.method === 'HEAD' || proxyRes.statusCode === 204 || proxyRes.statusCode === 304;
+
+  if (!isHtml || noBody) {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
     return;
   }
+
   const chunks = [];
   proxyRes.on('data', (c) => chunks.push(c));
   proxyRes.on('end', () => {
-    const body = injectIntoHead(Buffer.concat(chunks).toString('utf8'));
-    const headers = { ...proxyRes.headers };
-    delete headers['content-length'];
+    const body = Buffer.from(injectHead(Buffer.concat(chunks).toString('utf8')), 'utf8');
+    const headers = Object.assign({}, proxyRes.headers);
     delete headers['content-encoding'];
-    delete headers['transfer-encoding'];
-    res.writeHead(proxyRes.statusCode || 200, headers);
+    headers['content-length'] = String(body.length);
+    res.writeHead(proxyRes.statusCode, headers);
     res.end(body);
   });
 });
 
-/** 根路径 401 时自动用 launch token 换会话 cookie，并透传 303 + Set-Cookie。 */
-async function handleIndexWithToken(req, res) {
-  const host = req.headers.host || `${DSH_HOST}:${DSH_PORT}`;
-  const token = scrapeToken();
-  if (!token) return false;
-
-  const sep = (req.url || '/').includes('?') ? '&' : '?';
-  const authPath = `${req.url || '/'}${sep}token=${encodeURIComponent(token)}`;
-  // 换会话必须剥离浏览器旧 cookie，否则上游可能因无效 cookie 直接 401
-  const up = await requestUpstream(authPath, host, null);
-
-  const headers = { ...up.headers };
-  if (up.headers['set-cookie']) headers['set-cookie'] = up.headers['set-cookie'];
-  console.log(
-    `[token] 根路径 401 → 携带 token 重发（Host: ${host}）→ 上游 ${up.status}` +
-      (up.headers['set-cookie'] ? `，下发 cookie` : ''),
-  );
-  res.writeHead(up.status, headers);
-  res.end(up.body);
-  return true;
-}
-
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url || '/', 'http://proxy.invalid');
-
-  if (!PUBLIC_PATHS.has(url.pathname) && !checkAuth(req)) {
-    rejectHttp(res);
-    return;
+proxy.on('error', (err, req, res) => {
+  const message = `dsh proxy error: ${err.message}\n`;
+  if (res && !res.headersSent && typeof res.writeHead === 'function') {
+    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(message);
+  } else if (res && typeof res.end === 'function') {
+    res.end();
   }
-
-  // 根路径无 cookie 时，先尝试自动换会话
-  if (req.method === 'GET' && url.pathname === '/' && !req.headers.cookie) {
-    handleIndexWithToken(req, res).catch((err) => {
-      console.error('[token] 自动换会话失败，回退普通代理：', err.message);
-      proxy.web(req, res);
-    });
-    return;
-  }
-
-  proxy.web(req, res);
+  console.error(`[proxy] ${message.trim()}`);
 });
 
-server.on('upgrade', (req, socket, head) => {
-  if (!checkAuth(req)) {
-    rejectUpgrade(socket);
-    return;
-  }
-  proxy.ws(req, socket, head);
-});
+const server = http.createServer((req, res) => proxy.web(req, res));
+server.on('upgrade', (req, socket, head) => proxy.ws(req, socket, head));
 
 server.listen(LISTEN_PORT, '0.0.0.0', () => {
-  console.log(
-    `[proxy] 监听 0.0.0.0:${LISTEN_PORT} -> ${TARGET}` +
-      (AUTH_ENABLED ? '（Basic Auth 已启用）' : '（未启用认证！）'),
-  );
-  console.log('[proxy] 保留原始 Host，保证会话 cookie 的 authority 一致');
+  console.log(`[proxy] 0.0.0.0:${LISTEN_PORT} -> ${TARGET}（Host/Origin 改写为 ${UPSTREAM_AUTHORITY}）`);
 });

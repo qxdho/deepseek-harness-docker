@@ -1,36 +1,34 @@
 services:
   dsh:
+    # 默认拉起 GHCR 上由 GitHub Actions 构建好的镜像；本地改代码后可
+    # `./dshctl up --build` 或 `docker compose build` 覆盖。
+    image: ${DSH_IMAGE:-ghcr.io/qxdho/deepseek-harness-docker:latest}
     build:
       context: .
       args:
         DSH_VERSION: ${DSH_VERSION:-0.1.7-rc.2}
-        # full = 额外装 python3/make/g++/vim/jq，用于容器内编译插件
+        AUTH_GATE_VERSION: ${AUTH_GATE_VERSION:-0.15.0}
         DEV_TOOLS: ${DEV_TOOLS:-none}
-    image: dsh-own:${DSH_VERSION:-0.1.7-rc.2}
-    container_name: dsh-own
+    container_name: dsh
     restart: unless-stopped
-
     ports:
-      - "${PROXY_PORT:-3080}:${PROXY_PORT:-3080}"
-
+      - "${PROXY_PORT:-3080}:3080"
     environment:
-      DSH_PORT: ${DSH_PORT:-3079}
-      PROXY_PORT: ${PROXY_PORT:-3080}
-      # Basic Auth：两个都设置才生效；只设一个等于完全不认证
-      PROXY_USERNAME: ${PROXY_USERNAME:-}
-      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
-      # 关键：因为代理保留原始 Host，浏览器用的 authority 必须在这里声明，
-      # 否则 dsh 的 /api 信任栅栏会 403（页面能开、接口全挂）。
-      # 多个用空格分隔。用 127.0.0.1/localhost 访问时可留空。
-      DSH_TRUSTED_HOSTS: ${DSH_TRUSTED_HOSTS:-}
-
+      DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}
+      DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?请在 .env 中设置 DSH_AUTH_PASSWORD}
+      # off | optional | required
+      DSH_TOTP: ${DSH_TOTP:-optional}
+      # 走 HTTPS 时设为 1（否则会话 cookie 不带 Secure）
+      DSH_COOKIE_SECURE: ${DSH_COOKIE_SECURE:-0}
+      # 登录页显示的域名，例如 dsh.example.com；留空则显示回环地址
+      DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:-}
     volumes:
       - dsh-home:/home/node/.dsh
       - ${DSH_WORKSPACE:-./workspace}:/workspace
-
     security_opt:
       - no-new-privileges:true
-
+    cap_drop:
+      - ALL
     stop_grace_period: 20s
 
 volumes:

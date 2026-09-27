@@ -1,0 +1,38 @@
+# 可选：在本机加一层 Caddy 自动 HTTPS。
+#
+#   DSH_PUBLIC_HOST=dsh.example.com docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# 前置条件：域名 A 记录指向本机，且 80/443 可被公网访问（Let's Encrypt HTTP-01）。
+# 该文件会：
+#   * 把 DSH_COOKIE_SECURE 设为 1（会话 Cookie 带 Secure）；
+#   * 把 DSH_PUBLIC_HOST 传给登录页显示；
+#   * 用 Caddy 终结 TLS 并反代到 dsh 容器。
+
+services:
+  dsh:
+    environment:
+      DSH_COOKIE_SECURE: "1"
+      DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:?请在 .env 设置 DSH_PUBLIC_HOST 为你的域名}
+
+  caddy:
+    image: caddy:2.11-alpine
+    container_name: dsh-caddy
+    restart: unless-stopped
+    depends_on:
+      dsh:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DSH_DOMAIN: ${DSH_PUBLIC_HOST:?请在 .env 设置 DSH_PUBLIC_HOST 为你的域名}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy-data:
+  caddy-config:

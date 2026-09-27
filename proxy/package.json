@@ -1,8 +1,8 @@
 {
-  "name": "dsh-own-proxy",
+  "name": "dsh-forward-proxy",
   "private": true,
-  "version": "1.0.0",
-  "description": "Reverse proxy exposing loopback-only dsh to the LAN, with Host preservation and optional Basic Auth",
+  "version": "2.0.0",
+  "description": "Expose the loopback-only dsh web UI to the network, with loopback Host/Origin rewrite and browser polyfill injection. Authentication is handled by the dsh-auth-gate plugin inside dsh.",
   "main": "index.js",
   "dependencies": {
     "http-proxy": "^1.18.1"

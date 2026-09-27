@@ -1,4 +1,10 @@
 .git
+.github
 .env
 workspace
-*.log
+data
+node_modules
+*.md
+dshctl
+scripts/smoke-test.sh
+docker-compose*.yml

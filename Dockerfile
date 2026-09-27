@@ -42,12 +42,16 @@ RUN set -eux; \
     DSH_BIN="$(npm root --global)/@deepseek-ai/dsh/lib/bin.js"; \
     node --expose-internals "$DSH_BIN" --profile web --dump-config >/dev/null; \
     node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-auth-gate@${AUTH_GATE_VERSION}"; \
-    # dsh-auth-gate 的 CLI 直接跑时需要 dsh 提供的 peer 依赖，补软链后可在
-    # 容器内用 CLI 建用户（dsh 进程本身自行解析这些 peer，不受影响）。
-    ln -sfn "$(npm root --global)/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-storage-domain" \
-            "${DSH_HOME}/profiles/web/node_modules/@deepseek-ai/dsh-storage-domain"; \
-    ln -sfn "$(npm root --global)/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis" \
-            "${DSH_HOME}/profiles/web/node_modules/@deepseek-ai/cordis"; \
+    # dsh 会校验 profile 插件行的 peer 依赖（storage-domain 缺失会让 web 起不来），
+    # dsh-auth-gate 的 CLI 也需要它们。补软链；目标不存在时直接构建失败，避免像以前
+    # 那样发出悬空软链、等到运行时才炸（entrypoint 也会在每次启动时幂等补齐）。
+    npm_root="$(npm root --global)"; \
+    for peer in dsh-storage-domain cordis; do \
+      src="$npm_root/@deepseek-ai/dsh/node_modules/@deepseek-ai/$peer"; \
+      [ -f "$src/package.json" ] || src="$npm_root/@deepseek-ai/$peer"; \
+      test -f "$src/package.json" || { echo "找不到 peer 依赖 $peer" >&2; exit 1; }; \
+      ln -sfn "$src" "${DSH_HOME}/profiles/web/node_modules/@deepseek-ai/$peer"; \
+    done; \
     # 构建期冒烟：证明 CLI 真能建用户，然后删掉这个临时用户文件
     printf '%s\n' 'build-smoke-only' \
       | node "${DSH_HOME}/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" user add build-smoke --password-stdin; \

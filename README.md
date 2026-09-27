@@ -133,6 +133,14 @@ DSH_GID=1001          # id -g
 
 **docker 一直重启** → 宿主工作区属主不对，日志含 `/workspace 不可写`。见「工作区权限」。
 
+**代理一直报 `socket hang up`，日志含 `disabling profile plugin row "storage-domain"`** →
+卷里的 profile 是旧镜像播种的，缺 peer 软链。新版 entrypoint 每次启动会自动补齐（无需处理）；
+旧镜像上强制重播种一次即可：
+
+```bash
+docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web && ./dshm up
+```
+
 **密码对但弹回登录页** → `DSH_COOKIE_SECURE=1` 却在用 HTTP，改回 `0`。
 
 **旧版本升级** → 容器名已从 `dsh` 改为 `qxdho-dsh`，先清理旧容器：

@@ -92,6 +92,40 @@ if [ ! -f "$PROFILE/node_modules/dsh-auth-gate/lib/cli.js" ]; then
   die "profile 里没有 dsh-auth-gate，请重建镜像或执行 dsh plugin --profile web add dsh-auth-gate"
 fi
 
+# dsh 会校验 profile 插件行的 peer 依赖。profile 存在持久卷里，可能是旧镜像播种的
+# （或者中途跑过 npm，把手工加的软链当 extraneous 删了），于是 peer 缺失/悬空，dsh
+# 打印 disabling profile plugin row "storage-domain" … ENOENT … package.json 之后
+# web 直接起不来，代理只会报一堆 socket hang up。这里每次启动按当前镜像里 dsh 的
+# 实际安装位置补齐，幂等，不关心卷是哪个版本播种的。
+DSH_PKG=/usr/local/lib/node_modules/@deepseek-ai/dsh
+peer_dir() {
+  local peer="$1" d
+  for d in \
+    "$DSH_PKG/node_modules/@deepseek-ai/$peer" \
+    "$DSH_PKG/node_modules/$peer" \
+    "/usr/local/lib/node_modules/@deepseek-ai/$peer"; do
+    if [ -f "$d/package.json" ]; then
+      printf '%s' "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+mkdir -p "$PROFILE/node_modules/@deepseek-ai"
+for peer in dsh-storage-domain cordis; do
+  src="$(peer_dir "$peer" || true)"
+  if [ -z "$src" ]; then
+    log "警告：镜像里找不到 peer 依赖 $peer，profile 可能无法加载（重建镜像可修复）"
+    continue
+  fi
+  dst="$PROFILE/node_modules/@deepseek-ai/$peer"
+  if [ ! -f "$dst/package.json" ]; then
+    log "补齐 profile peer 依赖：$peer -> $src"
+    rm -rf "$dst"
+    ln -sfn "$src" "$dst"
+  fi
+done
+
 # ── 2. 写插件配置（每次启动按环境变量刷新）──────────────────────────────────
 cookie_secure=false
 [ "$DSH_COOKIE_SECURE" = "1" ] && cookie_secure=true

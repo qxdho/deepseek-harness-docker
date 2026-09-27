@@ -346,6 +346,50 @@ else
 	chmod 755 "$sandbox/ep-ws"
 fi
 
+echo "== 8. entrypoint 会补齐持久卷 profile 里缺失的 peer 软链 =="
+# 场景：卷里已有旧 profile（package.json + dsh-auth-gate 都在），但缺少
+# @deepseek-ai/dsh-storage-domain / cordis 两个 peer 软链。dsh 0.1.7 起会因此
+# 禁用 storage-domain 行、web 起不来。entrypoint 必须按当前镜像里的 dsh 位置补齐。
+stage="$sandbox/ep3"
+mkdir -p "$stage"
+cp "$ENTRYPOINT" "$stage/entrypoint.sh"
+sed -i "s#^WORKSPACE=/workspace#WORKSPACE=$sandbox/ep3-ws#" "$stage/entrypoint.sh"
+sed -i "s#^DSH_PKG=/usr/local/lib/node_modules/@deepseek-ai/dsh#DSH_PKG=$sandbox/ep3-pkg#" "$stage/entrypoint.sh"
+mkdir -p "$sandbox/ep3-ws"
+# 模拟当前镜像里的 dsh 安装
+for p in dsh-storage-domain cordis; do
+	mkdir -p "$sandbox/ep3-pkg/node_modules/@deepseek-ai/$p"
+	: >"$sandbox/ep3-pkg/node_modules/@deepseek-ai/$p/package.json"
+done
+# 模拟卷内旧 profile：有 package.json 与 dsh-auth-gate，但没有 peer 软链
+home="$sandbox/ep3-home"
+mkdir -p "$home/profiles/web/node_modules/dsh-auth-gate/lib"
+: >"$home/profiles/web/package.json"
+: >"$home/profiles/web/node_modules/dsh-auth-gate/lib/cli.js"
+
+set +e
+out="$(DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+rc=$?
+set -e
+# entrypoint 会在「创建管理员」处因缺 DSH_AUTH_PASSWORD 退出，但 peer 修复应已完成
+[ -f "$home/profiles/web/node_modules/@deepseek-ai/dsh-storage-domain/package.json" ] \
+	&& ok "补齐了 dsh-storage-domain 软链" || bad "dsh-storage-domain 软链未补齐"
+[ -f "$home/profiles/web/node_modules/@deepseek-ai/cordis/package.json" ] \
+	&& ok "补齐了 cordis 软链" || bad "cordis 软链未补齐"
+case "$out" in
+*"补齐 profile peer 依赖"*) ok "日志说明了补齐动作" ;;
+*) bad "日志未提补齐：$out" ;;
+esac
+
+# 幂等：第二次启动不应再补齐
+set +e
+out2="$(DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+set -e
+case "$out2" in
+*"补齐 profile peer 依赖"*) bad "第二次启动仍在补齐（非幂等）" ;;
+*) ok "第二次启动跳过补齐（幂等）" ;;
+esac
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

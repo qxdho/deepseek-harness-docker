@@ -86,7 +86,11 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
   proxyRes.on('end', () => {
     const body = Buffer.from(injectHead(Buffer.concat(chunks).toString('utf8')), 'utf8');
     const headers = Object.assign({}, proxyRes.headers);
+    // 重新计算长度后，必须同时删掉上游的 content-encoding 和 transfer-encoding，
+    // 否则响应会同时带 Content-Length 与 Transfer-Encoding: chunked，
+    // 严格的中间代理（Nginx 等）会直接判 502。
     delete headers['content-encoding'];
+    delete headers['transfer-encoding'];
     headers['content-length'] = String(body.length);
     res.writeHead(proxyRes.statusCode, headers);
     res.end(body);

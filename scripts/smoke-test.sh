@@ -76,6 +76,33 @@ echo "== 未认证 API 被拒 =="
 code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data '{}' "$BASE/api/nonexistent")"
 case "$code" in 401 | 403 | 404) ok "未认证 POST /api -> $code" ;; *) bad "未认证 /api 异常：$code" ;; esac
 
+echo "== 响应头合法性（严格中间代理要求）=="
+# Nginx 等严格代理会拒绝同时带 Content-Length 与 Transfer-Encoding 的响应（502）。
+# curl 对此宽容，所以这里用裸 socket 检查，防止回归。
+if docker exec "$NAME" node -e '
+const net = require("net");
+const s = net.connect(3080, "127.0.0.1", () => {
+  s.write("GET /auth/login HTTP/1.1\r\nHost: smoke.local\r\nConnection: close\r\n\r\n");
+});
+let buf = "";
+s.on("data", (d) => (buf += d));
+s.on("end", () => {
+  const head = buf.split("\r\n\r\n")[0].toLowerCase();
+  const cl = /^content-length:/m.test(head);
+  const te = /^transfer-encoding:/m.test(head);
+  if (cl && te) {
+    console.error("both content-length and transfer-encoding present");
+    process.exit(1);
+  }
+  console.log("headers ok (content-length=" + cl + ", transfer-encoding=" + te + ")");
+});
+s.on("error", (e) => { console.error(e.message); process.exit(1); });
+'; then
+	ok "登录页响应头合法（没有同时带 Content-Length 和 Transfer-Encoding）"
+else
+	bad "登录页响应头同时带 Content-Length 和 Transfer-Encoding（Nginx 会 502）"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

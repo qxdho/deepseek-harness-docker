@@ -111,13 +111,31 @@ ask_new_password() {
 }
 
 wait_healthy() {
-	local status
+	local status elapsed=0 last=-10
 	for _ in $(seq 1 72); do
 		status="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo unknown)"
 		[ "$status" = "healthy" ] && return 0
+
+		# 容器已经退出/在重启循环里，就没必要再空等下去 —— 直接把日志尾部打出来。
+		# 原来是闷头等满 6 分钟才报「未健康」，最气人的是还不说为什么。
+		case "$status" in
+		exited | dead | restarting | unknown)
+			printf '    %s容器状态异常（%s），不再等待%s\n' "$YEL" "$status" "$RST"
+			docker logs --tail 40 "$CONTAINER" 2>&1 || true
+			return 1
+			;;
+		esac
+
+		# 每 10 秒给一行进度，否则用户完全不知道在等什么。
+		if [ $((elapsed - last)) -ge 10 ]; then
+			printf '    %s等待就绪… %ss（%s）%s\n' "$DIM" "$elapsed" "$status" "$RST"
+			last="$elapsed"
+		fi
 		sleep 5
+		elapsed=$((elapsed + 5))
 	done
 	printf '    %s容器未在预期时间内健康（当前：%s）%s\n' "$YEL" "$status" "$RST"
+	docker logs --tail 40 "$CONTAINER" 2>&1 || true
 	return 1
 }
 

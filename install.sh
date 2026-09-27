@@ -120,18 +120,37 @@ hdr "启动服务"
 docker compose up -d
 
 # ── 5. 等健康 ───────────────────────────────────────────────────────────────
-hdr "等待健康检查（首次启动可能要 1-2 分钟）"
-for i in $(seq 1 72); do
-	s="$(docker inspect --format '{{.State.Health.Status}}' qxdho-dsh 2>/dev/null || echo unknown)"
-	[ "$s" = "healthy" ] && break
-	if [ "$i" = "72" ]; then
-		printf '    未在预期时间内健康（当前：%s），下面是日志尾部：\n\n' "$s"
+hdr "等待服务就绪"
+healthy=0
+elapsed=0
+last=-10
+for _ in $(seq 1 72); do
+	# 一次 inspect 同时取运行状态与健康状态，别为了两行信息调两次 docker。
+	read -r running s <<<"$(docker inspect \
+		--format '{{.State.Running}} {{.State.Health.Status}}' qxdho-dsh 2>/dev/null || echo 'false unknown')"
+	if [ "$s" = "healthy" ]; then
+		healthy=1
+		break
+	fi
+	# 容器已经退出/在重启循环里，再等下去没意义 —— 直接给日志。
+	if [ "$running" != "true" ] || [ "$s" = "unhealthy" ] || [ "$s" = "restarting" ]; then
+		printf '    容器状态异常（running=%s health=%s），下面是日志尾部：\n\n' "$running" "$s"
 		docker compose logs --tail 60 qxdho-dsh || true
 		exit 1
 	fi
+	if [ $((elapsed - last)) -ge 10 ]; then
+		printf '    等待就绪… %ss（%s）\n' "$elapsed" "$s"
+		last="$elapsed"
+	fi
 	sleep 5
+	elapsed=$((elapsed + 5))
 done
-ok "服务已健康"
+if [ "$healthy" != "1" ]; then
+	printf '    未在预期时间内健康（当前：%s），下面是日志尾部：\n\n' "$s"
+	docker compose logs --tail 60 qxdho-dsh || true
+	exit 1
+fi
+ok "服务已健康（用时约 ${elapsed}s）"
 
 port="$(get_env PROXY_PORT)"; port="${port:-3080}"
 bind="$(get_env DSH_BIND)"; bind="${bind:-127.0.0.1}"

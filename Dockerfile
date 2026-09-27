@@ -117,7 +117,16 @@ USER node
 WORKDIR /workspace
 EXPOSE 3080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+# 健康检查要「快」：dsh 本身几秒就能就绪，entrypoint 也是等到 dsh 回环可访问
+# 才启动代理，所以健康检查一旦连得上代理，基本就等于就绪了。
+#
+# 之前是 --interval=30s --start-period=120s，两个都过大：
+#   * start-period 内失败不计入 retries，但**失败会重置计时器**；而 120 秒窗口
+#     本身要走完，Docker 才会把状态从 starting 翻成 healthy。于是即使容器
+#     3 秒就绪，CLI 也要空等约 2 分钟。
+#   * interval=30s 意味着窗口结束后还要再等最多 30 秒才跑第一条检查。
+# 现在：15 秒内先探（覆盖正常启动），之后每 5 秒一次；retries=6 给冷启动留余量。
+HEALTHCHECK --interval=5s --timeout=5s --start-period=15s --retries=6 \
   CMD ["dsh-healthcheck"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

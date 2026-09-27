@@ -17,6 +17,9 @@ cd deepseek-harness-docker
 
 然后浏览器打开 `http://<服务器IP>:3080/`，用 `admin` + 你的密码登录。
 
+登录后第一件事：**配置模型**——在网页「设置 → 模型」里填 DeepSeek API Key，
+或者直接在 `.env` 里加一行 `DEEPSEEK_API_KEY=sk-...` 再 `./dshctl restart`。
+
 > 默认只绑 `127.0.0.1`（给宿主机反代用）。想先用 IP 直接访问：把 `.env` 的 `DSH_BIND` 改成 `0.0.0.0`，再跑一次 `./install.sh`。
 
 ---

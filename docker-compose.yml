@@ -11,6 +11,9 @@ services:
         DEV_TOOLS: ${DEV_TOOLS:-none}
     container_name: dsh
     restart: unless-stopped
+    # .env 里的变量都会传进容器，所以可以直接在 .env 里加
+    # DEEPSEEK_API_KEY=sk-... 来配置模型（也可以登录后在网页设置里配）
+    env_file: .env
     ports:
       # 默认绑 127.0.0.1：只有宿主机自己能访问，供你在宿主机上加 HTTPS 反代。
       # 想直接从局域网访问（未加反代前测试用），把 DSH_BIND 改成 0.0.0.0。

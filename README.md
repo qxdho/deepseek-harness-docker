@@ -18,7 +18,7 @@ cd deepseek-harness-docker
 然后浏览器打开 `http://<服务器IP>:3080/`，用 `admin` + 你的密码登录。
 
 登录后第一件事：**配置模型**——在网页「设置 → 模型」里填 DeepSeek API Key，
-或者直接在 `.env` 里加一行 `DEEPSEEK_API_KEY=sk-...` 再 `./dshctl restart`。
+或者直接在 `.env` 里加一行 `DEEPSEEK_API_KEY=sk-...` 再 `./dshm restart`。
 
 > 默认只绑 `127.0.0.1`（给宿主机反代用）。想先用 IP 直接访问：把 `.env` 的 `DSH_BIND` 改成 `0.0.0.0`，再跑一次 `./install.sh`。
 
@@ -63,19 +63,19 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 **本项目在这些之上做的**：对外代理与 Host/Origin 改写（因此不用配 `--trusted-host`）、
 前端兼容注入（修复 `randomUUID` 与"设置页不可用"）、镜像构建与首启初始化、
-`--expose-internals` 启动包装、加固默认值、`install.sh` / `dshctl` / 自更新 / 健康检查 / 冒烟测试、CI 构建与发布、文档。
+`--expose-internals` 启动包装、加固默认值、`install.sh` / `dshm` / 健康检查 / 冒烟测试、CI 构建与发布、文档。
 
 ---
 
 ## 配置项
 
-全部在 `.env`。**改完运行 `./dshctl restart` 生效。**
+全部在 `.env`。**改完运行 `./dshm restart` 生效。**
 
 **你会用到的：**
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号用；之后改密码用 `./dshctl password` |
+| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号用；之后改密码用 `./dshm password` |
 | `PROXY_PORT` | `3080` | 宿主机端口 |
 | `DSH_BIND` | `127.0.0.1` | `127.0.0.1`=只有宿主机能访问（配反代）；`0.0.0.0`=局域网可直连 |
 | `DSH_WORKSPACE` | `./workspace` | agent 的工作目录 |
@@ -93,7 +93,7 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 | `DSH_IMAGE` | GHCR `latest` | 用哪个镜像启动 |
 
 > ⚠️ `DSH_AUTH_USER` / `DSH_AUTH_PASSWORD` 只在**首次启动**（还没有用户文件时）生效；
-> 之后改密码用 `./dshctl password`。
+> 之后改密码用 `./dshm password`。
 
 ---
 
@@ -101,13 +101,13 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 ```bash
 ./install.sh        # 部署
-./dshctl logs       # 看日志
-./dshctl status     # 健康 / 端口 / 登录用户
-./dshctl restart    # 重启
-./dshctl down       # 停止（数据保留）
-./dshctl password   # 改登录密码
-./dshctl update     # 升级 dsh
-./dshctl shell      # 进容器
+./dshm logs       # 看日志
+./dshm status     # 健康 / 端口 / 登录用户
+./dshm restart    # 重启
+./dshm down       # 停止（数据保留）
+./dshm password   # 改登录密码
+./dshm update     # 升级 dsh
+./dshm shell      # 进容器
 ```
 
 ---
@@ -132,11 +132,11 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 ## 常见问题
 
-**页面打不开？** `./dshctl logs`。首次启动要 1–2 分钟。
+**页面打不开？** `./dshm logs`。首次启动要 1–2 分钟。
 
 **密码对但一直弹回登录页？** 多半是 `DSH_COOKIE_SECURE=1` 却在用 HTTP，改回 `0`。
 
-**怎么改密码？** `./dshctl password`
+**怎么改密码？** `./dshm password`
 
 **怎么开两步验证？**
 ```bash

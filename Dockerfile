@@ -102,8 +102,7 @@ COPY proxy/index.js /app/proxy/index.js
 
 COPY entrypoint.sh /app/entrypoint.sh
 COPY scripts/healthcheck.sh /usr/local/bin/dsh-healthcheck
-COPY scripts/dsh-update /usr/local/bin/dsh-update
-RUN chmod 0755 /app/entrypoint.sh /usr/local/bin/dsh-healthcheck /usr/local/bin/dsh-update
+RUN chmod 0755 /app/entrypoint.sh /usr/local/bin/dsh-healthcheck
 
 # 让空命名卷/空 bind mount 首启就有可用的已装插件 profile
 RUN set -eux; \

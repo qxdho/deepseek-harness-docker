@@ -18,8 +18,8 @@ web UI into a deployable Docker image with a built-in login page and optional TO
 | One-command deploy | `./install.sh` asks once for a password, then does everything |
 | LAN/domain friendly | Fixes `crypto.randomUUID` (non-secure context) and the "Settings unavailable" client check |
 | Persistent | Config, credentials, sessions and login users live in the `dsh-home` volume |
-| Management CLI | `./dshctl` up/down/logs/status/password/update |
-| Self-update | `./dshctl update` (host) or `docker exec -it dsh dsh-update` |
+| Management CLI | `./dshm` up/down/logs/status/password/update |
+| Update | `./dshm update` (rebuilds the pinned image) |
 | Hardened | Non-root, `cap_drop: ALL`, `no-new-privileges`, `workspace-write` (Landlock) |
 | Agent toolchain | git, ripgrep, jq, curl, rsync, python3, pnpm preinstalled |
 | CI | Multi-arch (amd64/arm64) build to GHCR + real container smoke test |
@@ -58,7 +58,7 @@ source; it only uses dsh's official extension points (profile bundles, `--patch`
   `--trusted-host` config), the front-end injection (`randomUUID` + `ownsHost`, which the plugin deliberately
   does not do), the image engineering (multi-stage build, pre-installed plugin profile, first-boot seeding and
   admin creation, `.env`-driven config), the `--expose-internals` wrapper, hardening defaults, the ops CLI
-  (`install.sh`, `dshctl`, `dsh-update`, healthcheck, smoke test), the CI pipeline, and the docs.
+  (`install.sh`, `dshm`, healthcheck, smoke test), the CI pipeline, and the docs.
 
 ## Architecture
 
@@ -93,11 +93,10 @@ the in-container proxy rewrites Host/Origin to loopback consistently.
 `dsh-home` volume → `/home/node/.dsh` (config, credentials, sessions, login users) and
 `./workspace` → `/workspace`. Recreating the container does not log you out.
 
-## Self-update
+## Update
 
 ```bash
-./dshctl update [version]          # host-side, reproducible
-docker exec -it dsh dsh-update     # in-place, persisted under $DSH_HOME/npm-global
+./dshm update [version]          # rebuilds the pinned image
 ```
 
 ## Third-party components

@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# dshctl — 宿主机上管理这套 compose 栈。
+# ./dshm — 宿主机上管理这套 compose 栈。
 #
-#   ./dshctl up [--build]       启动（--build 先本地构建）
-#   ./dshctl down               停止（保留 dsh-home 卷）
-#   ./dshctl restart            重启
-#   ./dshctl logs               跟随日志
-#   ./dshctl status             健康/端口/登录地址
-#   ./dshctl url                打印一次性 launch URL（排障用）
-#   ./dshctl shell              进容器
-#   ./dshctl password <用户名>   交互式改登录密码
-#   ./dshctl update [版本]       改 .env 里的 DSH_VERSION 并重建
-#   ./dshctl version            显示容器内 dsh 版本
+#   ./dshm up [--build]       启动（--build 先本地构建）
+#   ./dshm down               停止（保留 dsh-home 卷）
+#   ./dshm restart            重启
+#   ./dshm logs               跟随日志
+#   ./dshm status             健康/端口/登录地址
+#   ./dshm url                打印一次性 launch URL（排障用）
+#   ./dshm shell              进容器
+#   ./dshm password <用户名>   交互式改登录密码
+#   ./dshm update [版本]       改 .env 里的 DSH_VERSION 并重建
+#   ./dshm version            显示容器内 dsh 版本
 set -euo pipefail
 cd "$(dirname "$0")"
 
 ENV_FILE=.env
 CONTAINER=dsh
 
-die() { printf 'dshctl: ERROR: %s\n' "$*" >&2; exit 1; }
-info() { printf 'dshctl: %s\n' "$*" >&2; }
+die() { printf './dshm: ERROR: %s\n' "$*" >&2; exit 1; }
+info() { printf './dshm: %s\n' "$*" >&2; }
 
 require_docker() {
 	command -v docker >/dev/null 2>&1 || die "未找到 docker"
@@ -104,7 +104,7 @@ update)
 	require_docker; require_env
 	target="${1:-}"
 	if [ -z "$target" ]; then
-		command -v npm >/dev/null 2>&1 || die "没有 npm，无法自动解析版本；请显式指定：./dshctl update <版本>"
+		command -v npm >/dev/null 2>&1 || die "没有 npm，无法自动解析版本；请显式指定：./dshm update <版本>"
 		target="$(npm view @deepseek-ai/dsh dist-tags.latest 2>/dev/null | tr -d '[:space:]')"
 		[ -n "$target" ] || die "无法解析最新版本，请显式指定"
 	fi
@@ -120,7 +120,7 @@ version)
 	;;
 *)
 	cat >&2 <<'USAGE'
-dshctl — 管理 dsh compose 栈
+./dshm — 管理 dsh compose 栈
 
   up [--build]        启动（--build 先本地构建）
   down                停止（保留数据卷）

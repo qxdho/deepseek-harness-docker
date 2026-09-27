@@ -5,6 +5,6 @@ workspace
 data
 node_modules
 *.md
-dshctl
+dshm
 scripts/smoke-test.sh
 docker-compose*.yml

@@ -9,13 +9,28 @@ web UI into a deployable Docker image with a built-in login page and optional TO
 - **Ready out of the box** — GitHub Actions builds a multi-arch image and pushes it to GHCR.
 - **Least privilege** — non-root, `cap_drop: ALL`, `no-new-privileges`, `workspace-write` (Landlock).
 
+## Features
+
+| Feature | Description |
+|---|---|
+| Login gate | Username/password login page, optional TOTP two-factor, rate limiting |
+| No token copying | The plugin exchanges dsh's one-time launch token for a session cookie inside the container |
+| One-command deploy | `./install.sh` asks once for a password, then does everything |
+| LAN/domain friendly | Fixes `crypto.randomUUID` (non-secure context) and the "Settings unavailable" client check |
+| Persistent | Config, credentials, sessions and login users live in the `dsh-home` volume |
+| Management CLI | `./dshctl` up/down/logs/status/password/update |
+| Self-update | `./dshctl update` (host) or `docker exec -it dsh dsh-update` |
+| Hardened | Non-root, `cap_drop: ALL`, `no-new-privileges`, `workspace-write` (Landlock) |
+| Agent toolchain | git, ripgrep, jq, curl, rsync, python3, pnpm preinstalled |
+| CI | Multi-arch (amd64/arm64) build to GHCR + real container smoke test |
+| Host-level HTTPS | TLS is terminated by your host proxy (Nginx/BaoTa/Cloudflare) |
+
 ## Quick start
 
 ```bash
 git clone https://github.com/qxdho/deepseek-harness-docker.git
 cd deepseek-harness-docker
-cp .env.example .env          # set a strong DSH_AUTH_PASSWORD
-docker compose pull && docker compose up -d
+./install.sh          # asks once for a password
 ```
 
 Open `http://<host>:3080/`, sign in with `admin` + your password.

@@ -12,7 +12,9 @@ services:
     container_name: dsh
     restart: unless-stopped
     ports:
-      - "${PROXY_PORT:-3080}:3080"
+      # 默认绑 127.0.0.1：只有宿主机自己能访问，供你在宿主机上加 HTTPS 反代。
+      # 想直接从局域网访问（未加反代前测试用），把 DSH_BIND 改成 0.0.0.0。
+      - "${DSH_BIND:-127.0.0.1}:${PROXY_PORT:-3080}:3080"
     environment:
       DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}
       DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?请在 .env 中设置 DSH_AUTH_PASSWORD}

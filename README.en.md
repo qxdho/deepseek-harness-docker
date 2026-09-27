@@ -40,11 +40,13 @@ consistent Host, the name always matches and the cookie stays valid. Measured on
 `lan.test:3099` while the proxy rewrites Host to `127.0.0.1:3080` yields **HTTP 200** with the cookie.
 `ERR_TOO_MANY_REDIRECTS` is caused by re-injecting the token on every request, not by rewriting Host.
 
-## HTTPS
+## HTTPS (done on the host, not in Docker)
 
-HTTP only by default (trusted LAN). For the internet, terminate TLS in front (Caddy / Nginx / Cloudflare),
-then set `DSH_COOKIE_SECURE=1` and `DSH_PUBLIC_HOST=your.domain`. A ready-made
-`docker-compose.tls.yml` + `Caddyfile` is included.
+HTTP only by default (trusted LAN, and the port binds to `127.0.0.1`). For the internet, terminate TLS with
+whatever you already run **on the host** (Nginx, BaoTa, Cloudflare Tunnel) and reverse-proxy it to the
+container's `127.0.0.1:3080`. The host proxy must forward WebSocket, and you should set
+`DSH_COOKIE_SECURE=1` and `DSH_PUBLIC_HOST=your.domain`. No `--trusted-host` configuration is needed:
+the in-container proxy rewrites Host/Origin to loopback consistently.
 
 ## Persistence
 

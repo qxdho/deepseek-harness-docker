@@ -99,16 +99,36 @@ docker exec -it dsh node /home/node/.dsh/profiles/web/node_modules/dsh-auth-gate
 
 ---
 
-## HTTPS（默认是纯 HTTP）
+## HTTPS（在宿主机上加，Docker 里不做）
 
-默认镜像只提供 HTTP，适合可信内网。**Basic/密码登录在明文 HTTP 下不安全**，公网部署请务必加 TLS。
-最简单的方式是在前面再放一个 TLS 反代（Caddy / Nginx / Cloudflare Tunnel），并：
+默认只提供 HTTP，适合可信内网。**密码登录在明文 HTTP 下不安全**，公网部署请在**宿主机**上加 TLS
+（Nginx、宝塔、Cloudflare Tunnel 等，用你现成的即可），反代到本容器的 `127.0.0.1:3080`。
 
-1. 把 `DSH_COOKIE_SECURE=1`（让会话 Cookie 带 `Secure`）；
-2. 把 `DSH_PUBLIC_HOST=你的域名`（登录页显示正确域名，而不是回环地址）。
+宿主机反代需要：
 
-仓库提供了一份可选覆盖（`docker-compose.tls.yml` + `Caddyfile`）用于在本机加一层 Caddy HTTPS，
-详见文件内注释。
+1. 转发 **WebSocket**（dsh 的实时通道要用），Nginx 例：
+   ```nginx
+   location / {
+       proxy_pass http://127.0.0.1:3080;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+       proxy_read_timeout 3600s;   # SSE / 长连接
+       proxy_buffering off;
+   }
+   ```
+2. 在 `.env` 里设置：
+   ```
+   DSH_COOKIE_SECURE=1                 # 会话 Cookie 带 Secure
+   DSH_PUBLIC_HOST=dsh.example.com     # 登录页显示正确域名
+   ```
+
+因为容器内的代理会把 Host/Origin 一致改写成回环地址，**你不需要给 dsh 配 `--trusted-host`**，
+宿主机反代转发什么 Host 都不会导致 403。
+
+> 容器默认只绑 `127.0.0.1`（见 `.env` 的 `DSH_BIND`），也就是只有宿主机能访问它——正好配合宿主机反代。
+> 加反代之前想先从局域网直连测试，把 `DSH_BIND` 临时改成 `0.0.0.0` 即可。
 
 ---
 
@@ -163,7 +183,6 @@ docker exec -it dsh dsh-update 0.1.7-rc.2
 ```
 Dockerfile               多阶段构建：装 dsh + 预置 dsh-auth-gate 的 profile
 docker-compose.yml       拉 GHCR 镜像（或本地构建）并启动
-docker-compose.tls.yml   可选：加一层 Caddy HTTPS
 entrypoint.sh            播种 profile、建管理员、起 dsh 与代理
 proxy/index.js           薄转发 + Host/Origin 改写 + HTML 注入（不做鉴权）
 scripts/                 健康检查、自更新、冒烟测试、dsh wrapper

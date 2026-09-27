@@ -61,7 +61,10 @@ Rewriting Host to loopback also removes the need to configure `--trusted-host` p
    - injects into `<head>`: a `crypto.randomUUID` polyfill and
      `globalThis.__DSH_TRANSPORT__ = { …, ownsHost: true }` (a documented dsh seam — nothing in dsh
      assigns this global, it is read by the client to derive `isLoopback`).
-3. **No Caddy by default** (plain HTTP). An optional `docker-compose.tls.yml` puts Caddy in front for TLS.
+3. **No reverse proxy inside the image** — the Node forwarder is the only listener, on plain HTTP.
+   TLS is deliberately left to the host (Nginx / BaoTa / Cloudflare / any existing proxy), which
+   forwards to the container's `127.0.0.1:3080`. Operators set `DSH_COOKIE_SECURE=1` and
+   `DSH_PUBLIC_HOST=<domain>` in that case.
 
 ## 5. Build and runtime details
 

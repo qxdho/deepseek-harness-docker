@@ -24,6 +24,11 @@ have_sudo() { command -v sudo >/dev/null 2>&1; }
 # shellcheck source=scripts/preflight.sh
 . "$PREFLIGHT"
 
+# 判定针对的是「容器内 uid」，而测试机的当前用户是谁不确定。凡预期成功的用例，
+# 都把容器 uid 设成当前用户（等价于部署者本人就是容器 uid）；「两者不一致」的
+# 场景由第 6b 节专门验证 —— 那正是 root 部署出问题的那条路径。
+export DSH_UID="$(id -u)" DSH_GID="$(id -g)"
+
 sandbox="$(mktemp -d)"
 cleanup() {
 	# 被测目录里可能有 chmod 000 的残留，先尽力恢复再删
@@ -145,7 +150,7 @@ else
 			rm -f "$project/workspace/.dsh-write-test"
 			ok "免密 sudo 场景下目录最终可写"
 			owner="$(stat -c '%u' "$project/workspace")"
-			[ "$owner" = "1000" ] && ok "属主已改为 1000" || bad "属主是 $owner，期望 1000"
+			[ "$owner" = "$(id -u)" ] && ok "属主已改为部署者 uid（$(id -u)）" || bad "属主是 $owner，期望 $(id -u)"
 		else
 			# 可接受的另一种结果：不去修，但明确报错并非 0 退出
 			[ "$rc" -ne 0 ] && ok "未自动修复但明确报错退出（rc=$rc）" \
@@ -164,6 +169,33 @@ else
 			|| bad "不可写却返回 0"
 	fi
 fi
+
+echo "== 6b. 部署者能写、容器 uid 不能写（root 部署的核心回归）=="
+# 旧实现拿「当前用户」的写测试当结论：root 部署时 ./workspace 是 root:root 0755，
+# root 写得进 → 预检假通过 → 容器里的 node(1000) 写不进 → crash-loop。
+# 这里构造「当前用户可写、容器 uid 不可写」，必须被拦下。
+project="$sandbox/foreign-uid"
+mkdir -p "$project/workspace"
+chmod 700 "$project/workspace"
+printf 'DSH_WORKSPACE=./workspace\n' >"$project/.env"
+foreign_uid=$(( $(id -u) == 1000 ? 1001 : 1000 ))
+foreign_gid="$foreign_uid"
+if ( : >"$project/workspace/.dsh-write-test" ) 2>/dev/null; then
+	rm -f "$project/workspace/.dsh-write-test"
+	ok "前置条件成立：当前用户可写"
+else
+	bad "前置条件失败：当前用户本应可写"
+fi
+set +e
+out="$(DSH_UID="$foreign_uid" DSH_GID="$foreign_gid" check_workspace "$project" never 0 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && ok "容器 uid($foreign_uid) 不可写 → 被拦下（rc=$rc）" \
+	|| bad "只看当前用户可写，会放过 root 部署的假通过"
+case "$out" in
+*"${foreign_uid}"*) ok "报错指明了容器 uid" ;;
+*) bad "报错未提容器 uid：$out" ;;
+esac
 
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。

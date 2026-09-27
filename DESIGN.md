@@ -16,27 +16,20 @@ DeepSeek Harness (`dsh web`) is a single-user local tool:
 
 ## 2. Why `dsh-auth-gate`
 
-The user asked for a login page instead of pasting the launch token. Surveying the ecosystem, there
-were four camps: (A) manual token, (B) proxy-side token→cookie exchange, (C) patch dsh's auth out and
-authenticate in a gateway, (D) an in-process plugin.
+Four ways to replace the launch token with a login page were considered: (A) manual token, (B) proxy-side
+token→cookie exchange, (C) strip dsh's auth and authenticate in a gateway, (D) an in-process plugin.
 
-Camp C (used by 1Panel via the undocumented `ONEPANEL_DSH_AUTH_PROXY` env, and by misaka-link via a
-source patch) breaks on dsh upgrades. Camp D is the cleanest: `dsh-auth-gate` is a maintained plugin
-with password/shared-token login, optional TOTP, sessions, rate limiting, a user-management CLI, and —
-crucially — it **bridges the launch token itself** (the login redirect hops through a relative
-`/?token=…` that sets the dsh cookie). The user never sees the token, and no dsh file is modified.
+C breaks on dsh upgrades (1Panel's undocumented `ONEPANEL_DSH_AUTH_PROXY`, misaka-link's source patch).
+D is the cleanest and is what this project uses: `dsh-auth-gate` is a maintained plugin with
+password/shared-token login, optional TOTP, sessions, rate limiting, a user-management CLI, and — crucially
+— it **bridges the launch token itself** (the login redirect hops through a relative `/?token=…` that sets
+the dsh cookie). The user never sees the token, and no dsh file is modified.
 
-## 3. Correcting the previous design's premise
+## 3. Rewriting `Host` does not break the session cookie
 
-The previous README/comments in this repository claimed that rewriting `Host` makes the browser drop
-the dsh cookie, producing `ERR_TOO_MANY_REDIRECTS`, and therefore the proxy must preserve the original
-Host and rely on `--trusted-host`.
-
-That diagnosis is wrong. dsh's session cookie has **no `Domain` attribute**, so the browser scopes it
-to the site it requested, independent of the upstream `Host` header. The cookie *name* is derived from
-the `Host` dsh receives; consistent rewriting therefore keeps name and storage aligned.
-
-Measured on real dsh (`0.1.5-rc.2`, no bypass env):
+The session cookie has **no `Domain` attribute**, so the browser scopes it to the site it requested,
+independent of the upstream `Host` header. The cookie *name* is derived from the `Host` dsh receives;
+consistent rewriting keeps name and storage aligned. Measured on real dsh (`0.1.5-rc.2`, no bypass env):
 
 ```
 client URL:  http://lan.test:3099/   (--resolve to 127.0.0.1)
@@ -45,11 +38,9 @@ GET /?token=... -> 303 + Set-Cookie (no Domain)  -> stored for lan.test
 GET /            -> 200
 ```
 
-`ERR_TOO_MANY_REDIRECTS` actually comes from re-injecting the token on every `/` request, causing a
-`/ → /?token= → 303 → /` loop. This design avoids it by doing the exchange exactly once inside the
-plugin.
-
-Rewriting Host to loopback also removes the need to configure `--trusted-host` per access domain.
+`ERR_TOO_MANY_REDIRECTS` comes from re-injecting the token on every `/` request (`/ → /?token= → 303 → /`),
+not from rewriting Host. The plugin does the exchange exactly once. Rewriting Host to loopback also removes
+the need for per-domain `--trusted-host` configuration.
 
 ## 4. Layers in the image
 
@@ -116,62 +107,47 @@ The chosen approach, matching the rootless-container consensus
 
 ### 5.2 One container UID, one source of truth
 
-A first fix for §5.1 judged writability with *the deployer's* write test. That is wrong whenever the
-deployer is not the container user — the common case being root (`sudo ./install.sh`, a root VPS, 1Panel):
-`./workspace` is then `root:root 0755`, root can write it, uid 1000 cannot. The preflight passed, the
-container's own check then failed, and `restart: unless-stopped` turned that into a restart loop.
+Writability must be judged against **the UID the container will actually run as**, and that value must have
+exactly one source. Judging with the deployer's own write test is wrong whenever the deployer is not the
+container user — typically root (`sudo ./install.sh`, root VPS, 1Panel): `./workspace` is then
+`root:root 0755`, writable by root but not by uid 1000. Two shapes of this mistake were rejected:
 
-The correction is that every decision must be made against **the UID the container will actually run as**,
-and that value must have exactly one source. Two temptations both reproduce the original bug in a new
-shape, and both were rejected:
+- **A preflight-only override.** A `DSH_UID` that the preflight reads but `docker-compose.yml` ignores makes
+  the check reason about a UID the container never uses — a false pass or fail. `DSH_UID`/`DSH_GID` are
+  therefore wired into `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` and read from `.env` first (like
+  `DSH_WORKSPACE`), because `sudo ./install.sh` does not export `.env` into the shell.
+- **Moving the container user.** Running the entrypoint as root to `chown`, then dropping via `setpriv`
+  (available in the image), would silently defeat `DSH_PERMISSION_MODE=workspace-write`: Landlock does not
+  confine root. Same reason as §5.1.
 
-- **A preflight-only override.** A `DSH_UID` that the preflight reads but `docker-compose.yml` ignores
-  makes the check reason about a UID the container will never use — a fresh false pass/fail. So
-  `DSH_UID`/`DSH_GID` are wired into `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` at the same time, and
-  read from `.env` first (like `DSH_WORKSPACE`) because `sudo ./install.sh` does not export `.env` into
-  the shell.
-- **Moving the container user.** Making the entrypoint run as root to `chown` and then drop privileges via
-  `setpriv` (available in the image) would silently defeat `DSH_PERMISSION_MODE=workspace-write`, since
-  Landlock does not confine root. Rejected for the same reason as in §5.1.
+Non-default UIDs have a second consequence the workspace check cannot see: the `dsh-home` volume is seeded
+by Docker from the image directory, so it is owned by 1000. With no root inside the container nobody can fix
+it, and the agent cannot write its own config directory (sessions, credentials, login users).
+`check_home_volume()` repairs it from the host with a one-shot **disposable root container** — root in a
+throwaway container is not the same trade as root in the long-lived one.
 
-Non-default UIDs have a second consequence the workspace check alone cannot see: the `dsh-home` named
-volume is seeded from the image directory, so it is owned by 1000. With no root inside the container,
-nobody can fix it and the agent cannot write its own config directory (sessions, credentials, login
-users). `check_home_volume()` therefore repairs it from the host with a one-shot **disposable root
-container** — root in a throwaway container is not the same trade as root in the long-lived one, and it
-keeps the running container non-root.
+The volume name cannot be guessed: Compose prefixes it with the project name (`<project>_dsh-home`), so the
+preflight reads the mounted name from the running container. The check targets the volume root, because the
+volume is mounted **at** `/home/node/.dsh`.
 
-A `DSH_HOME_VOLUME` override was deliberately **not** introduced: the volume name is fixed in
-`docker-compose.yml`, so a preflight-readable override would be the same mismatch again. Hard-coding
-`dsh-home` in both places is the invariant worth protecting.
+A `DSH_HOME_VOLUME` override was deliberately **not** introduced: the name is fixed in `docker-compose.yml`,
+so a preflight-readable override would reintroduce the same mismatch.
 
-## 6. Verification status
+## 6. Verification
 
-Verified locally (no Docker on this machine, so image build is delegated to CI):
+| Layer | What it covers | Needs Docker |
+|---|---|---|
+| `scripts/test-preflight.sh` | workspace ownership checks (paths, quoting, non-writable, deployer-vs-container UID, `DSH_UID` resolution), `dsh-home` volume name resolution, both entrypoint workspace paths | no |
+| `proxy/test-inject.js` | HTML injection point (including the `<header>` / `<headless-…>` false positive), `X-Forwarded-For` recomputation, header legality | no |
+| `scripts/smoke-test.sh` | real container: health, unauthenticated redirect, login round-trip, session persistence, injection, unauthenticated `/api` rejection | yes |
+| `scripts/smoke-workspace.sh` | real container: unwritable workspace degrades (and exits under `DSH_WORKSPACE_STRICT=1`), writable workspace accepts writes | yes |
 
-- Installed `dsh-auth-gate@0.15.0` into a throwaway `DSH_HOME` with `dsh plugin --profile web add`.
-- Created an admin user through the plugin CLI (after linking the peer deps).
-- Booted dsh with the plugin and measured the full flow:
-  - `GET /` without a session → `302 /auth/login?next=%2F` (browser) / `401` (no `Accept: text/html`);
-  - `POST /auth/login` → `302` + `Set-Cookie: dsh_auth=…` + `Location: /?token=…` (the bridge);
-  - following redirects → `200` and the page contains `__DSH_BOOT__`;
-  - a second `GET /` with the cookie → `200`.
-- Verified the Host-rewrite cookie argument (see §3).
-- `scripts/test-preflight.sh` (offline, no Docker) — 31 assertions covering the workspace
-  ownership checks: writable, default value, absolute / `~` / quoted paths, non-writable rejection
-  with actionable output, missing `.env`, the "deployer can write but the container UID cannot" false
-  pass, `DSH_UID` resolution order (`.env` over shell environment, `1000` as fallback), the `dsh-home`
-  volume check staying offline when the UID is the default, and both container-side `entrypoint.sh`
-  paths (strict exit and fallback banner). Passes on a machine with no Docker.
-- `proxy/test-inject.js` (offline, `node`, needs `npm install`) — 10 assertions on the HTML
-  injection point, including the `<header>` / `<headless-…>` false-positive that previously sent
-  the injected script into the document body.
+CI (`.github/workflows/build.yml`) runs the offline suites before the image build, then builds amd64+arm64
+to GHCR and runs both smoke suites against a locally loaded image. The workspace fixtures use
+`--tmpfs /workspace:mode=0755` rather than `chmod` on a host directory: the CI runner is root, and root
+ignores permission bits, so a `chmod`-based fixture would pass even with the bug present.
 
-CI (`.github/workflows/build.yml`) builds amd64+arm64 and pushes to GHCR, and runs
-`scripts/smoke-test.sh` against a locally loaded image (container health, unauthenticated redirect,
-login round-trip, session persistence, injected polyfill, unauthenticated `/api` rejection).
+## 7. Platform support
 
-The **workspace permission regression** needs a real container and lives in
-`scripts/smoke-workspace.sh`, invoked by `smoke-test.sh`. Its failure fixture uses
-`--tmpfs /workspace:mode=0755` rather than `chmod` on a host directory, because the CI runner is
-root and root ignores permission bits — a `chmod`-based fixture would pass even with the bug present.
+Linux hosts, amd64 and arm64. `scripts/preflight.sh` uses GNU `stat -c`; BSD/macOS `stat` is not supported
+(Docker Desktop's bind mounts do not reproduce the ownership problem anyway). Windows hosts are untested.

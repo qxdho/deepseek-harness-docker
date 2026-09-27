@@ -170,18 +170,58 @@ docker exec -it dsh dsh-update 0.1.7-rc.2
 
 ## 配置项
 
-见 [.env.example](.env.example)。常用：
+全部在 `.env` 里。改完运行 `./dshctl restart` 生效；标 **构建期** 的改完要重新构建
+（`./install.sh` 或 `./dshctl up --build`）。完整模板见 [.env.example](.env.example)。
 
-| 变量 | 默认 | 说明 |
+### 部署与镜像（构建期：改了要重建）
+
+| 变量 | 默认 | 作用 | 什么时候改 |
+|---|---|---|---|
+| `DSH_IMAGE` | `ghcr.io/qxdho/deepseek-harness-docker:latest` | 用哪个镜像启动 | 想用本地构建的镜像时改成 `dsh-local:latest` |
+| `DSH_VERSION` | `0.1.7-rc.2` | 镜像内置的 dsh 版本 | 想升级/固定 dsh 版本 |
+| `AUTH_GATE_VERSION` | `0.15.0` | 内置的登录插件版本 | 插件出新版时 |
+| `DEV_TOOLS` | `none` | `full` 时额外装 `python3/make/g++`，供**容器内**安装带原生依赖的插件 | 需要在容器里装复杂插件时 |
+
+### 网络与入口（运行期：改了重启即可）
+
+| 变量 | 默认 | 作用 | 什么时候改 |
+|---|---|---|---|
+| `PROXY_PORT` | `3080` | 宿主机监听端口 | 端口被占用时 |
+| `DSH_BIND` | `127.0.0.1` | 绑定地址。`127.0.0.1` = 只有宿主机能访问（配合宿主机反代）；`0.0.0.0` = 局域网可直连 | 想先用 IP 直接测试时改成 `0.0.0.0` |
+| `DSH_WORKSPACE` | `./workspace` | agent 的工作目录（挂到容器 `/workspace`） | 想让 agent 读写你指定的项目目录 |
+
+### 登录与安全（运行期：改了重启即可）
+
+| 变量 | 默认 | 作用 | 什么时候改 |
+|---|---|---|---|
+| `DSH_AUTH_USER` | `admin` | 管理员用户名（**只在首次建号时**生效） | 想换用户名（首次启动前改） |
+| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动用它创建管理员 | `install.sh` 会问；之后改密码用 `./dshctl password` |
+| `DSH_TOTP` | `optional` | 两步验证：`off` / `optional` / `required` | 想强制所有用户开 TOTP 时设 `required` |
+| `DSH_COOKIE_SECURE` | `0` | 设 `1` 时登录会话 Cookie 带 `Secure` | **走 HTTPS 时设 1** |
+| `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名，防钓鱼提示 | 用域名访问时设成你的域名 |
+
+### 容器内的进阶项（默认已设好，一般不用动）
+
+这些在镜像里已有默认值，需要时可在 `docker-compose.yml` 的 `environment:` 里覆盖：
+
+| 变量 | 默认 | 作用 |
 |---|---|---|
-| `PROXY_PORT` | `3080` | 宿主机端口 |
-| `DSH_AUTH_USER` / `DSH_AUTH_PASSWORD` | `admin` / — | 登录账号 |
-| `DSH_TOTP` | `optional` | 两步验证档位 |
-| `DSH_COOKIE_SECURE` | `0` | 走 HTTPS 时设 `1` |
-| `DSH_PUBLIC_HOST` | 空 | 登录页显示域名 |
-| `DSH_WORKSPACE` | `./workspace` | agent 工作目录 |
-| `DSH_VERSION` | `0.1.7-rc.2` | 本地构建时内置的 dsh 版本 |
-| `DEV_TOOLS` | `none` | `full` 时额外装编译链，供容器内装带原生依赖的插件 |
+| `DSH_PERMISSION_MODE` | `workspace-write` | 文件沙箱：`read-only` / `workspace-write` / `danger-full-access` |
+| `DSH_TELEMETRY_DISABLED` | `1` | 关闭遥测 |
+| `DSH_PORT` | `3079` | dsh 在容器内监听的回环端口 |
+| `NARB_DISABLE_NATIVE_CACHE` | `1` | 避免原生插件缓存落到 `noexec` 的 `/tmp` |
+
+### 改配置的两种方式
+
+```bash
+# 运行期配置（端口、绑定、TOTP、密码等）
+vim .env
+./dshctl restart
+
+# 构建期配置（dsh 版本、插件版本、DEV_TOOLS）
+vim .env
+./install.sh            # 或 ./dshctl up --build
+```
 
 ---
 

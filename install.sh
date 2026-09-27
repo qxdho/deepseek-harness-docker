@@ -34,7 +34,7 @@ read_secret() {
 		return
 	fi
 	while IFS= read -rs -n1 ch; do
-		[ -z "$ch" ] && break
+		case "$ch" in "" | $'\n' | $'\r') break ;; esac
 		if [ "$ch" = $'\x7f' ] || [ "$ch" = $'\b' ]; then
 			if [ -n "$SECRET" ]; then
 				SECRET="${SECRET%?}"
@@ -45,6 +45,7 @@ read_secret() {
 		SECRET+="$ch"
 		printf '*'
 	done
+	SECRET="${SECRET%$'\r'}"
 	printf '\n'
 }
 

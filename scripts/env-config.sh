@@ -123,7 +123,7 @@ ensure_password() {
 	local cur p1 p2
 	cur="$(get_env DSH_AUTH_PASSWORD)"
 	if [ -n "$cur" ] && ! env_is_placeholder "$cur"; then
-		ok "DSH_AUTH_PASSWORD 已配置，跳过（改密码：./dshm pw）"
+		ok "DSH_AUTH_PASSWORD 已配置，跳过（改密码：./dshm auth password）"
 		return 0
 	fi
 	if [ "$INTERACTIVE" != "1" ]; then

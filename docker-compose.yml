@@ -1,7 +1,7 @@
 services:
   dsh:
     # 默认拉起 GHCR 上由 GitHub Actions 构建好的镜像；本地改代码后可
-    # `./dshm up --build` 或 `docker compose build` 覆盖。
+    # `./dshm service up --build` 或 `docker compose build` 覆盖。
     image: ${DSH_IMAGE:-ghcr.io/qxdho/deepseek-harness-docker:latest}
     build:
       context: .

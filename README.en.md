@@ -66,18 +66,26 @@ Build-time variables (rebuild required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DE
 ## Commands
 
 ```bash
-./dshm                # all commands
-./dshm status         # health / port / login user
-./dshm logs           # logs
-./dshm up             # start, or apply .env changes
-./dshm restart        # restart
-./dshm down           # stop (data kept)
-./dshm pw             # change login password
-./dshm user add bob   # add a user
-./dshm totp enable    # enable two-factor
-./dshm update         # upgrade dsh
-./dshm shell          # shell into the container
+# service
+./dshm service up          # start, or apply .env changes
+./dshm service restart     # restart
+./dshm service down        # stop (data kept)
+./dshm service status      # health / port / login user
+./dshm service logs        # logs
+./dshm service shell       # shell into the container
+./dshm service update      # upgrade dsh
+
+# auth
+./dshm auth password       # change login password
+./dshm auth user add bob   # add a user
+./dshm auth totp enable    # enable two-factor
+
+# panel / self
+./dshm admin install       # install the Docker admin panel (host or container)
+./dshm self install        # register dshm as a system command
 ```
+
+> Flat legacy forms (`./dshm up`, `./dshm pw`, …) still work.
 
 ## HTTPS
 

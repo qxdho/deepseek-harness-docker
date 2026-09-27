@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
-# dshm — dsh 部署管理命令（在项目目录里运行：./dshm <命令>）
+# dshm — DSH 部署管理命令（在项目目录里运行：./dshm <命令>）
 #
-#   ./dshm              查看帮助
-#   ./dshm up [--build] 启动（--build 先本地构建）
-#   ./dshm down         停止（数据保留）
-#   ./dshm restart      重启
-#   ./dshm logs         看日志
-#   ./dshm status       健康 / 端口 / 登录用户
-#   ./dshm pw [用户]     改登录密码
-#   ./dshm user list    列出登录用户
-#   ./dshm user add 名字 [--admin]
-#   ./dshm totp enable [用户]
-#   ./dshm update [版本] 升级 dsh（重建镜像）
-#   ./dshm shell        进容器
-#   ./dshm version      显示容器内 dsh 版本
+# 命令按分组组织；旧的扁平写法（dshm up / dshm pw …）继续可用。
+# 完整说明见 `dshm help`。
+#
+#   dshm service up|down|restart|status|logs|shell|version|update|url|disk
+#   dshm auth    password|user|totp
+#   dshm admin   install|uninstall|url|password|status|logs
+#   dshm self    install|uninstall
 set -euo pipefail
 
 # `./dshm install-self` 会把自己软链到 PATH 里，之后可能以符号链接身份被调用。
@@ -53,7 +47,7 @@ require_docker() {
 require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env，请先运行 ./install.sh"; }
 require_running() {
 	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
-		|| die "容器 $CONTAINER 没在运行，先执行 ./dshm up"
+		|| die "容器 $CONTAINER 没在运行，先执行 ./dshm service up"
 }
 env_value() {
 	local v
@@ -187,7 +181,7 @@ ask_new_password() {
 		# 非交互模式（管道）下 stdin 耗尽会一直读到空串，p1 != p2 永远成立 →
 		# 无限循环。检测到空输入直接报错，别让调用方挂住。
 		if [ ! -t 0 ] && { [ -z "$p1" ] || [ -z "$p2" ]; }; then
-			die "非交互模式下读取密码失败（输入为空或已到 EOF）；改密码请交互执行 ./dshm pw"
+			die "非交互模式下读取密码失败（输入为空或已到 EOF）；改密码请交互执行 ./dshm auth password"
 		fi
 		if [ "$p1" != "$p2" ]; then
 			printf '  %s两次输入不一致，请重新输入%s\n' "$YEL" "$RST"
@@ -228,8 +222,130 @@ wait_healthy() {
 	return 1
 }
 
+# ── 帮助 ────────────────────────────────────────────────────────────────────
+help_service() {
+	cat <<EOF
+
+${B}服务${RST} — 管理 dsh 容器
+  dshm service up [--build]      启动 / 应用 .env 改动
+  dshm service down              停止（数据保留）
+  dshm service restart           重启（重读 .env 并重建）
+  dshm service status            健康 / 端口 / 登录用户
+  dshm service logs              日志
+  dshm service shell             进容器
+  dshm service version           容器内 dsh 版本
+  dshm service update [版本]      升级 dsh（重建镜像）
+  dshm service url               一次性 launch URL（排障）
+  dshm service disk              磁盘占用 / 清理命令
+EOF
+}
+
+help_auth() {
+	cat <<EOF
+
+${B}登录${RST} — 密码与账号
+  dshm auth password [用户]      改登录密码（默认 $(env_value DSH_AUTH_USER admin)）
+  dshm auth user list            列出登录用户
+  dshm auth user add 名字        新建用户 [--admin]
+  dshm auth user disable 名字    禁用用户
+  dshm auth totp enable [用户]    开启两步验证
+  dshm auth totp disable [用户]
+EOF
+}
+
+help_self() {
+	cat <<EOF
+
+${B}自身${RST}
+  dshm self install             把 dshm 注册为系统命令（之后任意目录可直接 dshm …）
+  dshm self uninstall           移除系统命令
+EOF
+}
+
+show_help() {
+	case "${1:-}" in
+	service | svc) help_service; return ;;
+	auth | login) help_auth; return ;;
+	self | cli) help_self; return ;;
+	admin | panel)
+		# shellcheck source=scripts/admin.sh
+		. ./scripts/admin.sh
+		admin_help
+		return
+		;;
+	esac
+	cat <<EOF
+
+${B}dshm${RST} — DSH 部署管理命令（在当前目录运行）
+
+用法：${B}dshm <分组> <子命令> [参数]${RST}
+EOF
+	help_service
+	help_auth
+	cat <<EOF
+
+${B}面板${RST}
+  dshm admin install            安装管理面板（宿主 / 容器二选一）
+  dshm admin url|password|status|logs|uninstall
+  dshm admin help               面板详细说明
+EOF
+	help_self
+	cat <<EOF
+
+${DIM}旧写法（up / down / restart / status / logs / pw / user / totp / disk / url /
+install-self …）仍然可用。分组帮助：dshm service|auth|admin|self help
+改运行配置：编辑 .env 后执行 dshm service up${RST}
+
+EOF
+}
+
 cmd="${1:-help}"
 shift || true
+
+# ── 命令归一化 ──────────────────────────────────────────────────────────────
+# 对外主推分组写法 `dshm <分组> <子命令>`，同时把旧的扁平写法
+# （dshm up / dshm pw / dshm user add …）继续映射到同一批内部命令，
+# 这样已有脚本、文档、肌肉记忆都不会断。分组只做一次翻译，真正的实现仍在
+# 下面那个 case 里，避免逻辑分裂成两份。
+case "$cmd" in
+svc | service)
+	sub="${1:-help}"
+	shift || true
+	if [ "$sub" = "help" ] || [ "$sub" = "-h" ] || [ "$sub" = "--help" ]; then
+		cmd=help
+		set -- service
+	else
+		cmd="$sub"
+	fi
+	;;
+login | auth)
+	sub="${1:-help}"
+	shift || true
+	case "$sub" in
+	password | passwd | pw) cmd=pw ;;
+	user) cmd=user ;;
+	totp) cmd=totp ;;
+	help | -h | --help | "") cmd=help; set -- auth ;;
+	*) die "未知子命令：auth $sub（运行 dshm help）" ;;
+	esac
+	;;
+cli | self)
+	sub="${1:-help}"
+	shift || true
+	case "$sub" in
+	install) cmd=install-self ;;
+	uninstall) cmd=uninstall-self ;;
+	help | -h | --help | "") cmd=help; set -- self ;;
+	*) die "未知子命令：self $sub（运行 dshm help）" ;;
+	esac
+	;;
+panel | admin)
+	# shellcheck source=scripts/admin.sh
+	. ./scripts/admin.sh
+	admin_dispatch "$@"
+	exit $?
+	;;
+esac
 
 case "$cmd" in
 up)
@@ -262,7 +378,7 @@ up)
 	else
 		# 不加 else 的话，失败时这个 if 返回 0，整个 ./dshm up 会以成功退出 ——
 		# 脚本化调用会把「起不来」当成「已就绪」。
-		die "容器未在预期时间内健康，请查看 ./dshm logs"
+		die "容器未在预期时间内健康，请查看 ./dshm service logs"
 	fi
 	;;
 
@@ -282,7 +398,7 @@ restart)
 	# `up -d` 会按当前 .env 重建有变化的容器，符合「重启使新配置生效」的直觉；
 	# 配置没变时它等价于什么都不做（已是最新）。
 	docker compose up -d
-	wait_healthy || die "容器未在预期时间内健康，请查看 ./dshm logs"
+	wait_healthy || die "容器未在预期时间内健康，请查看 ./dshm service logs"
 	ok "已重启并健康"
 	;;
 
@@ -362,7 +478,7 @@ user)
 		docker exec -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" user list
 		;;
 	add)
-		[ -n "${1:-}" ] || die "用法：./dshm user add <用户名> [--admin]"
+		[ -n "${1:-}" ] || die "用法：./dshm auth user add <用户名> [--admin]"
 		name="$1"; shift || true
 		hdr "新建用户：${name}"
 		extra=""
@@ -380,7 +496,7 @@ user)
 		fi
 		;;
 	disable)
-		[ -n "${1:-}" ] || die "用法：./dshm user disable <用户名>"
+		[ -n "${1:-}" ] || die "用法：./dshm auth user disable <用户名>"
 		hdr "禁用用户：${1}"
 		docker exec -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" user disable "$1"
 		ok "已禁用（并吊销其会话）"
@@ -394,7 +510,7 @@ user)
 totp)
 	require_docker; require_running
 	action="${1:-}"; shift || true
-	case "$action" in enable | disable) ;; *) die "用法：./dshm totp <enable|disable> [用户名]" ;; esac
+	case "$action" in enable | disable) ;; *) die "用法：./dshm auth totp <enable|disable> [用户名]" ;; esac
 	user="${1:-$(env_value DSH_AUTH_USER admin)}"
 	hdr "两步验证 ${action}：用户 ${user}"
 	docker exec -e DSH_HOME=/home/node/.dsh "$CONTAINER" node "$CLI_IN_CONTAINER" user totp "$action" "$user"
@@ -434,42 +550,11 @@ uninstall-self | unlink)
 	uninstall_self
 	;;
 
-admin)
-	# shellcheck source=scripts/admin.sh
-	. ./scripts/admin.sh
-	admin_dispatch "$@"
-	;;
-
 help | -h | --help | "")
-	cat <<EOF
-
-${B}dshm${RST} — dsh 部署管理命令（在当前目录运行）
-
-  ${B}./dshm up${RST} [--build]      启动（--build 先本地构建）
-  ${B}./dshm down${RST}              停止（数据保留）
-  ${B}./dshm restart${RST}           重启
-  ${B}./dshm logs${RST}              看日志
-  ${B}./dshm status${RST}            健康 / 端口 / 登录用户
-  ${B}./dshm disk${RST}              磁盘占用 / 清理命令（装插件写满磁盘时用）
-  ${B}./dshm pw${RST} [用户名]        改登录密码（默认 $(env_value DSH_AUTH_USER admin)）
-  ${B}./dshm user list${RST}         列出登录用户
-  ${B}./dshm user add 名字${RST} [--admin]
-  ${B}./dshm user disable 名字${RST}
-  ${B}./dshm totp enable${RST} [用户名]    开启两步验证
-  ${B}./dshm totp disable${RST} [用户名]
-  ${B}./dshm update${RST} [版本]      升级 dsh（重建镜像）
-  ${B}./dshm version${RST}           显示容器内 dsh 版本
-  ${B}./dshm shell${RST}             进容器
-  ${B}./dshm install-self${RST}      把 dshm 注册为系统命令（之后可在任意目录直接运行 dshm …）
-  ${B}./dshm uninstall-self${RST}    移除系统命令
-  ${B}./dshm admin${RST} …           安装/管理 DSH Docker 管理面板（详见 ./dshm admin help）
-
-${DIM}改运行配置：编辑 .env 后执行 ./dshm up（restart 不重建容器，环境变量不会重新读取）${RST}
-
-EOF
+	show_help "$@"
 	;;
 
 *)
-	die "未知命令：${cmd}（运行 ./dshm 查看帮助）"
+	die "未知命令：${cmd}（运行 dshm help 查看帮助）"
 	;;
 esac

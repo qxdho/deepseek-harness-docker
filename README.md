@@ -67,22 +67,30 @@ cd deepseek-harness-docker
 
 ## 常用命令
 
+命令按分组组织（`dshm help` 看全部）：
+
 ```bash
-./dshm                # 全部命令
-./dshm status         # 健康 / 端口 / 登录用户
-./dshm disk           # 磁盘占用（装插件写满磁盘时用）
-./dshm logs           # 日志
-./dshm up             # 启动 / 应用 .env 改动
-./dshm restart        # 重启
-./dshm down           # 停止（数据保留）
-./dshm pw             # 改登录密码
-./dshm user add 张三   # 新建用户
-./dshm totp enable    # 开启两步验证
-./dshm update         # 升级 dsh
-./dshm shell          # 进容器
-./dshm install-self   # 把 dshm 注册为系统命令（之后任意目录直接用 dshm）
-./dshm admin install  # 安装 Docker 管理面板（宿主 / 容器二选一）
+# 服务
+./dshm service up          # 启动 / 应用 .env 改动
+./dshm service restart     # 重启
+./dshm service down        # 停止（数据保留）
+./dshm service status      # 健康 / 端口 / 登录用户
+./dshm service logs        # 日志
+./dshm service shell       # 进容器
+./dshm service update      # 升级 dsh
+./dshm service disk        # 磁盘占用（装插件写满磁盘时用）
+
+# 登录与账号
+./dshm auth password       # 改登录密码
+./dshm auth user add 张三   # 新建用户
+./dshm auth totp enable    # 开启两步验证
+
+# 管理面板 / 自身
+./dshm admin install       # 安装 Docker 管理面板（宿主 / 容器二选一）
+./dshm self install        # 把 dshm 注册为系统命令（之后任意目录直接用 dshm）
 ```
+
+> 旧的扁平写法（`./dshm up`、`./dshm pw`、`./dshm user add …`）仍然可用，方便已有脚本。
 
 ## 管理面板
 

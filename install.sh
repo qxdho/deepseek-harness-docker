@@ -132,5 +132,6 @@ else
 	printf '    容器只绑定了 127.0.0.1，请在宿主机反代到 %s127.0.0.1:%s%s\n' "$B" "$port" "$RST"
 	printf '    想先用 IP 直接访问测试：把 .env 的 DSH_BIND 改成 0.0.0.0，再执行 ./install.sh\n'
 fi
-printf '\n    常用命令：%s./dshm status%s   %s./dshm logs%s   %s./dshm pw%s\n\n' \
+printf '\n    常用命令：%s./dshm service status%s   %s./dshm service logs%s   %s./dshm auth password%s\n' \
 	"$B" "$RST" "$B" "$RST" "$B" "$RST"
+printf '    全部命令：%s./dshm help%s\n\n' "$B" "$RST"

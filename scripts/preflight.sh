@@ -313,7 +313,7 @@ check_home_volume() {
 	DSH_PREFLIGHT_IMAGE="$img"
 	if ! docker image inspect "$img" >/dev/null 2>&1; then
 		printf '%s\n' "提示：DSH_UID=${cu}，但镜像 ${img} 还不存在，无法检查命名卷 ${vol} 的属主。" >&2
-		printf '%s\n' "      先 ./dshm up 拉起一次，再执行一次 ./dshm up 让预检修正卷属主。" >&2
+		printf '%s\n' "      先 ./dshm service up 拉起一次，再执行一次让预检修正卷属主。" >&2
 		return 0
 	fi
 

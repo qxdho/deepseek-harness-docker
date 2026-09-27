@@ -10,8 +10,12 @@
 ```bash
 git clone https://github.com/qxdho/deepseek-harness-docker.git
 cd deepseek-harness-docker
-./install.sh          # 只问一次登录密码
+./install.sh          # 逐项检查 .env：为空的才问，已配置的直接跳过
 ```
+
+安装时会逐项检查 `.env`：**已经有值的跳过，只有空着的才询问**（登录密码、用户名、端口、
+监听地址、工作区、两步验证、API Key）。非交互场景（CI/管道）不会卡住：缺失的必填项直接报错，
+有默认值的用默认值。想改已有配置就编辑 `.env`。
 
 打开 `http://<服务器IP>:3080/`，用 `admin` + 你的密码登录。
 
@@ -75,7 +79,38 @@ cd deepseek-harness-docker
 ./dshm totp enable    # 开启两步验证
 ./dshm update         # 升级 dsh
 ./dshm shell          # 进容器
+./dshm install-self   # 把 dshm 注册为系统命令（之后任意目录直接用 dshm）
+./dshm admin install  # 安装 Docker 管理面板（宿主 / 容器二选一）
 ```
+
+## 管理面板
+
+`./dshm admin install` 装一个独立的 Docker 管理面板：容器状态、启动/停止/重启、日志、
+磁盘占用与一键清理。安装时可选择形态：
+
+| | 宿主（推荐） | 容器 |
+|---|---|---|
+| 权限边界 | **只有宿主进程持有 docker.sock，任何容器都碰不到** | 只有 `qxdho-admin` 容器挂 socket，dsh 容器不挂 |
+| 依赖 | 单个静态二进制；有 systemd 用 systemd，没有就 pidfile | 免 root，随 compose 管理 |
+| 适用 | 自己的 VPS / 有 root 或 sudo | 群晖、macOS、无 root、面板托管的环境 |
+
+```bash
+./dshm admin install            # 交互选择宿主 / 容器
+./dshm admin install --host     # 直接指定
+./dshm admin install --container
+./dshm admin url                # 地址（默认 http://127.0.0.1:3090/）
+./dshm admin password           # 改面板密码
+./dshm admin status | logs
+./dshm admin uninstall --host   # 卸载
+```
+
+远程访问用 SSH 隧道：`ssh -L 3090:127.0.0.1:3090 user@服务器`，或放到 HTTPS 反代后面。
+
+> ⚠️ 面板持有 `docker.sock`，等于宿主 root。默认只监听 `127.0.0.1`，**不要直接暴露到公网**。
+> 面板只调固定几个 Docker Engine 接口（不做任意透传），独立密码 + 会话 cookie（`HttpOnly`、
+> `SameSite=Strict`）、写操作要求自定义头防 CSRF。
+
+宿主二进制从 GitHub Releases 下载，也可本机 `go build`（`admin/` 目录，仅标准库、零运行时依赖）。
 
 ## 界面重启
 

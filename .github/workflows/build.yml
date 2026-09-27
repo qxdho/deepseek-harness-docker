@@ -61,6 +61,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - id: meta-admin
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-admin
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: 构建并推送管理面板镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./admin
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-admin.outputs.tags }}
+          labels: ${{ steps.meta-admin.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # 单架构构建 + 真实起容器冒烟（PR 也跑）
   smoke:
     runs-on: ubuntu-latest
@@ -73,6 +93,10 @@ jobs:
           echo "dsh=$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
           echo "gate=$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: admin/go.mod
+
       - uses: docker/setup-buildx-action@v3
 
       # 离线检查先跑：不需要 docker，几秒出结果，避免白等一轮镜像构建。
@@ -80,6 +104,16 @@ jobs:
         run: |
           chmod +x scripts/preflight.sh scripts/test-preflight.sh
           ./scripts/test-preflight.sh
+
+      - name: .env 配置项逻辑测试
+        run: |
+          chmod +x scripts/env-config.sh scripts/test-env-config.sh
+          ./scripts/test-env-config.sh
+
+      - name: 管理面板离线测试
+        run: |
+          chmod +x admin/test-admin.sh
+          ./admin/test-admin.sh
 
       - name: 代理注入单元测试
         run: |
@@ -102,3 +136,32 @@ jobs:
         run: |
           chmod +x scripts/smoke-test.sh
           ./scripts/smoke-test.sh dsh-test:smoke
+
+  # 打 tag 时发布宿主用的静态二进制，供 `./dshm admin install --host` 下载
+  release-admin:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: admin/go.mod
+      - name: 交叉编译 dsh-admin
+        working-directory: admin
+        run: |
+          set -eux
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -ldflags='-s -w' -o "dsh-admin-linux-${arch}" .
+            sha256sum "dsh-admin-linux-${arch}" > "dsh-admin-linux-${arch}.sha256"
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            admin/dsh-admin-linux-amd64
+            admin/dsh-admin-linux-amd64.sha256
+            admin/dsh-admin-linux-arm64
+            admin/dsh-admin-linux-arm64.sha256
+

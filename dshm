@@ -15,8 +15,22 @@
 #   ./dshm shell        进容器
 #   ./dshm version      显示容器内 dsh 版本
 set -euo pipefail
-cd "$(dirname "$0")"
 
+# `./dshm install-self` 会把自己软链到 PATH 里，之后可能以符号链接身份被调用。
+# 所以先解析出脚本的真实路径再 cd —— 否则 `dirname "$0"` 会落在符号链接所在的
+# 目录（如 /usr/local/bin），后面所有相对路径都会找错地方。
+SELF="$0"
+while [ -L "$SELF" ]; do
+	_link="$(readlink "$SELF")"
+	case "$_link" in
+	/*) SELF="$_link" ;;
+	*) SELF="$(dirname "$SELF")/$_link" ;;
+	esac
+done
+PROJECT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+cd "$PROJECT_DIR"
+
+CLI_NAME=dshm
 ENV_FILE=.env
 CONTAINER=qxdho-dsh
 CLI_IN_CONTAINER=/home/node/.dsh/profiles/web/node_modules/dsh-auth-gate/lib/cli.js
@@ -51,6 +65,76 @@ set_env() {
 	tmp="$(mktemp)"
 	awk -v k="$key" -v v="$value" 'BEGIN{d=0} $0 ~ "^" k "=" {print k "=" v; d=1; next} {print} END{if(!d) print k "=" v}' "$ENV_FILE" >"$tmp"
 	mv "$tmp" "$ENV_FILE"
+}
+
+# ── 注册为系统命令 ──────────────────────────────────────────────────────────
+warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
+is_root() { [ "$(id -u)" = "0" ]; }
+
+# 放系统命令的目录：优先 /usr/local/bin（可写 / root / 免密 sudo），否则 ~/.local/bin。
+# 只认免密 sudo，避免 `sudo -n false` 时卡在密码提示上。
+cli_dir() {
+	if [ -w /usr/local/bin ] 2>/dev/null || is_root; then
+		printf '%s' /usr/local/bin
+	elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+		printf '%s' /usr/local/bin
+	else
+		printf '%s' "${HOME}/.local/bin"
+	fi
+}
+
+install_self() {
+	hdr "把 dshm 注册为系统命令"
+	local dir target
+	dir="$(cli_dir)"
+	target="$dir/$CLI_NAME"
+	chmod +x "$PROJECT_DIR/$CLI_NAME" 2>/dev/null || true
+	# 先把目录建出来（~/.local/bin 通常还不存在），再判断可写性
+	if ! mkdir -p "$dir" 2>/dev/null; then
+		if command -v sudo >/dev/null 2>&1; then
+			sudo mkdir -p "$dir" || die "无法创建 $dir"
+		else
+			die "无法创建 $dir（需要 root 或 sudo）"
+		fi
+	fi
+	if [ -w "$dir" ] || is_root; then
+		ln -sfn "$PROJECT_DIR/$CLI_NAME" "$target"
+	elif command -v sudo >/dev/null 2>&1; then
+		sudo ln -sfn "$PROJECT_DIR/$CLI_NAME" "$target"
+	else
+		die "无法写入 $dir（需要 root、可写的目标目录，或已安装 sudo）"
+	fi
+	[ -L "$target" ] || die "创建链接失败：$target"
+	ok "已注册：${target} -> ${PROJECT_DIR}/${CLI_NAME}"
+	case ":$PATH:" in
+	*":$dir:"*)
+		info "现在可在任意目录直接运行： dshm status"
+		;;
+	*)
+		warn "$dir 不在 PATH 中，把下面一行加到 ~/.bashrc 或 ~/.zshrc："
+		printf '\n    export PATH="%s:$PATH"\n\n' "$dir"
+		;;
+	esac
+}
+
+uninstall_self() {
+	hdr "移除系统命令"
+	local dir target found=0
+	for dir in /usr/local/bin "${HOME}/.local/bin"; do
+		target="$dir/$CLI_NAME"
+		[ -L "$target" ] || continue
+		found=1
+		if [ -w "$dir" ] 2>/dev/null || is_root; then
+			rm -f "$target"
+		elif command -v sudo >/dev/null 2>&1; then
+			sudo rm -f "$target"
+		else
+			warn "无法移除 $target（权限不足）"
+			continue
+		fi
+		ok "已移除 $target"
+	done
+	[ "$found" = "1" ] || info "没有找到注册的符号链接（可能未安装过）"
 }
 
 # ── 隐藏输入 + 星号回显 ─────────────────────────────────────────────────────
@@ -342,6 +426,20 @@ version)
 	docker exec "$CONTAINER" dsh --version
 	;;
 
+install-self | link | install-cli)
+	install_self
+	;;
+
+uninstall-self | unlink)
+	uninstall_self
+	;;
+
+admin)
+	# shellcheck source=scripts/admin.sh
+	. ./scripts/admin.sh
+	admin_dispatch "$@"
+	;;
+
 help | -h | --help | "")
 	cat <<EOF
 
@@ -362,6 +460,9 @@ ${B}dshm${RST} — dsh 部署管理命令（在当前目录运行）
   ${B}./dshm update${RST} [版本]      升级 dsh（重建镜像）
   ${B}./dshm version${RST}           显示容器内 dsh 版本
   ${B}./dshm shell${RST}             进容器
+  ${B}./dshm install-self${RST}      把 dshm 注册为系统命令（之后可在任意目录直接运行 dshm …）
+  ${B}./dshm uninstall-self${RST}    移除系统命令
+  ${B}./dshm admin${RST} …           安装/管理 DSH Docker 管理面板（详见 ./dshm admin help）
 
 ${DIM}改运行配置：编辑 .env 后执行 ./dshm up（restart 不重建容器，环境变量不会重新读取）${RST}
 

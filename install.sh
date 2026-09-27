@@ -3,8 +3,9 @@
 #
 #   ./install.sh
 #
-# 步骤：生成 .env（若缺失）→ 询问一次登录密码 → 拉 GHCR 镜像（拉不到就本地构建）
-#       → 准备宿主工作区（属主/可写性预检）→ 启动 → 等待健康 → 打印访问地址。
+# 步骤：生成 .env（若缺失）→ 逐项检查配置（为空才询问，已有值跳过）→
+#       拉 GHCR 镜像（拉不到就本地构建）→ 准备宿主工作区（属主/可写性预检）
+#       → 启动 → 等待健康 → 打印访问地址。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -49,56 +50,21 @@ read_secret() {
 	printf '\n'
 }
 
-check_password() {
-	local pw="$1" missing=""
-	[ "${#pw}" -ge 14 ] || missing="${missing} 至少14位;"
-	printf '%s' "$pw" | grep -q '[A-Z]' || missing="${missing} 大写字母;"
-	printf '%s' "$pw" | grep -q '[a-z]' || missing="${missing} 小写字母;"
-	printf '%s' "$pw" | grep -q '[0-9]' || missing="${missing} 数字;"
-	printf '%s' "$pw" | grep -q '[^A-Za-z0-9]' || missing="${missing} 特殊符号;"
-	[ -z "$missing" ] || die "密码不合规，缺少：${missing}"
-}
-
 [ -f .env ] || { cp .env.example .env; ok "已生成 .env"; }
 
-get_env() { grep -E "^$1=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true; }
-set_env() {
-	local k="$1" v="$2" tmp
-	tmp="$(mktemp)"
-	awk -v k="$k" -v v="$v" 'BEGIN{d=0} $0 ~ "^" k "=" {print k "=" v; d=1; next} {print} END{if(!d) print k "=" v}' .env >"$tmp"
-	mv "$tmp" .env
-}
+# 配置项读写 + 「空则询问、非空跳过」逻辑（可单测：scripts/test-env-config.sh）
+# shellcheck source=scripts/env-config.sh
+. ./scripts/env-config.sh
 
-# ── 1. 登录密码 ─────────────────────────────────────────────────────────────
-pw="$(get_env DSH_AUTH_PASSWORD)"
-if [ -z "$pw" ] || [ "$pw" = "请换成至少14位且含大小写/数字/符号的强密码" ]; then
-	hdr "设置登录密码"
-	printf '    规则：至少 14 位，且包含%s大写 / 小写 / 数字 / 特殊符号%s\n' "$B" "$RST"
-	p1=""; p2=""
-	while :; do
-		read_secret "    新密码："
-		p1="$SECRET"
-		read_secret "    再输一次确认："
-		p2="$SECRET"
-		# 非交互模式（管道/CI）下 stdin 耗尽会一直读到空串，p1 != p2 永远成立，
-		# 这个循环会无限打转。检测到空输入就明确报错退出，别让调用方挂住。
-		if [ ! -t 0 ] && { [ -z "$p1" ] || [ -z "$p2" ]; }; then
-			die "非交互模式下读取密码失败（输入为空或已到 EOF）；请在 .env 里直接设置 DSH_AUTH_PASSWORD 后重试"
-		fi
-		if [ "$p1" != "$p2" ]; then
-			warn "两次输入不一致，请重新输入"
-			continue
-		fi
-		check_password "$p1"
-		break
-	done
-	pw="$p1"
-	set_env DSH_AUTH_PASSWORD "$pw"
-	chmod 600 .env 2>/dev/null || true
-	ok "密码已写入 .env（登录用户名：$(get_env DSH_AUTH_USER | grep . || echo admin)）"
-else
-	ok ".env 里已有密码，跳过（要改密码用 ./dshm pw）"
-fi
+# ── 1. 配置项：为空则询问，已有值则跳过 ─────────────────────────────────────
+hdr "检查 .env 配置项"
+ensure_password
+ensure_env DSH_AUTH_USER "登录用户名" "admin" 0 env_validate_username
+ensure_env PROXY_PORT "对外端口" "3080" 0 env_validate_port
+ensure_env DSH_BIND "监听地址（127.0.0.1=仅本机，0.0.0.0=局域网可访问）" "127.0.0.1" 0 env_validate_bind
+ensure_env DSH_WORKSPACE "工作区目录（挂到容器 /workspace）" "./workspace" 0 ""
+ensure_env DSH_TOTP "两步验证 off/optional/required" "optional" 0 env_validate_totp
+ensure_env DEEPSEEK_API_KEY "DeepSeek API Key（可留空，之后也能在界面配置）" "" 1 ""
 
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────
 hdr "获取镜像"

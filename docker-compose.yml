@@ -55,5 +55,28 @@ services:
       - ALL
     stop_grace_period: 20s
 
+  dsh-admin:
+    # DSH Docker 管理面板（`./dshm admin install --container` 启用）。
+    # 关键安全边界：**只有这个容器挂 docker.sock**，dsh 容器永远不挂。
+    # 面板只调固定几个 Engine 接口、独立登录、默认只绑 127.0.0.1。
+    # 用 compose profile "admin" 控制是否启用（install.sh/.env 里写 COMPOSE_PROFILES=admin）。
+    image: ${DSH_ADMIN_IMAGE:-ghcr.io/qxdho/deepseek-harness-docker-admin:latest}
+    build:
+      context: ./admin
+    container_name: qxdho-admin
+    profiles: ["admin"]
+    restart: unless-stopped
+    ports:
+      - "${DSH_ADMIN_BIND:-127.0.0.1}:${DSH_ADMIN_PORT:-3090}:3090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 面板配置（口令哈希 + 会话密钥），由 ./dshm admin 生成，权限 600
+      - ./admin/config.json:/config/config.json:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
 volumes:
   dsh-home:

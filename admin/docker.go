@@ -1,0 +1,250 @@
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Docker 是最小化的 Docker Engine API 客户端：只走 Unix socket，只用本面板
+// 真正需要的几个接口。**不做任意透传** —— 面板被攻破也拿不到「执行任意
+// docker 命令」的能力。
+type Docker struct {
+	http   *http.Client
+	socket string
+}
+
+func NewDocker(socket string) *Docker {
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socket)
+		},
+	}
+	return &Docker{
+		http:   &http.Client{Transport: tr, Timeout: 60 * time.Second},
+		socket: socket,
+	}
+}
+
+func (d *Docker) do(method, path string) (*http.Response, error) {
+	req, err := http.NewRequest(method, "http://docker"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return d.http.Do(req)
+}
+
+func (d *Docker) decode(method, path string, out any) error {
+	resp, err := d.do(method, path)
+	if err != nil {
+		return fmt.Errorf("连接 Docker socket 失败（%s）：%w", d.socket, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("docker %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(b)))
+	}
+	if out == nil {
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// ── 状态 ────────────────────────────────────────────────────────────────────
+
+type ContainerStatus struct {
+	Name      string   `json:"name"`
+	Image     string   `json:"image"`
+	Status    string   `json:"status"`
+	Running   bool     `json:"running"`
+	Health    string   `json:"health"`
+	Restarts  int      `json:"restarts"`
+	StartedAt string   `json:"startedAt"`
+	Ports     []string `json:"ports"`
+}
+
+func (d *Docker) Status(name string) (*ContainerStatus, error) {
+	var raw struct {
+		Name  string `json:"Name"`
+		State struct {
+			Status       string `json:"Status"`
+			Running      bool   `json:"Running"`
+			RestartCount int    `json:"RestartCount"`
+			StartedAt    string `json:"StartedAt"`
+			Health       *struct {
+				Status string `json:"Status"`
+			} `json:"Health"`
+		} `json:"State"`
+		Config struct {
+			Image string `json:"Image"`
+		} `json:"Config"`
+		NetworkSettings struct {
+			Ports map[string][]struct {
+				HostIP   string `json:"HostIp"`
+				HostPort string `json:"HostPort"`
+			} `json:"Ports"`
+		} `json:"NetworkSettings"`
+	}
+	if err := d.decode(http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", &raw); err != nil {
+		return nil, err
+	}
+	st := &ContainerStatus{
+		Name:      strings.TrimPrefix(raw.Name, "/"),
+		Image:     raw.Config.Image,
+		Status:    raw.State.Status,
+		Running:   raw.State.Running,
+		Restarts:  raw.State.RestartCount,
+		StartedAt: raw.State.StartedAt,
+	}
+	if raw.State.Health != nil {
+		st.Health = raw.State.Health.Status
+	} else {
+		st.Health = "-"
+	}
+	for cport, binds := range raw.NetworkSettings.Ports {
+		if len(binds) == 0 {
+			st.Ports = append(st.Ports, cport)
+			continue
+		}
+		for _, b := range binds {
+			st.Ports = append(st.Ports, fmt.Sprintf("%s:%s -> %s", b.HostIP, b.HostPort, cport))
+		}
+	}
+	sort.Strings(st.Ports)
+	return st, nil
+}
+
+func (d *Docker) Action(name, action string) error {
+	switch action {
+	case "start", "stop", "restart":
+	default:
+		return fmt.Errorf("不支持的动作：%s", action)
+	}
+	return d.decode(http.MethodPost, "/containers/"+url.PathEscape(name)+"/"+action+"?t=20", nil)
+}
+
+// ── 日志 ────────────────────────────────────────────────────────────────────
+
+func (d *Docker) Logs(name string, tail int) (string, error) {
+	if tail <= 0 || tail > 5000 {
+		tail = 300
+	}
+	q := url.Values{}
+	q.Set("stdout", "1")
+	q.Set("stderr", "1")
+	q.Set("tail", strconv.Itoa(tail))
+	resp, err := d.do(http.MethodGet, "/containers/"+url.PathEscape(name)+"/logs?"+q.Encode())
+	if err != nil {
+		return "", fmt.Errorf("连接 Docker socket 失败：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("docker logs: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return demuxLogs(resp.Body), nil
+}
+
+// Docker 的非 TTY 日志是「8 字节头 + 负载」的复用流：头里第 5-8 字节是大端长度。
+// 直接读会混进控制字节，所以必须拆帧。
+func demuxLogs(r io.Reader) string {
+	var sb strings.Builder
+	hdr := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(r, hdr); err != nil {
+			break
+		}
+		n := int(binary.BigEndian.Uint32(hdr[4:8]))
+		if n <= 0 {
+			continue
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			sb.Write(buf)
+			break
+		}
+		sb.Write(buf)
+	}
+	return sb.String()
+}
+
+// ── 磁盘 ────────────────────────────────────────────────────────────────────
+
+type DiskUsage struct {
+	Images     int64 `json:"images"`
+	Containers int64 `json:"containers"`
+	Volumes    int64 `json:"volumes"`
+	BuildCache int64 `json:"buildCache"`
+	Total      int64 `json:"total"`
+}
+
+func (d *Docker) Disk() (*DiskUsage, error) {
+	var raw struct {
+		Images []struct {
+			Size int64 `json:"Size"`
+		} `json:"Images"`
+		Containers []struct {
+			SizeRw int64 `json:"SizeRw"`
+		} `json:"Containers"`
+		Volumes []struct {
+			UsageData struct {
+				Size int64 `json:"Size"`
+			} `json:"UsageData"`
+		} `json:"Volumes"`
+		BuildCache []struct {
+			Size int64 `json:"Size"`
+		} `json:"BuildCache"`
+	}
+	if err := d.decode(http.MethodGet, "/system/df", &raw); err != nil {
+		return nil, err
+	}
+	u := &DiskUsage{}
+	for _, i := range raw.Images {
+		u.Images += i.Size
+	}
+	for _, c := range raw.Containers {
+		u.Containers += c.SizeRw
+	}
+	for _, v := range raw.Volumes {
+		u.Volumes += v.UsageData.Size
+	}
+	for _, b := range raw.BuildCache {
+		u.BuildCache += b.Size
+	}
+	u.Total = u.Images + u.Containers + u.Volumes + u.BuildCache
+	return u, nil
+}
+
+// Prune 只清 dangling 镜像与构建缓存，**默认不动数据卷**。
+func (d *Docker) Prune() (int64, error) {
+	var reclaimed int64
+	var img struct {
+		SpaceReclaimed int64 `json:"SpaceReclaimed"`
+	}
+	filter := url.QueryEscape(`{"dangling":{"true":true}}`)
+	if err := d.decode(http.MethodPost, "/images/prune?filters="+filter, &img); err != nil {
+		return 0, err
+	}
+	reclaimed += img.SpaceReclaimed
+
+	var bc struct {
+		SpaceReclaimed int64 `json:"SpaceReclaimed"`
+	}
+	if err := d.decode(http.MethodPost, "/build/prune", &bc); err != nil {
+		// 构建缓存清理失败不影响镜像清理的结果
+		return reclaimed, nil
+	}
+	reclaimed += bc.SpaceReclaimed
+	return reclaimed, nil
+}

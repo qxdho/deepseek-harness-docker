@@ -104,9 +104,16 @@ is created by the daemon **as root**), the agent fails with:
 EACCES: permission denied, mkdir '/workspace/xxx'
 ```
 
-`./install.sh` and `./dshm up` check this before starting the container and fix it when
-`sudo` is available; otherwise they fail with the exact command to run instead of starting a
-broken container. To fix it by hand:
+`./install.sh` and `./dshm up` check this **against the container UID (1000 by default)**
+before starting the container and fix it when run as root or with passwordless `sudo`. A plain
+"can the current user write?" test is not enough: on a root deploy `root:root 0755` is writable
+by root but not by UID 1000.
+
+When those wrappers are bypassed (bare `docker compose up -d`, a panel restarting the container),
+the entrypoint re-checks at startup. If `/workspace` is unwritable it does **not** exit — a
+non-zero exit under `restart: unless-stopped` becomes an endless restart loop — it degrades to a
+writable in-container directory (`$DSH_HOME/workspace`), keeps the UI reachable, and logs a loud
+banner. Set `DSH_WORKSPACE_STRICT=1` to restore fail-fast. To fix it by hand:
 
 ```bash
 # Option 1 — take ownership (directory already exists)

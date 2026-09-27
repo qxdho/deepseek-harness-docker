@@ -147,8 +147,14 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 EACCES: permission denied, mkdir '/workspace/xxx'
 ```
 
-`./install.sh` 和 `./dshm up` 会在启动前检查并自动修正（有 `sudo` 时）；修正不了
-会直接报错并给出命令，不会带着问题启动。手工处理方式：
+`./install.sh` 和 `./dshm up` 会在启动前**按容器内的 uid（默认 1000）**检查并自动修正
+（root 或免密 `sudo` 时）。注意：只看"当前用户能不能写"是不够的——root 部署时
+`root:root 0755` 对 root 可写、对容器里的 1000 却不可写。
+
+没走这两条命令时（直接 `docker compose up -d`、或由面板重启容器），容器启动时会再查一次：
+**不可写不会退出重启**，而是降级到容器内可写目录（`$DSH_HOME/workspace`）继续启动，
+让网页先能打开，并在日志里打出醒目横幅。设 `DSH_WORKSPACE_STRICT=1` 可恢复"不可写就退出"。
+手工处理方式：
 
 ```bash
 # 方式一：改属主（如果目录已存在）
@@ -188,8 +194,16 @@ docker run --user "$(id -u):$(id -g)" \
 
 **页面打不开？** `./dshm logs`。首次启动要 1–2 分钟。
 
+**docker 一直重启、页面打不开？** 大概率是宿主工作区属主不对，日志里会有
+`/workspace 不可写`。见「工作区权限」，快速修复：
+
+```bash
+sudo chown -R 1000:1000 ./workspace && docker compose up -d
+# 或者直接 ./dshm up（新版预检会先按容器 uid 修正）
+```
+
 **agent 报 `EACCES: permission denied, mkdir '/workspace/xxx'`？** 工作区属主不对，
-见上面的「工作区权限」。快速修复：`sudo chown -R 1000:1000 ./workspace` 后重启。
+见上面的「工作区权限」。
 
 **密码对但一直弹回登录页？** 多半是 `DSH_COOKIE_SECURE=1` 却在用 HTTP，改回 `0`。
 

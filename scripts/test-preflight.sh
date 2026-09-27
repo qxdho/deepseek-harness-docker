@@ -199,28 +199,30 @@ esac
 
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。
-# 只跑「工作区不可写 → 必须 exit 1 且给出 chown 提示」这一条路径。
+# 覆盖两条路径：DSH_WORKSPACE_STRICT=1 时 fail-fast；默认时降级到容器内目录 ——
+# 不能因为宿主工作区不可写就让 restart 策略把容器拖进无限重启。
 if [ "$(id -u)" = "0" ]; then
 	echo "  SKIP root 下权限位无效"
 else
 	stage="$sandbox/ep"
 	mkdir -p "$stage"
 	cp "$ENTRYPOINT" "$stage/entrypoint.sh"
-	# 把 /workspace 重定向到可控目录：DSH_WORKSPACE 在 entrypoint 里是硬编码的
-	# WORKSPACE=/workspace，这里用 sed 换成测试目录，避免真的去动 /workspace。
+	# 把 /workspace 与镜像内的 SEED 换成可控值：entrypoint 里都是硬编码，
+	# sed 之后测试既不碰真的 /workspace，也不依赖 /opt/dsh-seed 是否存在。
 	sed -i "s#^WORKSPACE=/workspace#WORKSPACE=$sandbox/ep-ws#" "$stage/entrypoint.sh"
+	sed -i "s#^SEED=/opt/dsh-seed#SEED=/nonexistent-seed#" "$stage/entrypoint.sh"
 	mkdir -p "$sandbox/ep-ws"
 	chmod 000 "$sandbox/ep-ws"
-	# 用 /nonexistent 当 SEED，保证在检查之后、播种之前就失败，不会真的启动服务
+
+	# 7a. 严格模式：不可写 → 退出（rc != 0）并给 chown 指引
 	set +e
-	out="$(SEED=/nonexistent DSH_HOME="$sandbox/ep-home" bash "$stage/entrypoint.sh" 2>&1)"
+	out="$(DSH_WORKSPACE_STRICT=1 DSH_HOME="$sandbox/ep-home-a" bash "$stage/entrypoint.sh" 2>&1)"
 	rc=$?
 	set -e
-	chmod 755 "$sandbox/ep-ws"
 	if [ "$rc" -ne 0 ]; then
-		ok "entrypoint 在 /workspace 不可写时退出（rc=$rc）"
+		ok "严格模式在 /workspace 不可写时退出（rc=$rc）"
 	else
-		bad "entrypoint 应退出"
+		bad "严格模式应退出"
 	fi
 	case "$out" in
 	*"不可写"*) ok "输出了「不可写」诊断" ;;
@@ -230,6 +232,22 @@ else
 	*"chown"*) ok "诊断里含 chown 修复提示" ;;
 	*) bad "诊断缺少 chown 提示" ;;
 	esac
+
+	# 7b. 默认模式：不可写 → 不在这里退出，降级到容器内可写目录后继续
+	set +e
+	out="$(DSH_HOME="$sandbox/ep-home-b" bash "$stage/entrypoint.sh" 2>&1)"
+	rc=$?
+	set -e
+	case "$out" in
+	*"工作区降级"*) ok "默认模式打印了降级横幅" ;;
+	*) bad "默认模式缺少降级横幅：$out" ;;
+	esac
+	[ -d "$sandbox/ep-home-b/workspace" ] && ok "降级目录已创建" || bad "降级目录未创建"
+	case "$out" in
+	*"预置 profile"*) ok "降级后继续走到播种阶段（因测试用 SEED 缺失而停）" ;;
+	*) bad "降级后未继续：$out" ;;
+	esac
+	chmod 755 "$sandbox/ep-ws"
 fi
 
 echo

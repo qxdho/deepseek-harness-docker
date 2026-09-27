@@ -105,8 +105,11 @@ The chosen approach, matching the rootless-container consensus
 1. **Host side** — `scripts/preflight.sh` runs from `install.sh` and `dshm up` *before* `compose up`.
    Creating the directory while the user still owns it is the whole fix. If it already exists with the
    wrong owner, it chowns via `sudo` when available and otherwise prints the exact command.
-2. **Container side** — `entrypoint.sh` probes writability of `/workspace` early (before dsh starts) and
-   exits with an actionable message instead of letting the failure appear mid-task.
+2. **Container side** — `entrypoint.sh` probes writability of `/workspace` early (before dsh starts). If it
+   is not writable it prints the same actionable message and then **degrades to `$DSH_HOME/workspace`**
+   instead of exiting: under `restart: unless-stopped` a non-zero exit becomes an infinite restart loop,
+   which the user experiences as "the page never opens" — worse than running with a fallback. The
+   degraded run logs a loud banner and keeps the UI usable. `DSH_WORKSPACE_STRICT=1` restores fail-fast.
 3. **Tests** — `scripts/test-preflight.sh` (offline, no Docker) and `scripts/smoke-workspace.sh`
    (real container; uses `--tmpfs` so the fixture is root-owned even when the tests themselves run as
    root, which `chmod` cannot reproduce).
@@ -123,9 +126,10 @@ Verified locally (no Docker on this machine, so image build is delegated to CI):
   - following redirects → `200` and the page contains `__DSH_BOOT__`;
   - a second `GET /` with the cookie → `200`.
 - Verified the Host-rewrite cookie argument (see §3).
-- `scripts/test-preflight.sh` (offline, no Docker) — 19 assertions covering the workspace
+- `scripts/test-preflight.sh` (offline, no Docker) — 25 assertions covering the workspace
   ownership checks: writable, default value, absolute / `~` / quoted paths, non-writable rejection
-  with actionable output, missing `.env`, and the container-side `entrypoint.sh` check. Passes on a
+  with actionable output, missing `.env`, the "deployer can write but the container UID cannot" false
+  pass, and both container-side `entrypoint.sh` paths (strict exit and fallback banner). Passes on a
   machine with no Docker.
 - `proxy/test-inject.js` (offline, `node`, needs `npm install`) — 10 assertions on the HTML
   injection point, including the `<header>` / `<headless-…>` false-positive that previously sent

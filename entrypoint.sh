@@ -32,12 +32,26 @@ WORKSPACE=/workspace
 mkdir -p "$DSH_HOME/profiles"
 
 # /workspace 通常是 bind mount，属主由宿主机决定，镜像里的 chown 会被它遮蔽。
-# 若宿主目录是 root 创建的（dockerd 自动创建源目录时就会这样），必须在这里
-# 就报错：否则要等 agent 干活时才蹦 `EACCES: permission denied, mkdir ...`，
-# 报错点离病因很远。这里不尝试自行提权 —— 修属主是宿主机的事，容器内既没有
-# CAP_CHOWN 也不该有。
+# 若宿主目录是 root 创建的（dockerd 自动创建源目录时就会这样），容器里的
+# node(1000) 就写不进去。宿主侧由 scripts/preflight.sh 兜底；这里再兜一层。
+#
+# 关键：检测到不可写时**不能直接 exit 1**。compose 用的是
+# restart: unless-stopped，非 0 退出会被无限重拉，用户看到的现象是
+# 「docker 一直重启、网页打不开」，比带病运行还糟。所以这里退回到容器内可写的
+# 持久目录继续启动，让 UI 先能用，同时用醒目日志暴露宿主工作区不可用。
+# 需要旧的 fail-fast 行为时设 DSH_WORKSPACE_STRICT=1。
+WORKSPACE=/workspace
+WORKSPACE_STRICT="${DSH_WORKSPACE_STRICT:-0}"
+FALLBACK_WORKSPACE="${DSH_HOME}/workspace"
+
+workspace_ok=0
 mkdir -p "$WORKSPACE" 2>/dev/null || true
-if ! ( : >"${WORKSPACE}/.dsh-write-test" ) 2>/dev/null; then
+if ( : >"${WORKSPACE}/.dsh-write-test" ) 2>/dev/null; then
+  workspace_ok=1
+  rm -f "${WORKSPACE}/.dsh-write-test" 2>/dev/null || true
+fi
+
+if [ "$workspace_ok" != "1" ]; then
   ws_owner="$(stat -c '%U:%G (%a)' "$WORKSPACE" 2>/dev/null || echo '未知')"
   log "ERROR: /workspace 不可写（属主 ${ws_owner}，当前用户 $(id -un) $(id -u):$(id -g)）"
   log "        /workspace 是 bind mount，属主由宿主机决定，镜像里的 chown 会被遮蔽。"
@@ -47,9 +61,26 @@ if ! ( : >"${WORKSPACE}/.dsh-write-test" ) 2>/dev/null; then
   log "             mkdir -p \"\$HOME/dsh-workspace\""
   log "             echo \"DSH_WORKSPACE=\$HOME/dsh-workspace\" >> .env"
   log "             docker compose down && docker compose up -d   # 必须 down+up，restart 不生效"
-  exit 1
+  if [ "$WORKSPACE_STRICT" = "1" ]; then
+    exit 1
+  fi
+  mkdir -p "$FALLBACK_WORKSPACE"
+  if ! ( : >"${FALLBACK_WORKSPACE}/.dsh-write-test" ) 2>/dev/null; then
+    rm -f "${FALLBACK_WORKSPACE}/.dsh-write-test" 2>/dev/null || true
+    die "退路 ${FALLBACK_WORKSPACE} 也不可写，无法启动（要恢复「不可写就退出」设 DSH_WORKSPACE_STRICT=1）"
+  fi
+  rm -f "${FALLBACK_WORKSPACE}/.dsh-write-test" 2>/dev/null || true
+  log ""
+  log "======================================================================"
+  log " 工作区降级：宿主 /workspace 不可写，本次改用容器内目录启动"
+  log "   ${FALLBACK_WORKSPACE}"
+  log " agent 的文件会写在这里（随 dsh_home 持久卷保留），不会出现在"
+  log " 宿主机 DSH_WORKSPACE 指向的目录下。"
+  log " 按上面的 A 或 B 修好后执行 docker compose down && up -d 即可切回。"
+  log "======================================================================"
+  log ""
+  cd "$FALLBACK_WORKSPACE"
 fi
-rm -f "${WORKSPACE}/.dsh-write-test" 2>/dev/null || true
 
 # ── 1. 播种 profile ─────────────────────────────────────────────────────────
 if [ ! -f "$PROFILE/package.json" ]; then

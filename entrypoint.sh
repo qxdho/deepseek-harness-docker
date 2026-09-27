@@ -64,9 +64,11 @@ fi
 if [ ! -s "$DSH_HOME/auth/users.yaml" ]; then
   [ -n "${DSH_AUTH_PASSWORD:-}" ] || die "首次启动必须设置 DSH_AUTH_PASSWORD（复制 .env.example 为 .env）"
   log "创建管理员用户 '${DSH_AUTH_USER}'"
-  printf '%s\n' "$DSH_AUTH_PASSWORD" \
+  if ! printf '%s\n' "$DSH_AUTH_PASSWORD" \
     | DSH_HOME="$DSH_HOME" node "$PROFILE/node_modules/dsh-auth-gate/lib/cli.js" \
-        user add "$DSH_AUTH_USER" --admin --password-stdin
+        user add "$DSH_AUTH_USER" --admin --password-stdin; then
+    die "创建管理员失败：密码需至少 14 位，且同时包含大写、小写、数字、特殊符号；用户名只能用小写字母/数字等合法字符"
+  fi
   chmod 600 "$DSH_HOME/auth/users.yaml" 2>/dev/null || true
 else
   log "检测到已有用户文件，跳过创建（改密码：docker exec -it <容器> dsh-auth-user passwd <用户名>）"

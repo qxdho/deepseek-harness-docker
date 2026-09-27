@@ -75,7 +75,7 @@ dsh 是能在你机器上执行命令、读写文件的 AI 编程 Agent。官方
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号用；之后改密码用 `./dshm password` |
+| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号用（**≥14 位且含大小写/数字/符号**）；之后改密码用 `./dshm password` |
 | `PROXY_PORT` | `3080` | 宿主机端口 |
 | `DSH_BIND` | `127.0.0.1` | `127.0.0.1`=只有宿主机能访问（配反代）；`0.0.0.0`=局域网可直连 |
 | `DSH_WORKSPACE` | `./workspace` | agent 的工作目录 |

@@ -25,11 +25,17 @@ set_env() {
 
 # 1. 登录密码
 pw="$(get_env DSH_AUTH_PASSWORD)"
-if [ -z "$pw" ] || [ "$pw" = "请换成至少12位的强密码" ]; then
-	printf '请设置登录密码（至少 12 位，输入不回显）：'
+if [ -z "$pw" ] || [ "$pw" = "请换成至少14位且含大小写/数字/符号的强密码" ]; then
+	printf '请设置登录密码（至少 14 位，含大写/小写/数字/符号，输入不回显）：'
 	read -rs pw
 	echo
-	[ "${#pw}" -ge 12 ] || die "密码太短，至少 12 位"
+	valid=1
+	[ "${#pw}" -ge 14 ] || valid=0
+	printf '%s' "$pw" | grep -q '[A-Z]' || valid=0
+	printf '%s' "$pw" | grep -q '[a-z]' || valid=0
+	printf '%s' "$pw" | grep -q '[0-9]' || valid=0
+	printf '%s' "$pw" | grep -q '[^A-Za-z0-9]' || valid=0
+	[ "$valid" = "1" ] || die "密码不合规：需至少 14 位，且同时包含大写、小写、数字、特殊符号"
 	set_env DSH_AUTH_PASSWORD "$pw"
 	chmod 600 .env 2>/dev/null || true
 	echo "密码已写入 .env（用户名为 $(get_env DSH_AUTH_USER)，默认 admin）"

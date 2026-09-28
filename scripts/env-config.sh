@@ -58,19 +58,28 @@ env_value() {
 	printf '%s' "${v:-$2}"
 }
 
-# 数据目录换了、工作区还停在旧默认时，让工作区跟着走。
-# compose 里工作区的默认值写死为 /dsh/workspace，只能在这里对齐，否则
-# 只改 DSH_HOME_HOST 会留下一个 /dsh/workspace —— 在宿主上多半是 root 建的、
-# 容器写不进去的目录。install.sh 和 dshm service up 都会调用。
-sync_workspace_default() {
-	local home_host ws
+# 把 .env 里的历史默认值对齐到当前默认值。install.sh 与 dshm service up 都会调用。
+#
+#   1) 数据目录换了、工作区还停在 /dsh/workspace → 工作区跟着数据目录走。
+#      compose 里工作区默认值写死为 /dsh/workspace，只能在这里对齐，否则只改
+#      DSH_HOME_HOST 会留下一个 /dsh/workspace —— 在宿主上多半是 root 建的、
+#      容器写不进去的目录。
+#   2) 容器内数据目录还是旧默认 /home/node/.dsh → 改成 /dsh。这里只改**容器内
+#      路径**，宿主一侧的 DSH_HOME_HOST 不动，所以不会搬动任何数据，只是让挂载点
+#      与文档/默认值保持一致（旧值会让 dshm、文档命令里的路径对不上）。
+normalize_defaults() {
+	local home_host ws home
 	home_host="$(get_env DSH_HOME_HOST)"
 	ws="$(get_env DSH_WORKSPACE)"
-	[ -n "$home_host" ] || return 0
-	[ "$home_host" != "/dsh" ] || return 0
-	[ "$ws" = "/dsh/workspace" ] || return 0
-	set_env DSH_WORKSPACE "${home_host}/workspace"
-	ok "DSH_WORKSPACE 跟随数据目录改为 ${home_host}/workspace"
+	if [ -n "$home_host" ] && [ "$home_host" != "/dsh" ] && [ "$ws" = "/dsh/workspace" ]; then
+		set_env DSH_WORKSPACE "${home_host}/workspace"
+		ok "DSH_WORKSPACE 跟随数据目录改为 ${home_host}/workspace"
+	fi
+	home="$(get_env DSH_HOME)"
+	if [ "$home" = "/home/node/.dsh" ]; then
+		set_env DSH_HOME "/dsh"
+		ok "DSH_HOME 由旧默认 /home/node/.dsh 改为当前默认 /dsh（宿主目录不变）"
+	fi
 }
 
 # 写回一个键。值通过环境变量传给 awk —— 用 `awk -v v=...` 会把值里的
@@ -135,47 +144,75 @@ env_validate_bind() {
 	return 1
 }
 
-# ── 空则询问、非空跳过 ──────────────────────────────────────────────────────
+# 容器内的挂载点：必须是绝对路径，且不能带空格/引号/冒号。
+# 这些值会被 Compose 原样拼进短语法挂载串 `源:目标`，空值或相对路径会让 dockerd
+# 报 "invalid mount path: '' mount path must be absolute"，冒号还会把挂载串切错。
+env_validate_abspath() {
+	case "$1" in
+	/*) ;;
+	*)
+		warn "必须是绝对路径（以 / 开头）"
+		return 1
+		;;
+	esac
+	case "$1" in
+	*[!A-Za-z0-9._/@+-]*)
+		warn "路径里不能有空格、引号或冒号"
+		return 1
+		;;
+	esac
+	return 0
+}
+
+# ── 空则写入默认值、非空跳过 ────────────────────────────────────────────────
 # ensure_env KEY 说明 [默认值] [可选=1] [校验函数]
-# 已有非空值（且不是示例占位符）直接跳过；交互模式下才询问。
+#
+# 设计目标：有默认值的项一律不提问。默认值就是推荐值，让用户逐个回车确认只会
+# 增加出错机会（历史上就有人在这类提示里填出了不该用的路径）。因此：
+#   * 已有合法值        → 跳过
+#   * 未配置 + 有默认值 → 直接写入默认值，交互模式下也不询问
+#   * 已有值不合规      → 有默认值就改用默认值并告警；没有默认值才重新询问/报错
+#   * 未配置 + 可选项   → 跳过
+#   * 未配置 + 必填无默认值 → 交互模式询问；非交互模式报错（fail-closed）
 ensure_env() {
 	local key="$1" label="$2" default="${3:-}" optional="${4:-0}" validator="${5:-}"
 	local cur value
 	cur="$(get_env "$key")"
+
 	if [ -n "$cur" ] && ! env_is_placeholder "$cur"; then
-		# 已有值也要过一遍校验：否则写错的 PROXY_PORT=abc / DSH_BIND=foo
-		# 会被"已配置，跳过"悄悄放过去。
 		if [ -z "$validator" ] || "$validator" "$cur"; then
 			ok "${key} 已配置，跳过"
+			return 0
+		fi
+		if [ -n "$default" ]; then
+			warn "${key} 的当前值不合规，改用默认值：${default}"
+			set_env "$key" "$default"
 			return 0
 		fi
 		if [ "$INTERACTIVE" != "1" ]; then
 			die "${key} 的当前值不合规，请在 ${ENV_FILE} 里修正后重试"
 		fi
 		warn "${key} 的当前值不合规，请重新输入"
-	elif [ "$INTERACTIVE" != "1" ]; then
+	else
 		if [ -n "$default" ]; then
 			set_env "$key" "$default"
-			ok "${key} 未配置，非交互模式使用默认值：${default}"
+			ok "${key} 未配置，使用默认值：${default}"
 			return 0
 		fi
 		if [ "$optional" = "1" ]; then
 			ok "${key} 未配置，可选，跳过"
 			return 0
 		fi
-		die "${key} 未配置且当前为非交互模式；请在 ${ENV_FILE} 里设置后重试"
+		if [ "$INTERACTIVE" != "1" ]; then
+			die "${key} 未配置且当前为非交互模式；请在 ${ENV_FILE} 里设置后重试"
+		fi
 	fi
+
+	# 只有「必填且没有默认值」才需要用户输入
 	while :; do
-		printf '    %s' "$label"
-		[ -n "$default" ] && printf '（默认 %s）' "$default"
-		printf '：'
+		printf '    %s：' "$label"
 		IFS= read -r value || value=""
-		value="${value:-$default}"
 		if [ -z "$value" ]; then
-			if [ "$optional" = "1" ]; then
-				ok "${key} 留空，跳过"
-				return 0
-			fi
 			warn "$label 不能为空"
 			continue
 		fi

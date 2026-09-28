@@ -49,25 +49,29 @@ set -e
 [ "$rc" -ne 0 ] && pass "非交互缺必填项 → rc=$rc" || fail "应报错却成功"
 case "$out" in *"K3"*) pass "报错指名了缺失的键" ;; *) fail "报错未指名：$out" ;; esac
 
-echo "== 4. 交互 + 输入值 → 写入 =="
+echo "== 4. 无默认值的必填项 → 交互询问 =="
 : >"$ENV_FILE"
-printf 'hello\n' | INTERACTIVE=1 ensure_env K4 "键4" "def" 0 "" >/dev/null
+printf 'hello\n' | INTERACTIVE=1 ensure_env K4 "键4" "" 0 "" >/dev/null
 [ "$(get_env K4)" = "hello" ] && pass "写入了用户输入" || fail "未写入（$(get_env K4)）"
 
-echo "== 5. 交互 + 直接回车 → 用默认 =="
+echo "== 5. 有默认值 → 交互也不询问，直接用默认 =="
+# 不能再要求"回车确认默认值"：默认值就是推荐值，逐个回车只会多一次出错机会。
+# 用 </dev/null 模拟"没有任何输入"，若还在询问就会读到 EOF 而失败。
 : >"$ENV_FILE"
-printf '\n' | INTERACTIVE=1 ensure_env K5 "键5" "def5" 0 "" >/dev/null
-[ "$(get_env K5)" = "def5" ] && pass "回车接受默认值" || fail "默认值未生效（$(get_env K5)）"
+out="$(INTERACTIVE=1 ensure_env K5 "键5" "def5" 0 "" </dev/null 2>&1)"
+[ "$(get_env K5)" = "def5" ] && pass "直接写入默认值" || fail "默认值未生效（$(get_env K5)）"
+case "$out" in *"使用默认值"*) pass "输出说明了用的是默认值" ;; *) fail "输出未说明：$out" ;; esac
+case "$out" in *"键5："*) fail "不应该出现输入提示：$out" ;; *) pass "没有出现输入提示" ;; esac
 
-echo "== 6. 交互 + 校验失败后重问 =="
+echo "== 6. 无默认值时：校验失败后重问 =="
 : >"$ENV_FILE"
-printf 'abc\n70000\n8080\n' | INTERACTIVE=1 ensure_env P "端口" "3080" 0 env_validate_port >/dev/null
+printf 'abc\n70000\n8080\n' | INTERACTIVE=1 ensure_env P "端口" "" 0 env_validate_port >/dev/null
 [ "$(get_env P)" = "8080" ] && pass "非法值被拒绝，最终写入合法值" || fail "校验未生效（$(get_env P)）"
 
-echo "== 7. 交互 + 可选项留空 → 跳过 =="
+echo "== 7. 可选项不需要输入，直接跳过 =="
 : >"$ENV_FILE"
-printf '\n' | INTERACTIVE=1 ensure_env OPT "可选" "" 1 "" >/dev/null
-[ -z "$(get_env OPT)" ] && pass "可选项留空不写入" || fail "可选项被写入（$(get_env OPT)）"
+INTERACTIVE=1 ensure_env OPT "可选" "" 1 "" </dev/null >/dev/null
+[ -z "$(get_env OPT)" ] && pass "可选项不被写入" || fail "可选项被写入（$(get_env OPT)）"
 
 echo "== 8. 占位符视为未配置（密码）=="
 printf 'DSH_AUTH_PASSWORD=请换成至少14位且含大小写/数字/符号的强密码\n' >"$ENV_FILE"
@@ -107,13 +111,57 @@ set_env K 'a\b'
 	|| fail "被转义成：$(od -c "$ENV_FILE" | head -1)"
 [ "$(get_env K)" = 'a\b' ] && pass "读回一致" || fail "读回不一致：$(get_env K)"
 
-echo "== 13. 已有值不合规必须拦下（非交互）=="
+echo "== 13. 已有值不合规 + 有默认值 → 改用默认值（不再要求手改）=="
 printf 'P=abc\n' >"$ENV_FILE"
+out="$(INTERACTIVE=0 ensure_env P "端口" "3080" 0 env_validate_port 2>&1)"
+[ "$(get_env P)" = "3080" ] && pass "不合规的值被默认值覆盖" || fail "未覆盖（$(get_env P)）"
+case "$out" in *"改用默认值"*) pass "输出说明了替换原因" ;; *) fail "输出未说明：$out" ;; esac
+
+echo "== 14. 已有值不合规 + 无默认值 + 非交互 → 报错 =="
+printf 'Q=abc\n' >"$ENV_FILE"
 set +e
-( INTERACTIVE=0 ensure_env P "端口" "3080" 0 env_validate_port ) >/dev/null 2>&1
+( INTERACTIVE=0 ensure_env Q "必填" "" 0 env_validate_port ) >/dev/null 2>&1
 rc=$?
 set -e
-[ "$rc" -ne 0 ] && pass "现有值不合规 → 报错（rc=$rc）" || fail "不合规的现有值被放过了"
+[ "$rc" -ne 0 ] && pass "无默认值可退 → 报错（rc=$rc）" || fail "不合规的必填值被放过"
+[ "$(get_env Q)" = "abc" ] && pass "报错时不改动原值" || fail "原值被改动了"
+
+echo "== 15. 容器侧路径必须绝对（空值/相对值自动纠正为默认）=="
+printf 'DSH_WORKSPACE_CONTAINER=\nDSH_HOME=\n' >"$ENV_FILE"
+INTERACTIVE=0 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区" "/workspace" 0 env_validate_abspath >/dev/null
+INTERACTIVE=0 ensure_env DSH_HOME "容器内数据目录" "/dsh" 0 env_validate_abspath >/dev/null
+[ "$(get_env DSH_WORKSPACE_CONTAINER)" = "/workspace" ] && pass "空的工作区挂载点被补成 /workspace" \
+	|| fail "未补默认值：$(get_env DSH_WORKSPACE_CONTAINER)"
+[ "$(get_env DSH_HOME)" = "/dsh" ] && pass "空的数据目录挂载点被补成 /dsh" || fail "未补默认值：$(get_env DSH_HOME)"
+printf 'DSH_WORKSPACE_CONTAINER=workspace\n' >"$ENV_FILE"
+INTERACTIVE=0 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区" "/workspace" 0 env_validate_abspath >/dev/null
+[ "$(get_env DSH_WORKSPACE_CONTAINER)" = "/workspace" ] && pass "相对路径被纠正为默认值" \
+	|| fail "相对路径未被纠正：$(get_env DSH_WORKSPACE_CONTAINER)"
+
+echo "== 16. 历史默认值对齐 =="
+# 换了数据目录、工作区还是旧默认 → 工作区跟随
+printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE=/dsh/workspace\n' >"$ENV_FILE"
+normalize_defaults >/dev/null
+[ "$(get_env DSH_WORKSPACE)" = "/data/workspace" ] && pass "工作区跟随数据目录" \
+	|| fail "未跟随：$(get_env DSH_WORKSPACE)"
+
+# 用户自己指定的工作区不动
+printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE=/root/my-ws\n' >"$ENV_FILE"
+normalize_defaults >/dev/null
+[ "$(get_env DSH_WORKSPACE)" = "/root/my-ws" ] && pass "自定义工作区不被改动" \
+	|| fail "被改成了：$(get_env DSH_WORKSPACE)"
+
+# 旧默认容器路径 → 当前默认（宿主目录不变，不搬数据）
+printf 'DSH_HOME_HOST=/data\nDSH_HOME=/home/node/.dsh\n' >"$ENV_FILE"
+normalize_defaults >/dev/null
+[ "$(get_env DSH_HOME)" = "/dsh" ] && pass "旧容器路径改为 /dsh" || fail "未改：$(get_env DSH_HOME)"
+[ "$(get_env DSH_HOME_HOST)" = "/data" ] && pass "宿主数据目录保持不动" || fail "宿主目录被改了"
+
+# 已经是当前默认 → 不重复写入（文件内容保持原样，不产生无意义的变更日志）
+printf 'DSH_HOME_HOST=/dsh\nDSH_HOME=/dsh\nDSH_WORKSPACE=/dsh/workspace\n' >"$ENV_FILE"
+before="$(cat "$ENV_FILE")"
+normalize_defaults >/dev/null
+[ "$(cat "$ENV_FILE")" = "$before" ] && pass "默认值场景下不改动文件" || fail "文件被无谓改动"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

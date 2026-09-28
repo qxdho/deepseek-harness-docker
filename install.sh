@@ -3,9 +3,9 @@
 #
 #   ./install.sh
 #
-# 步骤：生成 .env（若缺失）→ 逐项检查配置（为空才询问，已有值跳过）→
-#       拉 GHCR 镜像（拉不到就本地构建）→ 旧命名卷数据迁移（仅旧版升级时需要）
-#       → 准备宿主工作区（属主/可写性预检）→ 启动 → 等待健康 → 打印访问地址。
+# 步骤：生成 .env（若缺失）→ 逐项检查配置（有默认值的直接采用，只有必填且无默认
+#       值的才询问）→ 拉 GHCR 镜像（拉不到就本地构建）→ 旧命名卷数据迁移（仅旧版
+#       升级时需要）→ 准备宿主工作区（属主/可写性预检）→ 启动 → 等待健康 → 打印访问地址。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -34,19 +34,19 @@ docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"
 # shellcheck source=scripts/migrate-home.sh
 . ./scripts/migrate-home.sh
 
-# ── 1. 配置项：为空则询问，已有值则跳过 ─────────────────────────────────────
+# ── 1. 配置项：有默认值的直接采用，只有必填且无默认值的才询问 ───────────────
 hdr "检查 .env 配置项"
 ensure_password
 ensure_env DSH_AUTH_USER "登录用户名" "admin" 0 env_validate_username
 ensure_env PROXY_PORT "对外端口" "3080" 0 env_validate_port
 ensure_env DSH_BIND "监听地址（127.0.0.1=仅本机，0.0.0.0=局域网可访问）" "127.0.0.1" 0 env_validate_bind
-ensure_env DSH_WORKSPACE "工作区目录（宿主，挂到容器 /workspace）" "/dsh/workspace" 0 ""
-ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区路径" "/workspace" 0 ""
+ensure_env DSH_WORKSPACE "工作区目录（宿主，挂到容器）" "/dsh/workspace" 0 ""
+ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区路径" "/workspace" 0 env_validate_abspath
 ensure_env DSH_HOME_HOST "dsh 数据目录（宿主，bind 挂到容器）" "/dsh" 0 ""
-ensure_env DSH_HOME "容器内 dsh 数据目录" "/dsh" 0 ""
+ensure_env DSH_HOME "容器内 dsh 数据目录" "/dsh" 0 env_validate_abspath
 
 # 数据目录换了、工作区还留在旧默认时，让工作区跟着走（与 dshm service up 同一实现）
-sync_workspace_default
+normalize_defaults
 
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────
 hdr "获取镜像"

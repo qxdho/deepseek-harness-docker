@@ -58,10 +58,13 @@ cd deepseek-harness-docker
 ./install.sh
 ```
 
-The installer checks `.env` item by item: values that are already set are kept, empty ones are
-prompted for. These include the login password, username, port, bind address, data directory, and
-workspace. The password must be at least 14 characters and contain uppercase, lowercase, digits, and
-symbols.
+The installer checks `.env` item by item: values that are already valid are kept; items that are
+unset but have a default (username, port, bind address, data directory, workspace, in-container
+paths) **use that default without prompting**. Only required items without a default (the login
+password) are asked for. Invalid legacy values are replaced by the default with a notice — for
+example `DSH_HOME=/home/node/.dsh` becomes `/dsh`, and an empty workspace mount point becomes
+`/workspace`. The password must be at least 14 characters and contain uppercase, lowercase, digits,
+and symbols.
 
 Then open `http://<host>:3080/` and sign in as `admin` with that password.
 

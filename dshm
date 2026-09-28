@@ -212,7 +212,7 @@ wait_healthy() {
 # up 和 restart 都要走这一步 —— 否则改了 DSH_WORKSPACE 之后直接重建容器，
 # dockerd 会把源目录建 root 属主，容器里写不进去，只能靠降级悄悄跑。
 prepare_workspace() {
-	sync_workspace_default
+	normalize_defaults
 	# 旧版数据在命名卷里：目标目录还是空的就先自动搬过来，否则新版起来会
 	# 「看起来像全新安装」。只在这一次会真正动手，之后目标非空即跳过。
 	auto_migrate_legacy_home

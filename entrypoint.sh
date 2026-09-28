@@ -92,10 +92,10 @@ if [ "$workspace_ok" != "1" ]; then
   log "        /workspace 是 bind mount，属主由宿主机决定，镜像里的 chown 会被遮蔽。"
   log "        在宿主机上二选一："
   log "          A. sudo chown -R 1000:1000 <宿主机上 DSH_WORKSPACE 指向的目录>"
-  log "          B. 换成一个你自己拥有的目录："
-  log "             mkdir -p \"\$HOME/dsh-workspace\""
-  log "             echo \"DSH_WORKSPACE=\$HOME/dsh-workspace\" >> .env"
-  log "             docker compose down && docker compose up -d   # 必须 down+up，restart 不生效"
+  log "          B. 在 .env 里把 DSH_WORKSPACE 改成一个绝对路径（Compose 不展开 ~ 和 \$HOME）："
+  log "             root 部署：DSH_WORKSPACE=/dsh/workspace"
+  log "             普通用户：DSH_WORKSPACE=/home/你的用户名/dsh-workspace"
+  log "             改完执行 docker compose down && docker compose up -d   # 必须 down+up，restart 不生效"
   if [ "$WORKSPACE_STRICT" = "1" ]; then
     exit 1
   fi

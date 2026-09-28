@@ -227,7 +227,13 @@ check_host_dir() {
 	fi
 
 	# 方案 B 提示里给出展开后的绝对路径（compose 不会展开 $HOME，写 $HOME 会出错）。
-	home_root="${HOME%/}/dsh"
+	# root 部署时不要把家目录当推荐位置：/root 是 0700、和系统目录混在一起，
+	# 而且默认的 /dsh 本来就不需要 sudo。
+	if [ "$(id -u)" = "0" ]; then
+		home_root="/dsh"
+	else
+		home_root="${HOME%/}/dsh"
+	fi
 
 	cat >&2 <<EOF
 
@@ -244,7 +250,7 @@ check_host_dir() {
     A. 把属主改为容器内的 uid ${cu}：
          ${fixcmd}
 
-    B. 换成一个你自己拥有的目录（不需要 sudo）：
+    B. 换成默认位置（${home_root}，当前用户可写）：
          mkdir -p "${home_root}"
          然后把 .env 改成（必须写绝对路径，Compose 不展开 ~ 这类 shell 写法）：
            DSH_HOME_HOST=${home_root}

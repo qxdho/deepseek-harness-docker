@@ -27,6 +27,7 @@ const indexHTML = `<!doctype html>
   button.primary { background:#2b6cb0; border-color:#2b6cb0; }
   button.danger { background:#7f1d1d; border-color:#7f1d1d; }
   button:disabled { opacity:.5; cursor:not-allowed; }
+  .cmdbtn { font-size:12px; padding:4px 10px; }
   input { font:inherit; padding:9px 12px; border-radius:8px; border:1px solid #3a3a41;
           background:#101012; color:#e8e8ea; width:100%; }
   pre { background:#101012; border:1px solid #2c2c31; border-radius:8px; padding:12px;
@@ -85,6 +86,19 @@ const indexHTML = `<!doctype html>
       </div>
       <pre id="logs">（点「刷新」加载）</pre>
     </div>
+
+    <div class="card">
+      <div class="row" style="align-items:center">
+        <strong>命令台</strong>
+        <span class="muted" style="font-size:12px">等于在服务器上运行 dshm（白名单，非自由 shell）</span>
+      </div>
+      <div id="cmdButtons" class="row" style="margin:10px 0"></div>
+      <div class="row">
+        <input id="cmdLine" placeholder="例如：service status / auth user list / service update 0.1.8" style="flex:1;min-width:220px">
+        <button class="primary" id="btnRun">运行</button>
+      </div>
+      <pre id="cmdOut" style="margin-top:12px">（输出会显示在这里）</pre>
+    </div>
   </div>
 </div>
 
@@ -125,6 +139,7 @@ const indexHTML = `<!doctype html>
   function refreshStatus() {
     api('/api/status').then(function (s) {
       show(true);
+      if (!commandsLoaded) { loadCommands(); }
       $('cname').textContent = s.name;
       $('status').textContent = s.status;
       $('status').className = 'v ' + (s.running ? 'ok' : 'bad');
@@ -166,6 +181,35 @@ const indexHTML = `<!doctype html>
     }).catch(function (e) { $('logs').textContent = '读取日志失败：' + e.message; });
   }
 
+  var commandsLoaded = false;
+  function loadCommands() {
+    api('/api/commands').then(function (d) {
+      commandsLoaded = true;
+      if (!d.allowExec) { $('cmdOut').textContent = '命令台未开启（重新运行 dshm admin install 可开启）。'; return; }
+      var html = '';
+      (d.commands || []).forEach(function (c) {
+        var line = 'dshm ' + c.path.join(' ');
+        html += '<button class="cmdbtn" data-line="' + line + '" title="' + c.desc + '">' + c.path.join(' ') + '</button>';
+      });
+      $('cmdButtons').innerHTML = html;
+      Array.prototype.forEach.call(document.querySelectorAll('.cmdbtn'), function (b) {
+        b.addEventListener('click', function () { $('cmdLine').value = b.getAttribute('data-line'); runCmd(); });
+      });
+    }).catch(function (e) { $('cmdOut').textContent = e.message; });
+  }
+  function runCmd() {
+    var line = $('cmdLine').value;
+    if (!line) { return; }
+    $('cmdOut').textContent = '运行中…';
+    $('btnRun').disabled = true;
+    api('/api/exec', { post: true, body: { line: line } }).then(function (r) {
+      $('cmdOut').textContent = (r.exit === 0 ? '' : '[exit ' + r.exit + ']\n') + (r.output || '（无输出）');
+      $('cmdOut').scrollTop = $('cmdOut').scrollHeight;
+    }).catch(function (e) {
+      $('cmdOut').textContent = '失败：' + e.message;
+    }).then(function () { $('btnRun').disabled = false; });
+  }
+
   function login() {
     err('');
     api('/api/login', { post: true, body: { password: $('pw').value } }).then(function () {
@@ -183,6 +227,8 @@ const indexHTML = `<!doctype html>
   });
   $('btnStart').addEventListener('click', function () { act('/api/start', '启动'); });
   $('btnLogs').addEventListener('click', refreshLogs);
+  $('btnRun').addEventListener('click', runCmd);
+  $('cmdLine').addEventListener('keydown', function (e) { if (e.key === 'Enter') { runCmd(); } });
   $('btnDisk').addEventListener('click', refreshDisk);
   $('btnPrune').addEventListener('click', function () {
     if (!confirm('清理 dangling 镜像与构建缓存？不会动数据卷。')) { return; }

@@ -124,9 +124,11 @@ admin_ask_password() {
 	[ "${#SECRET}" -ge 12 ] || die "面板密码至少 12 位"
 }
 
-# admin_write_config 路径 listen socket container
+# admin_write_config 路径 listen socket container [project_dir] [compose_project]
 admin_write_config() {
-	local path="$1" listen="$2" socket="$3" container="$4" hash secret tmp
+	local path="$1" listen="$2" socket="$3" container="$4"
+	local project_dir="${5:-$PROJECT_DIR}" compose_project="${6:-}"
+	local hash secret tmp
 	hash="$(printf '%s' "$SECRET" | admin_hash_password)" || die "计算口令哈希失败"
 	secret="$(admin_gen_secret)" || die "生成会话密钥失败"
 	[ -n "$hash" ] && [ -n "$secret" ] || die "生成配置失败（面板二进制/镜像不可用）"
@@ -139,11 +141,21 @@ admin_write_config() {
   "socket": "${socket}",
   "password_hash": "${hash}",
   "session_secret": "${secret}",
-  "audit_log": ""
+  "audit_log": "",
+  "project_dir": "${project_dir}",
+  "compose_project": "${compose_project}",
+  "allow_exec": true
 }
 EOF
 	mv "$tmp" "$path"
 	chmod 600 "$path"
+}
+
+# 当前 compose 项目名。容器版命令台必须显式带上它：面板把项目目录挂到
+# /project，compose 会按挂载目录的 basename 推断成 "project"，从而管到别的栈上。
+admin_detect_compose_project() {
+	command -v docker >/dev/null 2>&1 || return 0
+	docker inspect "$CONTAINER" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true
 }
 
 # ── host 形态 ───────────────────────────────────────────────────────────────
@@ -191,7 +203,7 @@ admin_host_install() {
 	ok "已安装：$bin"
 
 	hdr "写入面板配置"
-	admin_write_config "$cfg" "${bind}:${port}" /var/run/docker.sock "$CONTAINER"
+	admin_write_config "$cfg" "${bind}:${port}" /var/run/docker.sock "$CONTAINER" "$PROJECT_DIR" "$(admin_detect_compose_project)"
 	ok "配置：$cfg（权限 600）"
 
 	hdr "启动面板"
@@ -298,7 +310,7 @@ admin_container_install() {
 
 	hdr "写入面板配置"
 	# 容器内监听 0.0.0.0，宿主侧由 ports 绑定控制
-	admin_write_config "$PROJECT_DIR/$ADMIN_CONFIG_REL" "0.0.0.0:3090" /var/run/docker.sock "$CONTAINER"
+	admin_write_config "$PROJECT_DIR/$ADMIN_CONFIG_REL" "0.0.0.0:3090" /var/run/docker.sock "$CONTAINER" /project "$(admin_detect_compose_project)"
 	ok "配置：$ADMIN_CONFIG_REL（权限 600）"
 
 	hdr "启用 compose profile"
@@ -369,13 +381,13 @@ admin_password() {
 	if [ -f "$PROJECT_DIR/$ADMIN_CONFIG_REL" ]; then
 		ADMIN_RUN_MODE=docker
 		ADMIN_IMAGE="$(admin_container_image)"
-		admin_write_config "$PROJECT_DIR/$ADMIN_CONFIG_REL" "0.0.0.0:3090" /var/run/docker.sock "$CONTAINER"
+		admin_write_config "$PROJECT_DIR/$ADMIN_CONFIG_REL" "0.0.0.0:3090" /var/run/docker.sock "$CONTAINER" /project "$(admin_detect_compose_project)"
 		docker compose up -d --force-recreate "$ADMIN_SERVICE"
 		ok "面板密码已更新，容器已重建"
 	else
 		admin_write_config "$(admin_host_confdir)/config.json" \
 			"$(env_value DSH_ADMIN_BIND 127.0.0.1):$(env_value DSH_ADMIN_PORT 3090)" \
-			/var/run/docker.sock "$CONTAINER"
+			/var/run/docker.sock "$CONTAINER" "$PROJECT_DIR" "$(admin_detect_compose_project)"
 		if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
 			systemctl restart dsh-admin 2>/dev/null || sudo systemctl restart dsh-admin 2>/dev/null || true
 		fi

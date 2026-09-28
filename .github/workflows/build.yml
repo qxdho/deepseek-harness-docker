@@ -115,6 +115,10 @@ jobs:
           chmod +x admin/test-admin.sh
           ./admin/test-admin.sh
 
+      - name: 管理面板单元测试
+        working-directory: admin
+        run: go test ./...
+
       - name: 代理注入单元测试
         run: |
           cd proxy

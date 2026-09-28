@@ -68,10 +68,18 @@ services:
     restart: unless-stopped
     ports:
       - "${DSH_ADMIN_BIND:-127.0.0.1}:${DSH_ADMIN_PORT:-3090}:3090"
+    environment:
+      # docker compose CLI 需要可写的 HOME；根文件系统只读，指向 /tmp（tmpfs）
+      HOME: /tmp
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # 面板配置（口令哈希 + 会话密钥），由 ./dshm admin 生成，权限 600
       - ./admin/config.json:/config/config.json:ro
+      # 命令台要调用 ./dshm（内部用 docker compose，并会写 .env），因此把项目目录
+      # 挂进来。只给面板容器；dsh 容器依旧没有任何 socket / 项目目录。
+      - ${DSH_ADMIN_PROJECT_DIR:-.}:/project
+    tmpfs:
+      - /tmp
     read_only: true
     security_opt:
       - no-new-privileges:true

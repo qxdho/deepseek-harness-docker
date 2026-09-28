@@ -121,6 +121,37 @@ cd deepseek-harness-docker
 
 宿主二进制从 GitHub Releases 下载，也可本机 `go build`（`admin/` 目录，仅标准库、零运行时依赖）。
 
+### 面板里能做什么
+
+- 状态卡（状态/健康/镜像版本/重启次数/端口）、启动/停止/重启、日志、磁盘占用、一键清理缓存。
+- **命令台**：在页面里直接跑 `dshm` 命令（`service status`、`auth user list`、`service update 0.1.8`…），
+  等价于在服务器上执行。
+
+### 命令台是怎么保证安全的
+
+它不是自由 shell：
+
+- 输入先被拆成**参数数组**，再用 `exec` 直接调用项目里的 `dshm`，**不经过 `sh -c`**，
+  所以 `;`、`|`、`` ` ``、`$( )` 都只是普通字符，不构成命令拼接；
+- 命令路径必须命中白名单（`service/auth/self/admin` 下的安全子命令）；
+- 需要交互输入的命令（`service shell`、`auth password`、`auth user add`…）会被明确拒绝，
+  不会让你干等；
+- 仍然要求登录 + `X-DSH-Admin` 头。
+
+> ⚠️ 但要想清楚：面板本来就持有 `docker.sock`（等于宿主 root），命令台只是把"顺手提权"的
+> 门槛又降低了一点。请务必只监听 `127.0.0.1`、用强密码；不需要命令台就在
+> `admin/config.json` 里把 `allow_exec` 改成 `false` 并重启面板。
+
+### 数据 / 挂载
+
+| 容器路径 | 类型 | 宿主机位置 |
+|---|---|---|
+| dsh `/home/node/.dsh` | 命名卷 `dsh-home` | `/var/lib/docker/volumes/<项目名>_dsh-home/_data` |
+| dsh `/workspace` | bind | `<项目目录>/workspace`（可用 `DSH_WORKSPACE` 改） |
+| 面板 `/var/run/docker.sock` | bind | 宿主同路径 |
+| 面板 `/config/config.json` | bind(只读) | `<项目目录>/admin/config.json` |
+| 面板 `/project` | bind | `<项目目录>`（命令台要用 `dshm`；仅面板容器可见） |
+
 ## 界面重启
 
 页面右下角有一个悬浮的「重启 DSH」按钮：**装/更新插件后点一下即可**，不用回命令行。

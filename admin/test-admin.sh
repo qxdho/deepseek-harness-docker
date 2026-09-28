@@ -36,9 +36,20 @@ command -v curl >/dev/null 2>&1 || { echo "需要 curl"; exit 1; }
 port=$(((RANDOM % 10000) + 20000))
 hash="$(printf 'TestPassw0rd!x' | "$BIN" -hash)"
 secret="$("$BIN" -gen-secret)"
+
+# 命令台：用一个假的 dshm 验证「拆参数 → 直接 exec」，不碰真实 docker
+proj="$tmp/proj"
+mkdir -p "$proj"
+cat >"$proj/dshm" <<'STUB'
+#!/usr/bin/env bash
+echo "ARGS:$*"
+STUB
+chmod +x "$proj/dshm"
+
 cat >"$tmp/config.json" <<EOF
 {"listen":"127.0.0.1:${port}","container":"qxdho-dsh","socket":"/nonexistent/docker.sock",
- "password_hash":"${hash}","session_secret":"${secret}","audit_log":""}
+ "password_hash":"${hash}","session_secret":"${secret}","audit_log":"",
+ "project_dir":"${proj}","compose_project":"demo","allow_exec":true}
 EOF
 
 "$BIN" -config "$tmp/config.json" >"$tmp/log" 2>&1 &
@@ -67,6 +78,34 @@ curl -s "$base/" | grep -q 'DSH 管理面板' && pass "首页含面板标题" ||
 c="$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' "$base/api/restart")"
 [ "$c" = "502" ] && pass "鉴权通过、无 docker socket → 502（说明确实走到 Docker 调用）" \
 	|| fail "预期 502，实际 $c"
+
+# ── 命令台 ──────────────────────────────────────────────────────────────────
+[ "$(code -b "$tmp/jar" "$base/api/commands")" = "200" ] \
+	&& pass "/api/commands 200" || fail "/api/commands 异常"
+
+exec_line() {
+	curl -s -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \
+		-d "{\"line\":\"$1\"}" "$base/api/exec"
+}
+out="$(exec_line 'service status')"
+case "$out" in
+*"ARGS:service status"*) pass "命令台按白名单执行 dshm（参数原样传递）" ;;
+*) fail "命令台输出异常：$out" ;;
+esac
+out="$(exec_line 'dshm service update 0.1.8')"
+case "$out" in
+*"ARGS:service update 0.1.8"*) pass "带 dshm 前缀与参数也能执行" ;;
+*) fail "带前缀执行异常：$out" ;;
+esac
+[ "$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \
+	-d '{"line":"rm -rf /"}' "$base/api/exec")" = "400" ] \
+	&& pass "非白名单命令被拒（400）" || fail "非白名单命令未被拒"
+[ "$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \
+	-d '{"line":"service status; id"}' "$base/api/exec")" = "400" ] \
+	&& pass "分号不会变成命令分隔符（400）" || fail "注入未被拒"
+[ "$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \
+	-d '{"line":"auth password"}' "$base/api/exec")" = "400" ] \
+	&& pass "交互命令被拒（400）" || fail "交互命令未被拒"
 
 # 会话是无状态 HMAC：登出靠清除客户端 cookie
 logout_hdr="$(curl -s -D - -o /dev/null -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' "$base/api/logout")"

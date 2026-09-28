@@ -13,12 +13,14 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -26,6 +28,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +50,11 @@ type Config struct {
 	PasswordHash  string `json:"password_hash"`
 	SessionSecret string `json:"session_secret"`
 	AuditLog      string `json:"audit_log"`
+	// 命令台用：dshm 所在的项目目录，以及 compose 项目名（容器模式下必须显式
+	// 指定，否则 compose 会用挂载目录的 basename 当成新项目名，管到别的栈上）。
+	ProjectDir     string `json:"project_dir"`
+	ComposeProject string `json:"compose_project"`
+	AllowExec      bool   `json:"allow_exec"`
 }
 
 func defaultConfig() Config {
@@ -264,6 +273,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDisk(w, r)
 	case "/api/prune":
 		s.handlePrune(w, r)
+	case "/api/commands":
+		s.handleCommands(w, r)
+	case "/api/exec":
+		s.handleExec(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "未知接口")
 	}
@@ -367,6 +380,85 @@ func (s *server) handlePrune(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit("清理完成，回收 %d 字节 ip=%s", n, s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reclaimed": n})
+}
+
+// ── 命令台 ──────────────────────────────────────────────────────────────────
+// 不是自由 shell：拆成参数数组后直接 exec 项目里的 dshm（不经过 sh -c），
+// 命令路径必须命中白名单。详见 commands.go。
+
+func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"allowExec": s.cfg.AllowExec,
+		"commands":  commandCatalog,
+	})
+}
+
+func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "只支持 POST")
+		return
+	}
+	if !s.cfg.AllowExec {
+		writeErr(w, http.StatusForbidden, "面板未开启命令台（重新运行 dshm admin install 可开启）")
+		return
+	}
+	if s.cfg.ProjectDir == "" {
+		writeErr(w, http.StatusBadRequest, "面板未配置项目目录 project_dir")
+		return
+	}
+	dshm := filepath.Join(s.cfg.ProjectDir, "dshm")
+	if st, err := os.Stat(dshm); err != nil || st.IsDir() {
+		writeErr(w, http.StatusBadRequest, "项目目录里找不到 dshm："+dshm)
+		return
+	}
+
+	var body struct {
+		Line string `json:"line"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是 JSON")
+		return
+	}
+	tokens, err := tokenize(strings.TrimSpace(body.Line))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	argv, err := validateCommand(tokens)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, dshm, argv...)
+	cmd.Dir = s.cfg.ProjectDir
+	env := os.Environ()
+	if s.cfg.ComposeProject != "" {
+		env = append(env, "COMPOSE_PROJECT_NAME="+s.cfg.ComposeProject)
+	}
+	cmd.Env = env
+	out, runErr := cmd.CombinedOutput()
+	if len(out) > 256*1024 {
+		out = append([]byte("…（输出过长，仅保留末尾）\n"), out[len(out)-256*1024:]...)
+	}
+	exit := 0
+	if runErr != nil {
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
+			exit = ee.ExitCode()
+		} else {
+			exit = -1
+			out = append(out, []byte("\n"+runErr.Error())...)
+		}
+	}
+	s.audit("exec %q exit=%d ip=%s", strings.Join(argv, " "), exit, s.clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exit":   exit,
+		"output": string(out),
+		"argv":   argv,
+	})
 }
 
 // ── 入口 ────────────────────────────────────────────────────────────────────

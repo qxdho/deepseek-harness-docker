@@ -25,17 +25,6 @@ const bad = (m) => { console.log(`  \x1b[31mFAIL\x1b[0m ${m}`); FAIL += 1; };
 
 // 假上游：按路径返回不同的 HTML
 const upstream = http.createServer((req, res) => {
-  if (req.url.split('?')[0] === '/') {
-    // 供代理的重启鉴权探针使用：带 dsh_auth=ok 的 Cookie 才算已登录。
-    if (/dsh_auth=ok/.test(req.headers.cookie || '')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end('<!doctype html><html><head><title>app</title></head><body>app</body></html>');
-    } else {
-      res.writeHead(302, { location: '/auth/login' });
-      res.end();
-    }
-    return;
-  }
   const body = {
     '/normal': '<!doctype html><html><head><title>t</title></head><body>hi</body></html>',
     '/header-first': '<!doctype html><html><header><h1>t</h1></header><body>hi</body></html>',
@@ -73,21 +62,6 @@ function get(port, p, extraHeaders) {
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
     });
     req.on('error', reject);
-  });
-}
-
-function post(port, p, extraHeaders) {
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      { host: '127.0.0.1', port, path: p, method: 'POST', headers: extraHeaders || {} },
-      (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
-      },
-    );
-    req.on('error', reject);
-    req.end();
   });
 }
 
@@ -211,37 +185,12 @@ const INJECT_ID = 'dsh-forward-inject';
     bad(`未伪造时 XFF 不正常：${plainXff}`);
   }
 
-  // 9. 页面里要有「重启 DSH」入口
-  if (normal.body.includes('/__dsh_restart') && normal.body.includes('dsh-restart-button')) {
-    ok('页面注入了「重启 DSH」按钮');
+  // 9. 注入里不应再有「重启 DSH」按钮 / 重启接口（已移除，重启改走管理面板命令台）
+  if (!normal.body.includes('/__dsh_restart') && !normal.body.includes('dsh-restart-button')) {
+    ok('不再注入重启按钮与重启接口');
   } else {
-    bad('页面没有重启入口');
+    bad('页面里仍有重启入口');
   }
-
-  // 10. 重启接口三重校验：方法、CSRF 自定义头、登录态
-  const wrongMethod = await get(PROXY_PORT, '/__dsh_restart');
-  if (wrongMethod.status === 405) ok('GET 重启接口 → 405');
-  else bad(`GET 重启接口应 405，实际 ${wrongMethod.status}`);
-
-  const noHeader = await post(PROXY_PORT, '/__dsh_restart');
-  if (noHeader.status === 400) ok('缺少 X-DSH-Restart 头 → 400（CSRF 防线）');
-  else bad(`缺少自定义头应 400，实际 ${noHeader.status}`);
-
-  const unauth = await post(PROXY_PORT, '/__dsh_restart', { 'x-dsh-restart': '1' });
-  if (unauth.status === 401) ok('未登录 → 401，不能重启');
-  else bad(`未登录应 401，实际 ${unauth.status}`);
-
-  // 11. 已登录：202 接受，随后代理退出（容器由 restart: unless-stopped 拉起）
-  const exited = new Promise((resolve) => proxy.once('exit', (code) => resolve(code)));
-  const authd = await post(PROXY_PORT, '/__dsh_restart', { 'x-dsh-restart': '1', cookie: 'dsh_auth=ok' });
-  if (authd.status === 202) ok('已登录 → 202 接受重启');
-  else bad(`已登录应 202，实际 ${authd.status}`);
-  const exitCode = await Promise.race([
-    exited,
-    new Promise((resolve) => setTimeout(() => resolve('timeout'), 5000)),
-  ]);
-  if (exitCode === 0) ok('代理已退出，容器将由 restart 策略重新拉起');
-  else bad(`代理未在预期时间内退出：${exitCode}`);
 
   proxy.kill('SIGTERM');
   upstream.close();

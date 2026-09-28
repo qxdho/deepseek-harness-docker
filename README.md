@@ -161,19 +161,8 @@ cd deepseek-harness-docker
 | dsh 数据目录（`DSH_HOME`，默认 `/dsh`） | bind | `DSH_HOME_HOST`（默认 `/dsh`） |
 | dsh 工作区（`DSH_WORKSPACE_CONTAINER`，默认 `/workspace`） | bind | `DSH_WORKSPACE`（默认 `DSH_HOME_HOST/workspace`） |
 
-面板跑在宿主机上，不占容器的挂载；它的配置在 `/etc/dsh-admin/config.json`
-（无 root 时 `~/.config/dsh-admin/config.json`），其中 `allow_exec` 控制命令台开关。
-
-## 界面重启
-
-页面右下角有一个悬浮的「重启 DSH」按钮：**装/更新插件后点一下即可**，不用回命令行。
-
-- 等价于 `./dshm service up`：容器会重建，约十几秒，页面自动刷新回来。
-- 鉴权复用登录插件：代理拿浏览器的 Cookie 去问 dsh 的 `/`，只有已登录（200）才允许；
-  未登录 401。接口还要求自定义头 `X-DSH-Restart: 1`，跨站请求带不了它（防 CSRF）。
-- 依赖 compose 里的 `restart: unless-stopped`（本仓库默认）。若改成 `restart: "no"`，
-  点按钮会变成"停止"而不是重启。
-- 不想要这个按钮：删掉 `proxy/index.js` 中 `dsh-restart-button` 那段注入再重建镜像。
+面板跑在宿主机上，不占容器的挂载；它的安装目录见上面的「管理面板」
+（默认 `/dsh-manager`，`DSH_ADMIN_DIR` 可改），其中 `config.json` 里的 `allow_exec` 控制命令台开关。
 
 ## HTTPS
 

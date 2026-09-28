@@ -20,24 +20,23 @@ FAIL=0
 ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
 
-cleanup() {
-	docker rm -f "$NAME" >/dev/null 2>&1 || true
-	docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-}
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # 容器内的数据根。必须与 docker-compose.yml 一致：compose 把宿主目录挂到
 # ${DSH_HOME_CONTAINER:-/dsh}，并注入同名的 DSH_HOME / HOME。裸 docker run 时
-# 镜像的 ENV 是 /home/node/.dsh，与之不符 —— 所以这里显式模拟 compose：挂一个
-# 卷到 /dsh，并把 DSH_HOME / HOME 都指过去。否则测的就不是生产形态。
+# 镜像的 ENV 是 /home/node/.dsh，与之不符 —— 所以这里显式模拟 compose。
+#
+# 用 --tmpfs 而不是命名卷：Docker 创建的命名卷属主是 root，容器里的 node(1000)
+# 写不进去，entrypoint 会因「数据目录不可写」直接退出，测的就不是插件逻辑了。
+# compose 场景下宿主目录是用户自己的，不存在这个问题。
 CONTAINER_HOME="${CONTAINER_HOME:-/dsh}"
 PROFILE="$CONTAINER_HOME/profiles/web"
-VOLUME="dsh-plugin-smoke-$$"
 
 start_container() {
 	cleanup
 	docker run -d --name "$NAME" \
-		-v "$VOLUME:$CONTAINER_HOME" \
+		--tmpfs "$CONTAINER_HOME:rw,mode=1777" \
 		-e DSH_HOME="$CONTAINER_HOME" \
 		-e HOME="$CONTAINER_HOME" \
 		-e DSH_AUTH_USER=admin \
@@ -67,13 +66,19 @@ if start_container; then
 	ok "容器已就绪"
 else
 	bad "容器未在预期时间内健康"
+	docker logs --tail 20 "$NAME" 2>&1 | sed 's/^/      /'
 fi
 
-if docker exec "$NAME" sh -c "mkdir -p '$PROFILE/node_modules' && printf '\"storeDir\": \"/root/.local/share/pnpm/store/v11\"\n' > '$PROFILE/node_modules/.modules.yaml'"; then
+# 用 docker cp 注入（以守护进程身份写，不依赖容器内用户的权限），
+# 内容模仿旧镜像烤进去的那份记录。
+tmpyaml="$(mktemp)"
+printf '  "storeDir": "/root/.local/share/pnpm/store/v11",\n' >"$tmpyaml"
+if docker cp "$tmpyaml" "$NAME:$PROFILE/node_modules/.modules.yaml" >/dev/null 2>&1; then
 	ok "已注入模拟的旧记账"
 else
 	bad "无法注入模拟的旧记账"
 fi
+rm -f "$tmpyaml"
 
 # 重启让 entrypoint 再跑一遍清理
 docker restart "$NAME" >/dev/null
@@ -82,6 +87,14 @@ for i in $(seq 1 72); do
 	[ "$st" = "healthy" ] && break
 	sleep 5
 done
+
+# 容器没起来时后面的 exec 只会刷一串 "is not running"，没有信息量
+if [ "$(docker inspect --format '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" != "true" ]; then
+	bad "容器重启后未能运行，跳过后续断言"
+	echo
+	echo "PASS=$PASS FAIL=$FAIL"
+	exit 1
+fi
 
 if docker exec "$NAME" test -f "$PROFILE/node_modules/.modules.yaml"; then
 	bad "旧记账未被清除，装插件仍会失配"

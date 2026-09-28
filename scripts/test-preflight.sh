@@ -31,6 +31,11 @@ have_sudo() { command -v sudo >/dev/null 2>&1; }
 #
 # 注意 DSH_UID 的取值优先来自 .env（与 DSH_WORKSPACE 一致），所以这里写进 .env
 # 而不是 export。不再 export DSH_UID，以便第 6c 节能验证「shell 环境不会意外生效」。
+#
+# 凡「预期通过」的用例，.env 里必须带上 DSH_UID/DSH_GID=当前 uid：容器 uid 的默认值
+# 是 1000，而 GitHub runner 的 uid 是 1001。少了这两行，本地（uid 1000）会通过，
+# CI 上却会因为「1000 写不进 1001 的目录」而必然失败 —— 2026-09-28 连续 9 次 CI
+# 爆红就是这个原因（见第 6d 节）。
 write_env() {
 	local project="$1" ws="$2" uid="$3" gid="$4"
 	mkdir -p "${project}/dsh-home"
@@ -306,13 +311,33 @@ fi
 echo "== 6d. 数据目录（DSH_HOME_HOST）检查 =="
 project="$sandbox/homecheck"
 mkdir -p "$project/data" "$project/ws"
-printf 'DSH_HOME_HOST=%s/data\nDSH_WORKSPACE=%s/ws\n' "$project" "$project" >"$project/.env"
+# 这里必须显式写上 DSH_UID/DSH_GID：容器 uid 默认 1000，而 runner 的 uid 是 1001，
+# 走权限位推断时会得出「不可写」，导致「可写的数据目录应通过」在 CI 上假失败。
+homecheck_env=(DSH_HOME_HOST="$project/data" DSH_WORKSPACE="$project/ws" DSH_UID="$TEST_UID" DSH_GID="$TEST_GID")
+printf '%s\n' "${homecheck_env[@]}" >"$project/.env"
 if check_dsh_home_dir "$project" auto 0 >/dev/null 2>&1; then
 	ok "可写的数据目录通过"
 else
 	bad "可写的数据目录应通过"
 fi
+
+# 不写 DSH_UID 时容器 uid 取默认 1000：只有部署者本人就是 1000 时才可能「可写」，
+# 否则必须被拦下。这条断言把上面那个 CI 陷阱显式化 —— 它依赖当前 uid，两条分支都
+# 必须成立，不会再出现「本地过、CI 挂」。
 printf 'DSH_HOME_HOST=%s/data\nDSH_WORKSPACE=%s/ws\n' "$project" "$project" >"$project/.env"
+set +e
+out_default="$(check_dsh_home_dir "$project" never 0 2>&1)"
+rc_default=$?
+set -e
+if [ "$TEST_UID" = "1000" ]; then
+	[ "$rc_default" -eq 0 ] && ok "默认 DSH_UID=1000 且部署者就是 1000 → 通过" \
+		|| bad "应通过，实际 rc=$rc_default"
+else
+	[ "$rc_default" -ne 0 ] && ok "默认 DSH_UID=1000 ≠ 部署者($TEST_UID) → 被拦下（无假通过）" \
+		|| bad "容器 uid 与部署者不一致却判为可写：$out_default"
+fi
+
+printf '%s\n' "${homecheck_env[@]}" >"$project/.env"
 chmod 000 "$project/data"
 set +e
 out="$(check_dsh_home_dir "$project" never 0 2>&1)"

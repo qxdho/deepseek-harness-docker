@@ -74,7 +74,8 @@ cd deepseek-harness-docker
 ./dshm service status      # 健康状态 / 端口 / 登录用户
 ./dshm service logs        # 查看日志
 ./dshm service shell       # 进入容器
-./dshm service update      # 升级 dsh
+./dshm service update      # 升级：默认拉取 GHCR 上的新镜像
+./dshm service update --build   # 强制本地重建镜像（改了仓库代码时）
 ./dshm service disk        # 磁盘占用
 
 # 登录与账号
@@ -88,6 +89,16 @@ cd deepseek-harness-docker
 ```
 
 原有的扁平写法（`./dshm up`、`./dshm pw`、`./dshm user add ...`）仍然可用，但不再写入文档。
+
+### 升级行为
+
+`./dshm service update` 默认**拉取镜像，不在本地重新构建**。镜像由 CI 构建并推送至 GHCR，
+本地重建既慢又不会带来新版本。仅在拉取失败，或需要验证仓库内未发布的改动时，使用
+`./dshm service update --build` 强制本地构建。两种方式都会在完成后等待容器进入健康状态，
+未健康则打印日志并以非 0 退出。
+
+指定版本时可直接传入版本号（写入 `DSH_IMAGE` 后拉取），例如
+`./dshm service update 0.1.7-rc.2`。
 
 ## 管理面板
 
@@ -130,17 +141,20 @@ cd deepseek-harness-docker
 | `DSH_AUTH_PASSWORD` | 无（必填） | 首次启动建号使用；至少 14 位，含大小写字母、数字与符号。后续修改用 `./dshm auth password` |
 | `PROXY_PORT` | `3080` | 宿主机端口 |
 | `DSH_BIND` | `127.0.0.1` | 改为 `0.0.0.0` 后局域网可直连 |
-| `DSH_HOME_HOST` | `/dsh` | 宿主机数据目录。位于根目录，首次创建需要 sudo；也可设为 `$HOME/dsh` |
-| `DSH_HOME` | `/dsh` | 容器内数据目录。该值即根目录本身，不会追加 `.dsh` |
-| `DSH_WORKSPACE` | `/dsh/workspace` | 宿主机工作区目录，默认跟随数据目录 |
+| `DSH_HOME_HOST` | `/dsh` | 宿主机数据目录。位于根目录，首次创建需要 sudo；也可设为其他目录，如 `/home/user/dsh`。必须为绝对路径 |
+| `DSH_HOME` | `/dsh` | 容器内数据目录，须与 `DSH_HOME_HOST` 的挂载点一致。该值即根目录本身，不会追加 `.dsh` |
+| `DSH_WORKSPACE` | `/dsh/workspace` | 宿主机工作区目录，默认跟随数据目录。必须为绝对路径 |
 | `DSH_WORKSPACE_CONTAINER` | `/workspace` | 容器内工作区路径 |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | 容器运行身份。宿主 uid 非 1000 时改为 `id -u` / `id -g` |
 | `DSH_TOTP` | `optional` | `off`、`optional`、`required` |
 | `DSH_COOKIE_SECURE` | `0` | 使用 HTTPS 时设为 `1`；纯 HTTP 必须为 `0` |
 | `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名 |
-| `DSH_ADMIN_DIR` | `/dsh-manager` | 管理面板安装目录 |
+| `DSH_TRUST_XFF` | `0` | 置 `1` 后代理信任 `X-Forwarded-For`，用于反代后的客户端地址识别。仅在确有反代改写该头时开启 |
+| `DSH_DISK_MIN_MB` | `256` | 启动时要求的最小磁盘余量（MB） |
+| `DSH_ADMIN_DIR` | `/dsh-manager` | 管理面板安装目录。该值由 `dshm` 读取，可使用 `$HOME` 写法 |
 
-构建期变量（修改后需重建镜像）：`DSH_VERSION`、`AUTH_GATE_VERSION`、`DEV_TOOLS`、`DSH_IMAGE`。
+构建期变量（修改后需重建镜像）：`DSH_VERSION`、`AUTH_GATE_VERSION`、`DEV_TOOLS`。
+`DSH_IMAGE` 决定拉取或构建哪个镜像，`./dshm service update` 会按需写入。
 其余配置项的含义见 `.env.example` 注释。
 
 两点需要留意：
@@ -212,10 +226,10 @@ EACCES: permission denied, mkdir '/workspace/xxx'
 sudo chown -R 1000:1000 /dsh && ./dshm service up
 
 # 或改用自己拥有的目录，无需 sudo
-mkdir -p ~/dsh-data
-# 然后修改 .env：
-#   DSH_HOME_HOST=$HOME/dsh-data
-#   DSH_WORKSPACE=$HOME/dsh-data/workspace
+mkdir -p /home/user/dsh-data
+# 然后修改 .env（须写绝对路径：Compose 不展开 ~ 与 $HOME）：
+#   DSH_HOME_HOST=/home/user/dsh-data
+#   DSH_WORKSPACE=/home/user/dsh-data/workspace
 ./dshm service up
 ```
 

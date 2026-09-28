@@ -8,6 +8,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 同一个 ref 上只保留最新一次运行：main 上连续 push 时，旧的那次推镜像已无意义，
+# PR 更是改一次就作废一次。tag 运行不取消（发布必须完整跑完）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -26,8 +32,14 @@ jobs:
       - name: 读取内置版本
         id: ver
         run: |
-          echo "dsh=$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
-          echo "gate=$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
+          gate="$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          # 读不到就会生成空 tag / 空构建参数（装成 latest），必须在这里就失败
+          [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
+          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG AUTH_GATE_VERSION" >&2; exit 1; }
+          echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -70,8 +82,14 @@ jobs:
       - name: 读取内置版本
         id: ver
         run: |
-          echo "dsh=$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
-          echo "gate=$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
+          gate="$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          # 读不到就会生成空 tag / 空构建参数（装成 latest），必须在这里就失败
+          [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
+          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG AUTH_GATE_VERSION" >&2; exit 1; }
+          echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
@@ -97,7 +115,12 @@ jobs:
 
       - name: 管理面板单元测试
         working-directory: admin
-        run: go test ./...
+        run: |
+          set -eux
+          # 先把格式与静态检查卡住，再跑测试：这两步只要几秒，能挡掉低级问题
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
 
       - name: 代理注入单元测试
         run: |
@@ -121,7 +144,7 @@ jobs:
           chmod +x scripts/smoke-test.sh
           ./scripts/smoke-test.sh dsh-test:smoke
 
-  # 打 tag 时发布宿主用的静态二进制，供 `./dshm admin install --host` 下载
+  # 打 tag 时发布宿主用的静态二进制，供 ./dshm admin install（宿主模式）下载
   release-admin:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

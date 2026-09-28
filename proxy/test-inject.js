@@ -12,6 +12,7 @@
 'use strict';
 
 const http = require('node:http');
+const zlib = require('node:zlib');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 
@@ -38,6 +39,26 @@ const upstream = http.createServer((req, res) => {
     // 回显代理实际转发的 X-Forwarded-For，用于验证客户端伪造的头不会抵达上游。
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ xff: req.headers['x-forwarded-for'] ?? null }));
+    return;
+  }
+  if (req.url.startsWith('/gzip')) {
+    // 上游无视 accept-encoding: identity，坚持返回 gzip 的 HTML
+    const html = '<!doctype html><html><head><title>t</title></head><body>gz</body></html>';
+    const buf = zlib.gzipSync(html);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-encoding': 'gzip',
+      'content-length': String(buf.length),
+    });
+    res.end(buf);
+    return;
+  }
+  if (req.url.startsWith('/partial')) {
+    res.writeHead(206, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-range': 'bytes 0-9/100',
+    });
+    res.end('<!doctype html><html><head></head><body>part</body></html>');
     return;
   }
   if (req.url.startsWith('/plain')) {
@@ -191,6 +212,67 @@ const INJECT_ID = 'dsh-forward-inject';
   } else {
     bad('页面里仍有重启入口');
   }
+
+  // 10. 没有 <head> 时，脚本要插在 doctype 之后（插在它前面会把页面推进 quirks 模式）
+  const dtAt = headerFirst.body.toLowerCase().indexOf('<!doctype');
+  if (dtAt >= 0 && headerFirst.body.indexOf(INJECT_ID) > dtAt) {
+    ok('回退注入点在 doctype 之后');
+  } else {
+    bad(`回退注入点位置不对（doctype=${dtAt} inject=${headerFirst.body.indexOf(INJECT_ID)}）`);
+  }
+
+  // 11. 上游无视 identity 返回 gzip：必须先解压再注入，且不能留下 content-encoding
+  const gz = await get(PROXY_PORT, '/gzip');
+  if (gz.body.includes(INJECT_ID) && gz.body.includes('gz')) {
+    ok('gzip HTML 被解压后注入');
+  } else {
+    bad('gzip HTML 处理错误（内容未还原或未注入）');
+  }
+  if (gz.headers['content-encoding'] === undefined) {
+    ok('gzip 响应去掉了 content-encoding');
+  } else {
+    bad(`仍带 content-encoding：${gz.headers['content-encoding']}`);
+  }
+
+  // 12. 206 分片响应必须原样透传（改写正文会让 Content-Range 对不上）
+  const partial = await get(PROXY_PORT, '/partial');
+  if (!partial.body.includes(INJECT_ID) && partial.headers['content-range'] === 'bytes 0-9/100') {
+    ok('206 分片响应原样透传');
+  } else {
+    bad(`206 被改写了（inject=${partial.body.includes(INJECT_ID)} range=${partial.headers['content-range']}）`);
+  }
+
+  // 13. DSH_TRUST_XFF=1：跑在宿主反代后面时，取 XFF 最右一项作为真实客户端
+  const trusted = spawn(process.execPath, [path.join(__dirname, 'index.js')], {
+    env: Object.assign({}, process.env, {
+      DSH_HOST: '127.0.0.1',
+      DSH_PORT: String(UPSTREAM_PORT),
+      PROXY_PORT: String(PROXY_PORT + 1),
+      DSH_TRUST_XFF: '1',
+    }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  for (let i = 0; i < 50; i += 1) {
+    try {
+      await get(PROXY_PORT + 1, '/normal');
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  const trustedRes = await get(PROXY_PORT + 1, '/echo-xff', { 'x-forwarded-for': '9.9.9.9, 203.0.113.7' });
+  let trustedXff = null;
+  try {
+    trustedXff = JSON.parse(trustedRes.body).xff;
+  } catch {
+    trustedXff = null;
+  }
+  if (trustedXff === '203.0.113.7') {
+    ok('DSH_TRUST_XFF=1 时取最右一项作为真实客户端');
+  } else {
+    bad(`受信模式的 XFF 不对：${trustedXff}`);
+  }
+  trusted.kill('SIGTERM');
 
   proxy.kill('SIGTERM');
   upstream.close();

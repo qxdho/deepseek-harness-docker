@@ -72,8 +72,8 @@ curl -s "$base/" | grep -q 'DSH 管理面板' && pass "首页含面板标题" ||
 	-d '{"password":"TestPassw0rd!x"}' "$base/api/login")" = "200" ] \
 	&& pass "正确密码 → 200 并下发会话" || fail "正确密码登录失败"
 
-[ "$(code -b "$tmp/jar" -X POST "$base/api/restart")" = "400" ] \
-	&& pass "已登录但缺 X-DSH-Admin 头 → 400（CSRF 防线）" || fail "CSRF 校验未生效"
+[ "$(code -b "$tmp/jar" -X POST "$base/api/restart")" = "403" ] \
+	&& pass "已登录但缺 X-DSH-Admin 头 → 403（CSRF 防线）" || fail "CSRF 校验未生效"
 
 c="$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' "$base/api/restart")"
 [ "$c" = "502" ] && pass "鉴权通过、无 docker socket → 502（说明确实走到 Docker 调用）" \
@@ -113,6 +113,66 @@ case "$logout_hdr" in
 *"dsh_admin="*"Max-Age=0"* | *"dsh_admin="*"max-age=0"*) pass "登出清除了会话 cookie" ;;
 *) fail "登出未清除 cookie：$logout_hdr" ;;
 esac
+
+# ── config.json 生成：路径里的 " 和 \ 必须转义 ───────────────────────────────
+# admin_write_config 在 scripts/admin.sh 里，由 install.sh/dshm 调用；这里直接
+# source 它，用当前构建出的二进制算哈希，验证生成的 JSON 面板能读进去。
+weird="$tmp/we\"ird\\dir"
+mkdir -p "$weird" "$tmp/adm2"
+cfg2="$tmp/config2.json"
+env2="$tmp/env2"
+cfg2_port=$((port + 1))
+(
+	cd "$HERE/.."
+	export ENV_FILE="$env2"
+	printf 'DSH_ADMIN_DIR=%s\n' "$tmp/adm2" >"$env2"
+	B= DIM= GRN= RED= YEL= RST=
+	hdr() { :; }
+	ok() { :; }
+	warn() { :; }
+	info() { :; }
+	die() {
+		echo "$*" >&2
+		exit 1
+	}
+	# shellcheck source=scripts/env-config.sh
+	. ./scripts/env-config.sh
+	# shellcheck source=scripts/admin.sh
+	. ./scripts/admin.sh
+	ADMIN_BIN_PATH="$BIN"
+	SECRET='TestPassw0rd!x'
+	PROJECT_DIR="$weird"
+	admin_write_config "$cfg2" "127.0.0.1:${cfg2_port}" /nonexistent/docker.sock qxdho-dsh "$weird" demo
+) || fail "admin_write_config 执行失败"
+
+if [ -s "$cfg2" ]; then
+	pass "生成了 config.json"
+else
+	fail "没有生成 config.json"
+fi
+case "$(cat "$cfg2" 2>/dev/null)" in
+*'we\"ird'*) pass "路径里的引号已转义" ;;
+*) fail "引号未转义：$(cat "$cfg2" 2>/dev/null)" ;;
+esac
+
+# 转义正确的最终证据：面板能把它解析起来并正常响应（解析失败会直接退出）
+"$BIN" -config "$cfg2" >"$tmp/cfg2.log" 2>&1 &
+cfg2_pid=$!
+cfg2_up=0
+for _ in $(seq 1 50); do
+	curl -fsS -o /dev/null "http://127.0.0.1:${cfg2_port}/" 2>/dev/null && {
+		cfg2_up=1
+		break
+	}
+	sleep 0.1
+done
+kill "$cfg2_pid" 2>/dev/null || true
+wait "$cfg2_pid" 2>/dev/null || true
+if [ "$cfg2_up" = "1" ]; then
+	pass "含引号/反斜杠路径的 config.json 可被面板解析并服务"
+else
+	fail "面板未能用生成的 config.json 起来：$(cat "$tmp/cfg2.log")"
+fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

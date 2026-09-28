@@ -7,9 +7,10 @@
 //   - 默认只监听 127.0.0.1。
 //
 // 用法：
-//   dsh-admin -config /etc/dsh-admin/config.json      # 启动面板
-//   dsh-admin -hash                                    # 从 stdin 读密码，输出哈希（给 dshm 用）
-//   dsh-admin -gen-secret                              # 生成会话密钥
+//
+//	dsh-admin -config /etc/dsh-admin/config.json      # 启动面板
+//	dsh-admin -hash                                    # 从 stdin 读密码，输出哈希（给 dshm 用）
+//	dsh-admin -gen-secret                              # 生成会话密钥
 package main
 
 import (
@@ -112,7 +113,7 @@ func verifyPassword(pw, encoded string) bool {
 		return false
 	}
 	iter, err := strconv.Atoi(parts[1])
-	if err != nil || iter <= 0 {
+	if err != nil || iter < 1000 || iter > 10_000_000 {
 		return false
 	}
 	salt, err := hex.DecodeString(parts[2])
@@ -121,6 +122,12 @@ func verifyPassword(pw, encoded string) bool {
 	}
 	want, err := hex.DecodeString(parts[3])
 	if err != nil {
+		return false
+	}
+	// 必须挡住空盐/空摘要：hex.DecodeString("") 返回空切片且不报错，
+	// 此时 pbkdf2(..., keyLen=0) 也返回空，ConstantTimeCompare 会判等 ——
+	// 一个写坏的 password_hash 会变成"任意密码都能登录"。
+	if len(salt) == 0 || len(want) < 16 {
 		return false
 	}
 	got := pbkdf2SHA256([]byte(pw), salt, iter, len(want))
@@ -161,14 +168,21 @@ func (l *limiter) allow(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cutoff := time.Now().Add(-loginWindow)
-	kept := l.fails[ip][:0]
-	for _, t := range l.fails[ip] {
-		if t.After(cutoff) {
-			kept = append(kept, t)
+	// 顺带清掉所有过期记录：旧实现只裁当前 IP，空闲 IP 会一直留在 map 里。
+	for k, v := range l.fails {
+		kept := v[:0]
+		for _, t := range v {
+			if t.After(cutoff) {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(l.fails, k)
+		} else {
+			l.fails[k] = kept
 		}
 	}
-	l.fails[ip] = kept
-	return len(kept) < loginMaxFail
+	return len(l.fails[ip]) < loginMaxFail
 }
 
 func (l *limiter) fail(ip string) {
@@ -189,6 +203,7 @@ type server struct {
 	cfg     Config
 	docker  *Docker
 	limiter *limiter
+	execMu  sync.Mutex // 命令台串行化，同一时间只跑一条 dshm
 }
 
 func newServer(cfg Config) *server {
@@ -206,11 +221,33 @@ func (s *server) audit(format string, args ...any) {
 	log.Print(strings.TrimSpace(line))
 }
 
+// clientIP 返回限流用的来源地址。
+// 只有直连方是回环时（本机反代/SSH 隧道）才采信 X-Forwarded-For 的最右一项；
+// 直连方不是回环时，该头是客户端可伪造的，一律忽略。
 func (s *server) clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return r.RemoteAddr
+	if isLoopbackHost(host) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
+			}
+		}
+	}
+	return host
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func (s *server) authenticated(r *http.Request) bool {
@@ -256,7 +293,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && r.Header.Get("X-DSH-Admin") != "1" {
-		writeErr(w, http.StatusBadRequest, "缺少 X-DSH-Admin 头")
+		writeErr(w, http.StatusForbidden, "缺少 X-DSH-Admin 头")
 		return
 	}
 
@@ -313,14 +350,31 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   s.secureRequest(r),
 		MaxAge:   int(sessionTTL / time.Second),
 	})
 	s.audit("登录成功 ip=%s", ip)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// secureRequest：直连是 TLS，或（仅当直连方是回环时）上游反代声明了 https。
+// 不信任非回环来源的 X-Forwarded-Proto，否则客户端能自己把 cookie 变成 Secure。
+func (s *server) secureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return isLoopbackHost(host) && r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "只支持 POST")
+		return
+	}
 	http.SetCookie(w, &http.Cookie{Name: "dsh_admin", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -432,6 +486,14 @@ func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
+
+	// 同一时间只允许一条 dshm 命令：双击/多标签并发跑 compose 会互相打架。
+	if !s.execMu.TryLock() {
+		writeErr(w, http.StatusConflict, "已有命令正在执行，请等它结束")
+		return
+	}
+	defer s.execMu.Unlock()
+
 	cmd := exec.CommandContext(ctx, dshm, argv...)
 	cmd.Dir = s.cfg.ProjectDir
 	env := os.Environ()
@@ -439,26 +501,58 @@ func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 		env = append(env, "COMPOSE_PROJECT_NAME="+s.cfg.ComposeProject)
 	}
 	cmd.Env = env
-	out, runErr := cmd.CombinedOutput()
-	if len(out) > 256*1024 {
-		out = append([]byte("…（输出过长，仅保留末尾）\n"), out[len(out)-256*1024:]...)
-	}
+	out := &capWriter{limit: 256 * 1024}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	runErr := cmd.Run()
+
 	exit := 0
+	text := out.String()
 	if runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
 			exit = ee.ExitCode()
 		} else {
 			exit = -1
-			out = append(out, []byte("\n"+runErr.Error())...)
+			text += "\n" + runErr.Error()
 		}
 	}
 	s.audit("exec %q exit=%d ip=%s", strings.Join(argv, " "), exit, s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"exit":   exit,
-		"output": string(out),
+		"output": text,
 		"argv":   argv,
 	})
+}
+
+// capWriter 只保留末尾 limit 字节。命令输出可能很大，直接 CombinedOutput
+// 会把整段缓存在内存里，长时间运行的命令足以把面板进程撑爆。
+type capWriter struct {
+	buf   []byte
+	limit int
+	trunc bool
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	c.buf = append(c.buf, p...)
+	// 超过两倍才裁剪一次，避免每个 chunk 都重新分配
+	if len(c.buf) > 2*c.limit {
+		c.buf = append([]byte(nil), c.buf[len(c.buf)-c.limit:]...)
+		c.trunc = true
+	}
+	return len(p), nil
+}
+
+func (c *capWriter) String() string {
+	if len(c.buf) > c.limit {
+		c.buf = c.buf[len(c.buf)-c.limit:]
+		c.trunc = true
+	}
+	s := string(c.buf)
+	if c.trunc {
+		s = "…（输出过长，仅保留末尾）\n" + s
+	}
+	return s
 }
 
 // ── 入口 ────────────────────────────────────────────────────────────────────
@@ -510,12 +604,41 @@ func main() {
 	if *container != "" {
 		cfg.Container = *container
 	}
+	// JSON 里显式写成空串会把默认值抹掉：socket 空 = 连不上 docker，
+	// listen 空 = ListenAndServe("") 绑到所有网卡（面板直接暴露）。这里补回默认值。
+	def := defaultConfig()
+	if cfg.Listen == "" {
+		cfg.Listen = def.Listen
+	}
+	if cfg.Socket == "" {
+		cfg.Socket = def.Socket
+	}
+	if cfg.Container == "" {
+		cfg.Container = def.Container
+	}
 	if cfg.SessionSecret == "" || cfg.PasswordHash == "" {
 		log.Fatalf("配置缺少 session_secret 或 password_hash（先用 dshm admin 生成）")
 	}
+	if !strings.HasPrefix(cfg.Listen, "127.0.0.1") && !strings.HasPrefix(cfg.Listen, "localhost") {
+		log.Printf("警告：监听地址为 %s，面板持 docker.sock，请勿暴露到公网", cfg.Listen)
+	}
+	if cfg.ProjectDir != "" {
+		abs, err := filepath.Abs(cfg.ProjectDir)
+		if err != nil {
+			log.Fatalf("project_dir 解析失败：%v", err)
+		}
+		cfg.ProjectDir = abs
+	}
 
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           newServer(cfg),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	log.Printf("dsh-admin 监听 %s，管理容器 %s，socket %s", cfg.Listen, cfg.Container, cfg.Socket)
-	if err := http.ListenAndServe(cfg.Listen, newServer(cfg)); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("启动失败：%v", err)
 	}
 }

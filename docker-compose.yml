@@ -25,6 +25,11 @@ services:
       # 想直接从局域网访问（未加反代前测试用），把 DSH_BIND 改成 0.0.0.0。
       - "${DSH_BIND:-127.0.0.1}:${PROXY_PORT:-3080}:3080"
     environment:
+      # 必须和下面 volumes: 里数据目录的容器侧路径完全一致。镜像的 ENV 是
+      # /home/node/.dsh，若 .env 没写 DSH_HOME，就会出现「挂载点是 /dsh、
+      # dsh 却把数据写进 /home/node/.dsh」——数据不进宿主机目录，等于没持久化。
+      # 同理 env_file 里若有 DSH_HOME，也不能让它覆盖掉挂载点。
+      DSH_HOME: ${DSH_HOME:-/dsh}
       DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}
       DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?请在 .env 中设置 DSH_AUTH_PASSWORD}
       # HOME 指向数据目录（DSH_HOME），别用镜像里的 /home/node：npm / pnpm / git

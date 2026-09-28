@@ -29,11 +29,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g --no-fund --no-audit \
+# npm 缓存用 BuildKit cache mount：不进镜像层，重跑这一层时能复用已下载的包
+# （node-pty 仍需现场编译，缓存主要省掉重复下载）。
+# 不要再跟 `npm cache clean`，那会把 cache mount 清掉，等于白缓存。
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g --no-fund --no-audit \
       "pnpm@${PNPM_VERSION}" \
       "@deepseek-ai/dsh@${DSH_VERSION}" \
- && test "$(dsh --version)" = "${DSH_VERSION}" \
- && npm cache clean --force
+ && test "$(dsh --version)" = "${DSH_VERSION}"
 
 # 预置一个带 dsh-auth-gate 的 web profile。装进镜像后，首次启动无需联网装插件。
 ENV DSH_HOME=/opt/dsh-seed
@@ -62,7 +65,8 @@ RUN set -eux; \
 # ── 阶段 2：运行镜像 ────────────────────────────────────────────────────────
 FROM ${NODE_IMAGE}
 
-ARG DSH_VERSION=0.1.7-rc.2
+# DSH_VERSION 只在 builder 阶段用到（决定 npm 装哪个版本）；运行阶段不需要，
+# 留在这里只会变成没人读的构建参数。
 ARG DEV_TOOLS=none
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -106,7 +110,8 @@ RUN chmod 0755 /usr/local/bin/dsh
 # 构建可复现，也避免 lockfile 与 package.json 漂移时被静默忽略。
 WORKDIR /app/proxy
 COPY proxy/package.json proxy/package-lock.json /app/proxy/
-RUN npm ci --omit=dev --no-fund --no-audit && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev --no-fund --no-audit
 COPY proxy/index.js /app/proxy/index.js
 
 COPY entrypoint.sh /app/entrypoint.sh

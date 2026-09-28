@@ -100,6 +100,21 @@ rc=$?
 set -e
 [ "$rc" -ne 0 ] && pass "非交互缺密码 → rc=$rc" || fail "应报错却成功"
 
+echo "== 12. set_env 不破坏反斜杠 =="
+: >"$ENV_FILE"
+set_env K 'a\b'
+[ "$(cat "$ENV_FILE")" = 'K=a\b' ] && pass "反斜杠原样写入" \
+	|| fail "被转义成：$(od -c "$ENV_FILE" | head -1)"
+[ "$(get_env K)" = 'a\b' ] && pass "读回一致" || fail "读回不一致：$(get_env K)"
+
+echo "== 13. 已有值不合规必须拦下（非交互）=="
+printf 'P=abc\n' >"$ENV_FILE"
+set +e
+( INTERACTIVE=0 ensure_env P "端口" "3080" 0 env_validate_port ) >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && pass "现有值不合规 → 报错（rc=$rc）" || fail "不合规的现有值被放过了"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

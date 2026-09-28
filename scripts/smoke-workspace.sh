@@ -92,9 +92,10 @@ case "$logs" in
 *"降级"*) ok "日志有降级横幅" ;;
 *) bad "日志缺少降级横幅" ;;
 esac
-# 降级目录建在 $DSH_HOME 下，随 dsh_home 卷持久化
-if docker exec "$NAME" test -d /home/node/.dsh/workspace 2>/dev/null; then
-	ok "降级目录 \$DSH_HOME/workspace 已创建"
+# 降级目录建在 $DSH_HOME 下（entrypoint 用的是 ${DSH_HOME}/.workspace），随 dsh_home
+# 卷持久化。这里沿用容器自己的 DSH_HOME，避免镜像改 ENV 后断言失效。
+if docker exec "$NAME" sh -c 'test -d "${DSH_HOME:-/home/node/.dsh}/.workspace"' 2>/dev/null; then
+	ok "降级目录 \$DSH_HOME/.workspace 已创建"
 else
 	bad "降级目录没有创建"
 fi

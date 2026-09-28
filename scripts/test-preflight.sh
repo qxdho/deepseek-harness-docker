@@ -116,6 +116,39 @@ res="$(absolute_workspace_path "$sandbox" '~/x')"
 res="$(absolute_workspace_path /a/b './c')"
 [ "$res" = "/a/b/c" ] && ok "相对路径按项目目录解析" || bad "相对路径解析错误：$res"
 
+# compose 不展开这些 shell 写法，但预检要按用户「想用的目录」去判断，
+# 否则检查的是一个目录、实际挂载的是另一个。这里只验证展开本身。
+# 用一个沙箱里的假 HOME：不依赖测试机的家目录是否可写。
+fake_home="$sandbox/fakehome"
+mkdir -p "$fake_home"
+for raw in '$HOME/x' '${HOME}/x'; do
+	res="$(HOME="$fake_home" absolute_workspace_path "$sandbox" "$raw")"
+	[ "$res" = "$fake_home/x" ] && ok "$raw 展开为 \$HOME/x" || bad "$raw 展开错误：$res"
+done
+
+echo "== 3b. .env 里用 \$HOME 写法必须告警，并给出绝对路径 =="
+project="$sandbox/homeexpr"
+mkdir -p "$project"
+write_env "$project" '$HOME/dsh-ws-test' "$TEST_UID" "$TEST_GID"
+envhome "$project"
+set +e
+out="$(HOME="$fake_home" check_workspace "$project" auto 0 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+	ok "展开后判定为可写（rc=0）"
+else
+	bad "应当可写，实际 rc=$rc：$out"
+fi
+case "$out" in
+*"不会展开"*) ok "提示了 Compose 不展开 \$HOME" ;;
+*) bad "缺少「不展开」告警：$out" ;;
+esac
+case "$out" in
+*"$fake_home/dsh-ws-test"*) ok "告警里给出了展开后的绝对路径" ;;
+*) bad "告警缺少绝对路径" ;;
+esac
+
 echo "== 4. 不可写目录必须被拦下 =="
 project="$sandbox/ro"
 mkdir -p "$project/workspace"
@@ -139,6 +172,11 @@ esac
 case "$out" in
 *"DSH_WORKSPACE"*) ok "报错里给出了换目录的替代方案" ;;
 *) bad "报错缺少替代方案" ;;
+esac
+# 方案 B 若打印字面量 $HOME，用户照着写进 .env 会被 compose 当成相对路径
+case "$out" in
+*'$HOME'*) bad "替代方案里出现了未展开的 \$HOME" ;;
+*) ok "替代方案里没有未展开的 \$HOME" ;;
 esac
 
 echo "== 4b. .env 里带引号 / DSH_WORKSPACE_DIR 输出 =="

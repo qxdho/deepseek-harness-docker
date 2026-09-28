@@ -84,7 +84,8 @@ The model API key can be set after signing in under **Settings → Model**, or i
 ./dshm service status      # health / port / login user
 ./dshm service logs        # logs
 ./dshm service shell       # shell into the container
-./dshm service update      # upgrade dsh
+./dshm service update      # upgrade: pulls the new image from GHCR
+./dshm service update --build   # rebuild the image locally (after changing repo code)
 ./dshm service disk        # disk usage
 
 # auth
@@ -99,6 +100,17 @@ The model API key can be set after signing in under **Settings → Model**, or i
 
 The original flat forms (`./dshm up`, `./dshm pw`, `./dshm user add ...`) still work, but are no
 longer documented.
+
+### Upgrade behaviour
+
+`./dshm service update` **pulls the image by default and does not rebuild locally**. Images are
+built by CI and pushed to GHCR, so a local rebuild is slow and yields no new version. Use
+`./dshm service update --build` only when the pull fails or you need to verify unpublished changes
+in the repository. Both paths wait for the container to become healthy afterwards and exit non-zero
+with the logs if it does not.
+
+A version can be passed directly, for example `./dshm service update 0.1.7-rc.2` (the value is
+written to `DSH_IMAGE` before pulling).
 
 ## Admin panel
 
@@ -144,18 +156,20 @@ so environment variables are not re-read.
 | `DSH_AUTH_PASSWORD` | none (required) | Used to create the account on first start; ≥14 characters with upper/lower/digit/symbol. Change later with `./dshm auth password` |
 | `PROXY_PORT` | `3080` | Host port |
 | `DSH_BIND` | `127.0.0.1` | Set to `0.0.0.0` for direct LAN access |
-| `DSH_HOME_HOST` | `/dsh` | Host data directory. Under the filesystem root, so first creation needs sudo; `$HOME/dsh` also works |
-| `DSH_HOME` | `/dsh` | In-container data directory. This value is the root itself; no `.dsh` is appended |
-| `DSH_WORKSPACE` | `/dsh/workspace` | Host workspace directory; follows the data directory by default |
+| `DSH_HOME_HOST` | `/dsh` | Host data directory. Under the filesystem root, so first creation needs sudo; another directory such as `/home/user/dsh` also works. Must be an absolute path |
+| `DSH_HOME` | `/dsh` | In-container data directory; must match the mount target of `DSH_HOME_HOST`. This value is the root itself; no `.dsh` is appended |
+| `DSH_WORKSPACE` | `/dsh/workspace` | Host workspace directory; follows the data directory by default. Must be an absolute path |
 | `DSH_WORKSPACE_CONTAINER` | `/workspace` | In-container workspace path |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | Container identity. Set to `id -u` / `id -g` when the host UID differs |
 | `DSH_TOTP` | `optional` | `off`, `optional`, or `required` |
 | `DSH_COOKIE_SECURE` | `0` | Set to `1` for HTTPS; must remain `0` over plain HTTP |
 | `DSH_PUBLIC_HOST` | empty | Domain shown on the login page |
-| `DSH_ADMIN_DIR` | `/dsh-manager` | Admin panel install directory |
+| `DSH_TRUST_XFF` | `0` | When `1`, the proxy trusts `X-Forwarded-For` for client-address detection behind a reverse proxy. Enable only when a proxy really rewrites that header |
+| `DSH_DISK_MIN_MB` | `256` | Minimum free disk space (MB) required at start-up |
+| `DSH_ADMIN_DIR` | `/dsh-manager` | Admin panel install directory. Read by `dshm`, so `$HOME` may be used |
 
-Build-time variables (a rebuild is required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DEV_TOOLS`,
-`DSH_IMAGE`. The remaining options are documented in `.env.example`.
+Build-time variables (a rebuild is required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DEV_TOOLS`.
+`DSH_IMAGE` selects which image is pulled or built, and `./dshm service update` writes it as needed.
 
 Two points to keep in mind:
 
@@ -231,10 +245,10 @@ Manual repair:
 sudo chown -R 1000:1000 /dsh && ./dshm service up
 
 # Or use a directory you own (no sudo)
-mkdir -p ~/dsh-data
-# then edit .env:
-#   DSH_HOME_HOST=$HOME/dsh-data
-#   DSH_WORKSPACE=$HOME/dsh-data/workspace
+mkdir -p /home/user/dsh-data
+# then edit .env (absolute paths only: Compose does not expand ~ or $HOME):
+#   DSH_HOME_HOST=/home/user/dsh-data
+#   DSH_WORKSPACE=/home/user/dsh-data/workspace
 ./dshm service up
 ```
 

@@ -156,25 +156,28 @@ func (d *Docker) Logs(name string, tail int) (string, error) {
 	return demuxLogs(resp.Body), nil
 }
 
-// Docker 的非 TTY 日志是「8 字节头 + 负载」的复用流：头里第 5-8 字节是大端长度。
-// 直接读会混进控制字节，所以必须拆帧。
+// Docker 的非 TTY 日志是「8 字节头 + 负载」的复用流：头里第 1 字节是流号
+// （0/1/2），第 5-8 字节是大端长度。TTY 容器的日志则是原始流，没有帧头——
+// 直接按帧解析会把正文当成长度，输出乱码甚至截断，所以先判断再拆。
 func demuxLogs(r io.Reader) string {
+	data, err := io.ReadAll(io.LimitReader(r, 8<<20))
+	if err != nil && len(data) == 0 {
+		return ""
+	}
+	framed := len(data) >= 8 && data[0] <= 2 && data[1] == 0 && data[2] == 0 && data[3] == 0
+	if !framed {
+		return string(data)
+	}
 	var sb strings.Builder
-	hdr := make([]byte, 8)
-	for {
-		if _, err := io.ReadFull(r, hdr); err != nil {
+	for off := 0; off+8 <= len(data); {
+		n := int(binary.BigEndian.Uint32(data[off+4 : off+8]))
+		off += 8
+		if n < 0 || off+n > len(data) {
+			sb.Write(data[off:])
 			break
 		}
-		n := int(binary.BigEndian.Uint32(hdr[4:8]))
-		if n <= 0 {
-			continue
-		}
-		buf := make([]byte, n)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			sb.Write(buf)
-			break
-		}
-		sb.Write(buf)
+		sb.Write(data[off : off+n])
+		off += n
 	}
 	return sb.String()
 }

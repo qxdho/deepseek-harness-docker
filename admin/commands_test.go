@@ -55,13 +55,13 @@ func TestValidateCommandRejects(t *testing.T) {
 	bad := [][]string{
 		{},
 		{"rm", "-rf", "/"},
-		{"service", "status;", "id"},       // 分号不是命令分隔符，只是非法子命令
-		{"service", "status", "$(id)"},     // 参数含非法字符
+		{"service", "status;", "id"},   // 分号不是命令分隔符，只是非法子命令
+		{"service", "status", "$(id)"}, // 参数含非法字符
 		{"service", "status", "`id`"},
 		{"install.sh"},
-		{"service", "shell"},               // 交互命令
-		{"auth", "password"},               // 交互命令
-		{"auth", "user", "add", "bob"},     // 交互命令
+		{"service", "shell"},           // 交互命令
+		{"auth", "password"},           // 交互命令
+		{"auth", "user", "add", "bob"}, // 交互命令
 	}
 	for _, in := range bad {
 		if _, err := validateCommand(in); err == nil {

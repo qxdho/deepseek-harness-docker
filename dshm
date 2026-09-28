@@ -29,7 +29,6 @@ ENV_FILE=.env
 CONTAINER=qxdho-dsh
 dsh_home_in_container() { env_value DSH_HOME /dsh; }
 dsh_home_host() { env_value DSH_HOME_HOST /dsh; }
-workspace_in_container() { env_value DSH_WORKSPACE_CONTAINER /workspace; }
 cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" "$(dsh_home_in_container)"; }
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
@@ -52,17 +51,9 @@ require_running() {
 	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
 		|| die "容器 $CONTAINER 没在运行，先执行 ./dshm service up"
 }
-env_value() {
-	local v
-	v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
-	printf '%s' "${v:-$2}"
-}
-set_env() {
-	local key="$1" value="$2" tmp
-	tmp="$(mktemp)"
-	awk -v k="$key" -v v="$value" 'BEGIN{d=0} $0 ~ "^" k "=" {print k "=" v; d=1; next} {print} END{if(!d) print k "=" v}' "$ENV_FILE" >"$tmp"
-	mv "$tmp" "$ENV_FILE"
-}
+# .env 的读写统一走 lib，和 install.sh 共用一份实现，避免两套解析器慢慢跑偏。
+# shellcheck source=scripts/env-config.sh
+. ./scripts/env-config.sh
 
 # ── 注册为系统命令 ──────────────────────────────────────────────────────────
 warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
@@ -134,43 +125,11 @@ uninstall_self() {
 	[ "$found" = "1" ] || info "没有找到注册的符号链接（可能未安装过）"
 }
 
-# ── 隐藏输入 + 星号回显 ─────────────────────────────────────────────────────
-# 用法：read_secret "提示文字"  → 结果在变量 SECRET 里
-SECRET=""
-read_secret() {
-	local prompt="$1" ch
-	SECRET=""
-	printf '%s' "$prompt"
-	if [ ! -t 0 ]; then
-		IFS= read -rs SECRET || true
-		printf '\n'
-		return
-	fi
-	while IFS= read -rs -n1 ch; do
-		case "$ch" in "" | $'\n' | $'\r') break ;; esac
-		if [ "$ch" = $'\x7f' ] || [ "$ch" = $'\b' ]; then
-			if [ -n "$SECRET" ]; then
-				SECRET="${SECRET%?}"
-				printf '\b \b'
-			fi
-			continue
-		fi
-		SECRET+="$ch"
-		printf '*'
-	done
-	SECRET="${SECRET%$'\r'}"
-	printf '\n'
-}
-
-# 密码合规检查（与 dsh-auth-gate 的策略一致）
+# ── 密码合规检查 ────────────────────────────────────────────────────────────
+# 规则本身写在 scripts/env-config.sh 的 env_validate_password 里（install.sh 也用
+# 那一份），这里只把「不合规」从「返回 1」翻译成「直接退出」。
 check_password() {
-	local pw="$1" missing=""
-	[ "${#pw}" -ge 14 ] || missing="${missing} 至少14位;"
-	printf '%s' "$pw" | grep -q '[A-Z]' || missing="${missing} 大写字母;"
-	printf '%s' "$pw" | grep -q '[a-z]' || missing="${missing} 小写字母;"
-	printf '%s' "$pw" | grep -q '[0-9]' || missing="${missing} 数字;"
-	printf '%s' "$pw" | grep -q '[^A-Za-z0-9]' || missing="${missing} 特殊符号;"
-	[ -z "$missing" ] || die "密码不合规，缺少：${missing}"
+	env_validate_password "$1" || die "密码不合规（至少 14 位，且含大写/小写/数字/特殊符号）"
 }
 
 PASSWORD=""
@@ -197,15 +156,36 @@ ask_new_password() {
 }
 
 wait_healthy() {
-	local status elapsed=0 last=-10
+	local status running out fails=0 elapsed=0 last=-10
 	for _ in $(seq 1 72); do
-		status="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo unknown)"
+		# inspect 失败（守护进程忙、容器刚被删）是瞬时错误，不能当成「异常状态」：
+		# 逐次失败就等下一轮，连续失败才放弃。
+		if ! out="$(docker inspect --format '{{.State.Running}} {{.State.Health.Status}}' "$CONTAINER" 2>/dev/null)"; then
+			fails=$((fails + 1))
+			if [ "$fails" -ge 6 ]; then
+				printf '    %s读不到容器状态（docker inspect 连续失败），不再等待%s\n' "$YEL" "$RST"
+				return 1
+			fi
+			sleep 5
+			elapsed=$((elapsed + 5))
+			continue
+		fi
+		fails=0
+		read -r running status <<<"$out"
+		running="${running:-unknown}"
+		status="${status:-unknown}"
 		[ "$status" = "healthy" ] && return 0
 
 		# 容器已经退出/在重启循环里，就没必要再空等下去 —— 直接把日志尾部打出来。
 		# 原来是闷头等满 6 分钟才报「未健康」，最气人的是还不说为什么。
+		# 注意 unknown 不在其中：健康检查还没出结果时它也会是 unknown。
+		if [ "$running" != "true" ]; then
+			printf '    %s容器没有在运行（running=%s health=%s），不再等待%s\n' "$YEL" "$running" "$status" "$RST"
+			docker logs --tail 40 "$CONTAINER" 2>&1 || true
+			return 1
+		fi
 		case "$status" in
-		exited | dead | restarting | unknown)
+		dead | restarting | unhealthy)
 			printf '    %s容器状态异常（%s），不再等待%s\n' "$YEL" "$status" "$RST"
 			docker logs --tail 40 "$CONTAINER" 2>&1 || true
 			return 1
@@ -225,6 +205,20 @@ wait_healthy() {
 	return 1
 }
 
+# 启动/重建前的统一准备：对齐工作区默认值 + 目录属主预检。
+# up 和 restart 都要走这一步 —— 否则改了 DSH_WORKSPACE 之后直接重建容器，
+# dockerd 会把源目录建 root 属主，容器里写不进去，只能靠降级悄悄跑。
+prepare_workspace() {
+	sync_workspace_default
+	hdr "准备工作区"
+	# shellcheck source=scripts/preflight.sh
+	. ./scripts/preflight.sh
+	if ! check_workspace "$PWD" auto 1; then
+		die "工作区未就绪，请按上面的提示处理后重试"
+	fi
+	ok "工作区就绪：${DSH_WORKSPACE_DIR}"
+}
+
 # ── 帮助 ────────────────────────────────────────────────────────────────────
 help_service() {
 	cat <<EOF
@@ -237,7 +231,8 @@ ${B}服务${RST} — 管理 dsh 容器
   dshm service logs              日志
   dshm service shell             进容器
   dshm service version           容器内 dsh 版本
-  dshm service update [版本]      升级 dsh（重建镜像）
+  dshm service update [版本] [--build]
+                                 升级：默认拉预构建镜像（快）；--build 才本地构建
   dshm service migrate-home      把旧命名卷 dsh-home 的数据迁到宿主数据目录
   dshm service url               一次性 launch URL（排障）
   dshm service disk              磁盘占用 / 清理命令
@@ -358,15 +353,7 @@ up)
 		hdr "本地构建镜像"
 		docker compose build
 	fi
-	# 工作区预检：/workspace 是 bind mount，属主不对的话容器里的 agent 写不进去。
-	# 必须在 compose up 之前跑 —— 源目录被 dockerd 自动创建时属主是 root。
-	hdr "准备工作区"
-	# shellcheck source=scripts/preflight.sh
-	. ./scripts/preflight.sh
-	if ! check_workspace "$PWD" auto 1; then
-		die "工作区未就绪，请按上面的提示处理后重试"
-	fi
-	ok "工作区就绪：${DSH_WORKSPACE_DIR}"
+	prepare_workspace
 	hdr "启动服务"
 	docker compose up -d
 	hdr "等待健康检查"
@@ -401,6 +388,7 @@ restart)
 	# DSH_UID / DSH_WORKSPACE / 端口之后 `restart` 看着成功了、实际毫无变化。
 	# `up -d` 会按当前 .env 重建有变化的容器，符合「重启使新配置生效」的直觉；
 	# 配置没变时它等价于什么都不做（已是最新）。
+	prepare_workspace
 	docker compose up -d
 	wait_healthy || die "容器未在预期时间内健康，请查看 ./dshm service logs"
 	ok "已重启并健康"
@@ -420,7 +408,11 @@ status)
 	info "状态：${state}    健康：${health}    重启次数：${restarts}"
 	info "端口：$(env_value DSH_BIND 127.0.0.1):$(env_value PROXY_PORT 3080) -> 容器 3080"
 	info "登录用户：$(env_value DSH_AUTH_USER admin)"
-	info "入口：http://<服务器IP>:$(env_value PROXY_PORT 3080)/"
+	if [ "$(env_value DSH_BIND 127.0.0.1)" = "0.0.0.0" ]; then
+		info "入口：http://<服务器IP>:$(env_value PROXY_PORT 3080)/"
+	else
+		info "入口：http://127.0.0.1:$(env_value PROXY_PORT 3080)/（仅本机；对外请用反代或 SSH 隧道）"
+	fi
 	;;
 
 disk | df)
@@ -523,22 +515,48 @@ totp)
 
 update)
 	require_docker; require_env
-	target="${1:-}"
-	if [ -z "$target" ]; then
-		command -v npm >/dev/null 2>&1 || die "本机没有 npm，无法自动取版本；请显式指定：./dshm update <版本>"
-		# npm 的 latest 标签可能比仓库内置的更新版更旧（预发布版常挂在 next 上），
-		# 所以取「已发布版本里最新的那个」，而不是 dist-tags.latest。
-		target="$(npm view @deepseek-ai/dsh versions --json 2>/dev/null \
-			| tr -d '[]" ' | tr ',' '\n' | grep . | sort -V | tail -n1)"
-		[ -n "$target" ] || die "无法解析最新版本，请显式指定：./dshm update <版本>"
-		info "自动选中最新已发布版本：${target}（要指定版本：./dshm update <版本>）"
+	target=""; build=0
+	for a in "$@"; do
+		case "$a" in
+		--build) build=1 ;;
+		-*) die "未知参数：$a（用法：./dshm service update [版本] [--build]）" ;;
+		*) [ -z "$target" ] || die "只接受一个版本参数（用法：./dshm service update [版本]）"; target="$a" ;;
+		esac
+	done
+
+	img_base="${DSH_IMAGE_BASE:-ghcr.io/qxdho/deepseek-harness-docker}"
+	# 不带版本 = 用本项目 CI 构建的最新镜像；带版本 = 用该版本 tag。
+	# 两种情况都优先拉取预构建镜像 —— 本地构建要重新装 dsh 并编译原生依赖，很慢。
+	tag="${target:-latest}"
+
+	if [ "$build" = "1" ]; then
+		# 指定了版本就把 tag 也钉到该版本，别让本地构建出来的镜像盖到 :latest 上
+		if [ -n "$target" ]; then
+			set_env DSH_VERSION "$target"
+			set_env DSH_IMAGE "${img_base}:${tag}"
+		fi
+		hdr "本地构建镜像（--build）"
+		docker compose build
+	else
+		set_env DSH_IMAGE "${img_base}:${tag}"
+		hdr "拉取预构建镜像"
+		info "${img_base}:${tag}"
+		if docker compose pull; then
+			ok "已拉取镜像"
+		else
+			warn "没有可用的预构建镜像 ${img_base}:${tag}，改为本地构建（较慢）"
+			[ -n "$target" ] && set_env DSH_VERSION "$target"
+			docker compose build
+		fi
 	fi
-	hdr "升级 dsh 到 ${target}"
-	info "当前版本：$(env_value DSH_VERSION) -> ${target}"
-	set_env DSH_VERSION "$target"
-	docker compose build
+
+	hdr "重建容器"
 	docker compose up -d
-	wait_healthy && ok "已升级到 ${target}"
+	if wait_healthy; then
+		ok "已更新（容器内 dsh 版本：$(docker exec "$CONTAINER" dsh --version 2>/dev/null || echo 未知)）"
+	else
+		die "更新后容器未健康，请查看 ./dshm service logs"
+	fi
 	;;
 
 version)

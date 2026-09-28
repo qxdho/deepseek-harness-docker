@@ -43,10 +43,17 @@ env_file_value() {
 absolute_workspace_path() {
 	local project_dir="$1" raw="$2" expanded
 	[ -n "$raw" ] || raw="/dsh/workspace"
-	# 支持 ~ 写法
+	# ~ / $HOME / ${HOME} 这类写法在这里展开，是为了让「检查的目录」和用户「想用的
+	# 目录」一致。注意 compose 不会展开它们：.env 里的值会原样交给 dockerd，相对
+	# 路径按 --project-directory 解析，~/dsh 会变成 <项目目录>/~/dsh。所以下面
+	# check_host_dir 会对这类写法额外告警，并给出展开后的绝对路径。
 	case "$raw" in
 	"~") expanded="$HOME" ;;
 	"~/"*) expanded="$HOME/${raw#\~/}" ;;
+	'$HOME') expanded="$HOME" ;;
+	'$HOME/'*) expanded="$HOME/${raw#\$HOME/}" ;;
+	'${HOME}') expanded="$HOME" ;;
+	'${HOME}/'*) expanded="$HOME/${raw#\$\{HOME\}/}" ;;
 	*) expanded="$raw" ;;
 	esac
 	case "$expanded" in
@@ -143,12 +150,20 @@ container_can_write() {
 CHECK_HOST_DIR_PATH=""
 check_host_dir() {
 	local project_dir="$1" key="$2" label="$3" default="$4" allow_elevate="$5" auto_fix="$6"
-	local env_file="$project_dir/.env" raw dir uid gid mode ver cu cg as_admin fixok elevate="" fixcmd
+	local env_file="$project_dir/.env" raw dir uid gid mode ver cu cg as_admin fixok elevate="" fixcmd home_root
 
 	raw="$(env_file_value "$env_file" "$key")"
 	[ -n "$raw" ] || raw="$default"
 	dir="$(absolute_workspace_path "$project_dir" "$raw")"
 	CHECK_HOST_DIR_PATH="$dir"
+
+	# 这类写法 compose 不展开，必须提醒（否则挂载点和这里检查的不是同一个目录）。
+	case "$raw" in
+	'~'|'~/'*|'$HOME'|'$HOME/'*|'${HOME}'|'${HOME}/'*)
+		printf '%s\n' "警告：.env 里 ${key}=${raw} 用了 shell 写法的家目录，Compose 不会展开它。" >&2
+		printf '%s\n' "      实际挂载点会变成 <项目目录>/${raw}；请直接写绝对路径：${key}=${dir}" >&2
+		;;
+	esac
 
 	# 1) 目录得先存在。系统路径（默认 /dsh）需要 sudo 才能创建。
 	if ! mkdir -p "$dir" 2>/dev/null; then
@@ -193,7 +208,8 @@ check_host_dir() {
 		fi
 	fi
 
-	fixcmd="sudo chown -R ${cu}:${cg} ${dir}"
+	# 打印修复命令时用 printf %q 转义路径，避免目录名带空格/特殊字符时复制粘贴出错。
+	printf -v fixcmd 'sudo chown -R %s:%s %q' "$cu" "$cg" "$dir"
 
 	if [ "$auto_fix" = "1" ] && [ -n "$as_admin" ]; then
 		printf '    %s对容器内 uid %s 不可写（%s），尝试修正：%s\n' "$label" "$cu" "$ver" "$dir"
@@ -209,6 +225,9 @@ check_host_dir() {
 		fi
 		printf '    修正失败。\n'
 	fi
+
+	# 方案 B 提示里给出展开后的绝对路径（compose 不会展开 $HOME，写 $HOME 会出错）。
+	home_root="${HOME%/}/dsh"
 
 	cat >&2 <<EOF
 
@@ -226,10 +245,10 @@ check_host_dir() {
          ${fixcmd}
 
     B. 换成一个你自己拥有的目录（不需要 sudo）：
-         mkdir -p "\$HOME/dsh"
-         然后把 .env 改成：
-           DSH_HOME_HOST=\$HOME/dsh
-           DSH_WORKSPACE=\$HOME/dsh/workspace
+         mkdir -p "${home_root}"
+         然后把 .env 改成（必须写绝对路径，Compose 不展开 ~ 这类 shell 写法）：
+           DSH_HOME_HOST=${home_root}
+           DSH_WORKSPACE=${home_root}/workspace
 $(if [ "$(id -u)" != "$cu" ]; then
 	printf '           DSH_UID=%s\n           DSH_GID=%s   # 你的 uid 不是 %s，必须让容器用同一个 uid\n' "$(id -u)" "$(id -g)" "$cu"
 fi)
@@ -271,7 +290,8 @@ check_workspace() {
 
 # 供直接运行（排障 / CI 用）：
 #   bash scripts/preflight.sh [项目目录]      默认是脚本所在的上一级目录
-# 这里不做自动修复（auto_fix=0），只报告，避免排障时被意外改动。
+# auto_fix=0：只报告，不自动 chown。但缺少的目录仍会被创建（mkdir -p），
+# 因为「目录存不存在」本身就是检查项之一。
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	here="$(cd "$(dirname "${0}")/.." && pwd)"
 	check_workspace "${1:-$here}" auto 0

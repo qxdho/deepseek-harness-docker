@@ -15,13 +15,11 @@ import (
 // 的最小阻力去掉。）
 
 // 需要交互输入的命令，命令台无法非交互执行，明确拒绝而不是让用户干等。
+// 只需要列 allowedPaths 里确实存在的那些（其余属于"不在白名单"）。
 var interactivePaths = map[string]bool{
-	"service shell":   true,
-	"auth password":   true,
-	"auth user add":   true,
-	"admin install":   true,
-	"admin uninstall": true,
-	"admin password":  true,
+	"service shell": true,
+	"auth password": true,
+	"auth user add": true,
 }
 
 // 允许执行的完整命令路径（token 级前缀匹配；后面可以跟参数）。
@@ -59,31 +57,35 @@ type CommandInfo struct {
 	Desc string   `json:"desc"`
 }
 
-// 命令台里列出来的按钮（去掉需要交互的）。
+// 命令台里列出来的按钮（去掉需要交互的，以及 help 这类没人会点的）。
 var commandCatalog = []CommandInfo{
-	{[]string{"service", "up"}, "启动 / 应用 .env 改动"},
-	{[]string{"service", "restart"}, "重启 dsh"},
-	{[]string{"service", "down"}, "停止（数据保留）"},
-	{[]string{"service", "status"}, "健康 / 端口 / 登录用户"},
-	{[]string{"service", "logs"}, "查看 dsh 日志"},
-	{[]string{"service", "version"}, "容器内 dsh 版本"},
-	{[]string{"service", "update"}, "升级 dsh（可跟版本号）"},
-	{[]string{"service", "url"}, "一次性 launch URL"},
-	{[]string{"service", "disk"}, "磁盘占用"},
-	{[]string{"auth", "user", "list"}, "列出登录用户"},
-	{[]string{"auth", "user", "disable"}, "禁用用户（跟用户名）"},
-	{[]string{"auth", "totp", "enable"}, "开启两步验证（跟用户名）"},
-	{[]string{"auth", "totp", "disable"}, "关闭两步验证（跟用户名）"},
-	{[]string{"self", "install"}, "把 dshm 注册为系统命令"},
-	{[]string{"admin", "help"}, "面板命令帮助"},
+	{Path: []string{"service", "up"}, Desc: "启动 / 应用 .env 改动"},
+	{Path: []string{"service", "restart"}, Desc: "重启 dsh"},
+	{Path: []string{"service", "down"}, Desc: "停止（数据保留）"},
+	{Path: []string{"service", "status"}, Desc: "健康 / 端口 / 登录用户"},
+	{Path: []string{"service", "logs"}, Desc: "查看 dsh 日志"},
+	{Path: []string{"service", "version"}, Desc: "容器内 dsh 版本"},
+	{Path: []string{"service", "update"}, Desc: "升级（默认拉镜像，可跟版本号）"},
+	{Path: []string{"service", "url"}, Desc: "一次性 launch URL"},
+	{Path: []string{"service", "disk"}, Desc: "磁盘占用"},
+	{Path: []string{"auth", "user", "list"}, Desc: "列出登录用户"},
+	{Path: []string{"auth", "user", "disable"}, Desc: "禁用用户（跟用户名）"},
+	{Path: []string{"auth", "totp", "enable"}, Desc: "开启两步验证（跟用户名）"},
+	{Path: []string{"auth", "totp", "disable"}, Desc: "关闭两步验证（跟用户名）"},
+	{Path: []string{"self", "install"}, Desc: "把 dshm 注册为系统命令"},
+	{Path: []string{"self", "uninstall"}, Desc: "移除系统命令"},
+	{Path: []string{"admin", "status"}, Desc: "面板运行状态"},
+	{Path: []string{"admin", "logs"}, Desc: "面板日志"},
+	{Path: []string{"admin", "url"}, Desc: "面板地址"},
+	{Path: []string{"admin", "help"}, Desc: "面板命令帮助"},
 }
 
 // 分组别名 + 旧的扁平写法，都归一到 allowedPaths 的形态。
 var groupAlias = map[string]string{
-	"svc": "service", "service": "service",
-	"login": "auth", "auth": "auth",
-	"cli": "self", "self": "self",
-	"panel": "admin", "admin": "admin",
+	"svc":   "service",
+	"login": "auth",
+	"cli":   "self",
+	"panel": "admin",
 }
 
 var legacyAlias = map[string][]string{

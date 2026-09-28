@@ -21,6 +21,7 @@
 'use strict';
 
 const http = require('node:http');
+const zlib = require('node:zlib');
 const httpProxy = require('http-proxy');
 
 const DSH_HOST = process.env.DSH_HOST || '127.0.0.1';
@@ -28,6 +29,13 @@ const DSH_PORT = Number(process.env.DSH_PORT) || 3079;
 const LISTEN_PORT = Number(process.env.PROXY_PORT) || 3080;
 const TARGET = `http://${DSH_HOST}:${DSH_PORT}`;
 const UPSTREAM_AUTHORITY = `${DSH_HOST}:${DSH_PORT}`;
+
+// 前面还有一层宿主反代时置 1：这样限流用的是真实客户端 IP，而不是反代的 IP。
+// 默认关闭 —— 直连时 X-Forwarded-For 是客户端可伪造的，采信它就能绕过登录限流。
+const TRUST_XFF = process.env.DSH_TRUST_XFF === '1';
+
+// 注入前最多缓冲多少 HTML；超过就放弃注入、原样转发，避免把大响应全存内存。
+const MAX_INJECT_BYTES = 4 * 1024 * 1024;
 
 const INJECT = `<script id="dsh-forward-inject">(function(){try{
 var c=globalThis.crypto;
@@ -42,28 +50,60 @@ if(c&&typeof c.randomUUID!=="function"){
 globalThis.__DSH_TRANSPORT__=Object.assign({},globalThis.__DSH_TRANSPORT__||{},{ownsHost:true});
 }catch(e){}})();</script>`;
 
+// 找一个标签的结束位置，跳过属性引号里的 '>'（`<head data-x="a>b">`）。
+function findTagEnd(html, start) {
+  let quote = 0;
+  for (let i = start; i < html.length; i += 1) {
+    const ch = html[i];
+    if (quote) {
+      if (ch === quote) quote = 0;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '>') return i;
+  }
+  return -1;
+}
+
 function injectHead(html) {
   const lower = html.toLowerCase();
   const i = lower.indexOf('<head');
-  if (i === -1) return INJECT + html;
-  // `<head` 必须正好是 head 标签（后跟 `>` 或空白），否则 `<header>` /
-  // `<headless-…>` 这类元素也会被当成插入点，把脚本注进文档正文。
-  const next = lower[i + 5];
-  if (next !== '>' && next !== undefined && !/\s/.test(next)) {
-    return INJECT + html;
+  if (i !== -1) {
+    // `<head` 必须正好是 head 标签（后跟 `>` 或空白），否则 `<header>` /
+    // `<headless-…>` 这类元素也会被当成插入点，把脚本注进文档正文。
+    const next = lower[i + 5];
+    if (next === '>' || next === undefined || /\s/.test(next)) {
+      const e = findTagEnd(html, i);
+      if (e !== -1) return html.slice(0, e + 1) + INJECT + html.slice(e + 1);
+    }
   }
-  const e = html.indexOf('>', i);
-  if (e === -1) return INJECT + html;
-  return html.slice(0, e + 1) + INJECT + html.slice(e + 1);
+  // 没有可用的 <head>：插在 doctype 之后。直接前置 `INJECT + html` 会把
+  // `<!doctype html>` 挤到第二行，浏览器按 quirks 模式解析。
+  const dt = lower.indexOf('<!doctype');
+  if (dt !== -1) {
+    const e = findTagEnd(html, dt);
+    if (e !== -1) return html.slice(0, e + 1) + INJECT + html.slice(e + 1);
+  }
+  return INJECT + html;
 }
 
-const proxy = httpProxy.createProxyServer({
-  target: TARGET,
-  changeOrigin: true,
-  ws: true,
-  xfwd: true,
-  selfHandleResponse: true,
-});
+// 客户端真实地址。默认只认 TCP 对端；设置了 DSH_TRUST_XFF=1 时取 XFF 最右一项
+// （最靠近本代理、由可信反代写入的那个），与 dsh-auth-gate 的 rightmostUntrusted 一致。
+function clientAddress(req) {
+  const peer = peerAddress(req);
+  if (TRUST_XFF) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.trim() !== '') {
+      const parts = xff.split(',');
+      const last = parts[parts.length - 1].trim();
+      if (last !== '') return last;
+    }
+  }
+  return peer;
+}
 
 // 客户端真实地址：TCP 连接的对端。Unix socket 等没有对端地址时为 undefined。
 function peerAddress(req) {
@@ -71,19 +111,31 @@ function peerAddress(req) {
   return typeof addr === 'string' && addr.length > 0 ? addr : undefined;
 }
 
-// 统一改写 Host/Origin，并请求不压缩的响应，便于安全地注入 HTML。
-//
-// X-Forwarded-For 必须由代理**重算**，不能让客户端自带的值漏到上游：
-// dsh-auth-gate 的限流键就取自这个头（rightmostUntrusted：从右往左第一个非受信地址），
-// 而它信任的 peer 只有回环。http-proxy 的 `xfwd: true` 只是在客户端自带值后面**追加**
-// 真实地址，所以最右侧仍是攻击者可控的伪造值 —— 每次换一个假 IP 就能绕过登录限流。
-// 这里显式覆盖，只写真实 peer。
+// 统一改写 Host/Origin。客户端自带的 X-Forwarded-* 一律丢掉：
+//   - X-Forwarded-For 由我们重算（dsh-auth-gate 的限流键取自它）；
+//   - X-Forwarded-Host/-Port/-Proto 不往上带，避免客户端伪造成任意值。
 function setForwardHeaders(proxyReq, req) {
   proxyReq.setHeader('host', UPSTREAM_AUTHORITY);
   proxyReq.setHeader('origin', `http://${UPSTREAM_AUTHORITY}`);
-  const peer = peerAddress(req);
-  if (peer !== undefined) proxyReq.setHeader('x-forwarded-for', peer);
+  const client = clientAddress(req);
+  if (client !== undefined) {
+    proxyReq.setHeader('x-forwarded-for', client);
+  } else {
+    proxyReq.removeHeader('x-forwarded-for');
+  }
+  proxyReq.removeHeader('x-forwarded-host');
+  proxyReq.removeHeader('x-forwarded-port');
+  proxyReq.removeHeader('x-forwarded-proto');
 }
+
+const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
+
+const proxy = httpProxy.createProxyServer({
+  target: TARGET,
+  ws: true,
+  agent: keepAliveAgent,
+  selfHandleResponse: true,
+});
 
 proxy.on('proxyReq', (proxyReq, req) => {
   setForwardHeaders(proxyReq, req);
@@ -93,44 +145,115 @@ proxy.on('proxyReqWs', (proxyReq, req) => {
   setForwardHeaders(proxyReq, req);
 });
 
+function passthrough(proxyRes, res) {
+  res.writeHead(proxyRes.statusCode, proxyRes.headers);
+  proxyRes.pipe(res);
+}
+
+// 上游没理会 accept-encoding: identity 时，先解压再注入；解压失败就原样转发，
+// 绝不能把压缩字节当字符串注入 —— 那样客户端拿到的是损坏的内容。
+function decodeBody(buffer, encoding, cb) {
+  const enc = String(encoding || '').toLowerCase();
+  if (enc === '' || enc === 'identity') return cb(null, buffer);
+  const done = (err, out) => cb(err, out);
+  if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzip(buffer, done);
+  if (enc === 'deflate') return zlib.inflate(buffer, done);
+  if (enc === 'br') return zlib.brotliDecompress(buffer, done);
+  return cb(new Error(`unsupported content-encoding: ${enc}`));
+}
+
 proxy.on('proxyRes', (proxyRes, req, res) => {
   const type = String(proxyRes.headers['content-type'] || '');
   const isHtml = /text\/html/i.test(type);
-  const noBody = req.method === 'HEAD' || proxyRes.statusCode === 204 || proxyRes.statusCode === 304;
+  // 206/带 Content-Range 的是分片响应，改写正文会让 Content-Range 对不上。
+  const noBody = req.method === 'HEAD' ||
+    proxyRes.statusCode === 204 || proxyRes.statusCode === 304 ||
+    proxyRes.statusCode === 206 ||
+    proxyRes.headers['content-range'] !== undefined;
 
   if (!isHtml || noBody) {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
+    passthrough(proxyRes, res);
     return;
   }
 
-  const chunks = [];
-  proxyRes.on('data', (c) => chunks.push(c));
+  let chunks = [];
+  let size = 0;
+  let finished = false;
+  let streaming = false;
+
+  const finish = (err) => {
+    if (finished) return;
+    finished = true;
+    if (err) {
+      // 上游中途断了：不能把半个页面当成功响应发出去
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+      }
+      res.end();
+      return;
+    }
+    const raw = Buffer.concat(chunks, size);
+    chunks = [];
+    decodeBody(raw, proxyRes.headers['content-encoding'], (decErr, decoded) => {
+      if (decErr) {
+        // 解压不了就原样转发（含原来的 content-encoding），只失去注入
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        res.end(raw);
+        return;
+      }
+      const body = Buffer.from(injectHead(decoded.toString('utf8')), 'utf8');
+      const headers = Object.assign({}, proxyRes.headers);
+      // 重新计算长度后，必须同时删掉上游的 content-encoding 和 transfer-encoding，
+      // 否则响应会同时带 Content-Length 与 Transfer-Encoding: chunked，
+      // 严格的中间代理（Nginx 等）会直接判 502。
+      delete headers['content-encoding'];
+      delete headers['transfer-encoding'];
+      headers['content-length'] = String(body.length);
+      res.writeHead(proxyRes.statusCode, headers);
+      res.end(body);
+    });
+  };
+
+  proxyRes.on('data', (c) => {
+    if (streaming) return;
+    chunks.push(c);
+    size += c.length;
+    if (size > MAX_INJECT_BYTES) {
+      // 太大，放弃注入，改成边收边转发
+      streaming = true;
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      for (const b of chunks) res.write(b);
+      chunks = [];
+      size = 0;
+      proxyRes.pipe(res);
+    }
+  });
   proxyRes.on('end', () => {
-    const body = Buffer.from(injectHead(Buffer.concat(chunks).toString('utf8')), 'utf8');
-    const headers = Object.assign({}, proxyRes.headers);
-    // 重新计算长度后，必须同时删掉上游的 content-encoding 和 transfer-encoding，
-    // 否则响应会同时带 Content-Length 与 Transfer-Encoding: chunked，
-    // 严格的中间代理（Nginx 等）会直接判 502。
-    delete headers['content-encoding'];
-    delete headers['transfer-encoding'];
-    headers['content-length'] = String(body.length);
-    res.writeHead(proxyRes.statusCode, headers);
-    res.end(body);
+    if (!streaming) finish(null);
+  });
+  proxyRes.on('error', (err) => {
+    console.error(`[proxy] upstream response error: ${err.message}`);
+    finish(err);
+  });
+  proxyRes.on('aborted', () => finish(new Error('upstream aborted')));
+  res.on('close', () => {
+    if (!res.writableEnded) proxyRes.destroy();
   });
 });
 
 proxy.on('error', (err, req, res) => {
   const message = `dsh proxy error: ${err.message}\n`;
-  if (res && !res.headersSent && typeof res.writeHead === 'function') {
-    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end(message);
-  } else if (res && typeof res.end === 'function') {
-    res.end();
-  }
   console.error(`[proxy] ${message.trim()}`);
+  if (res instanceof http.ServerResponse) {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    }
+    res.end(message);
+  } else if (res && typeof res.destroy === 'function') {
+    // WebSocket 失败时 res 是裸 socket
+    res.destroy();
+  }
 });
-
 
 const server = http.createServer((req, res) => {
   proxy.web(req, res);
@@ -138,5 +261,5 @@ const server = http.createServer((req, res) => {
 server.on('upgrade', (req, socket, head) => proxy.ws(req, socket, head));
 
 server.listen(LISTEN_PORT, '0.0.0.0', () => {
-  console.log(`[proxy] 0.0.0.0:${LISTEN_PORT} -> ${TARGET}（Host/Origin 改写为 ${UPSTREAM_AUTHORITY}）`);
+  console.log(`[proxy] 0.0.0.0:${LISTEN_PORT} -> ${TARGET}（Host/Origin 改写为 ${UPSTREAM_AUTHORITY}${TRUST_XFF ? '，信任 X-Forwarded-For' : ''}）`);
 });

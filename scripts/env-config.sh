@@ -3,7 +3,7 @@
 #
 # 被 install.sh / dshm 复用；可单独测试：scripts/test-env-config.sh
 #
-# 调用方需先定义：hdr / ok / warn / die（输出函数），可选 read_secret（密码隐藏输入）。
+# 调用方需先定义：hdr / ok / warn / die（输出函数）。
 # 可选覆盖：ENV_FILE（默认 .env）、INTERACTIVE=0|1（默认按 stdin 是否 tty 推断）。
 
 : "${ENV_FILE:=.env}"
@@ -11,12 +11,79 @@ if [ -z "${INTERACTIVE:-}" ]; then
 	if [ -t 0 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
 fi
 
-get_env() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true; }
+# ── 隐藏输入 + 星号回显 ─────────────────────────────────────────────────────
+# 用法：read_secret "提示文字"  → 结果在变量 SECRET 里。
+# 放在这里是因为 install.sh 与 dshm 都需要；以前两边各抄一份，改一处忘一处。
+SECRET=""
+read_secret() {
+	local prompt="$1" ch
+	SECRET=""
+	printf '%s' "$prompt"
+	if [ ! -t 0 ]; then
+		IFS= read -rs SECRET || true
+		printf '\n'
+		return
+	fi
+	while IFS= read -rs -n1 ch; do
+		case "$ch" in "" | $'\n' | $'\r') break ;; esac
+		if [ "$ch" = $'\x7f' ] || [ "$ch" = $'\b' ]; then
+			if [ -n "$SECRET" ]; then
+				SECRET="${SECRET%?}"
+				printf '\b \b'
+			fi
+			continue
+		fi
+		SECRET+="$ch"
+		printf '*'
+	done
+	SECRET="${SECRET%$'\r'}"
+	printf '\n'
+}
 
+# 读取一个键。去掉一层包裹的引号，和 preflight 的解析保持一致。
+get_env() {
+	local v
+	v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+	case "$v" in
+	\"*\") v="${v#\"}"; v="${v%\"}" ;;
+	\'*\') v="${v#\'}"; v="${v%\'}" ;;
+	esac
+	printf '%s' "$v"
+}
+
+# 读一个键，为空时返回默认值（dshm 里大量使用）
+env_value() {
+	local v
+	v="$(get_env "$1")"
+	printf '%s' "${v:-$2}"
+}
+
+# 数据目录换了、工作区还停在旧默认时，让工作区跟着走。
+# compose 里工作区的默认值写死为 /dsh/workspace，只能在这里对齐，否则
+# 只改 DSH_HOME_HOST 会留下一个 /dsh/workspace —— 在宿主上多半是 root 建的、
+# 容器写不进去的目录。install.sh 和 dshm service up 都会调用。
+sync_workspace_default() {
+	local home_host ws
+	home_host="$(get_env DSH_HOME_HOST)"
+	ws="$(get_env DSH_WORKSPACE)"
+	[ -n "$home_host" ] || return 0
+	[ "$home_host" != "/dsh" ] || return 0
+	[ "$ws" = "/dsh/workspace" ] || return 0
+	set_env DSH_WORKSPACE "${home_host}/workspace"
+	ok "DSH_WORKSPACE 跟随数据目录改为 ${home_host}/workspace"
+}
+
+# 写回一个键。值通过环境变量传给 awk —— 用 `awk -v v=...` 会把值里的
+# 反斜杠序列当转义处理（`a\b` 会写成退格符），密码里带 \ 就再也登不进去。
 set_env() {
 	local k="$1" v="$2" tmp
 	tmp="$(mktemp)"
-	awk -v k="$k" -v v="$v" 'BEGIN{d=0} $0 ~ "^" k "=" {print k "=" v; d=1; next} {print} END{if(!d) print k "=" v}' "$ENV_FILE" >"$tmp"
+	K="$k" V="$v" awk '
+		BEGIN { d=0; k=ENVIRON["K"]; v=ENVIRON["V"] }
+		$0 ~ ("^" k "=") { print k "=" v; d=1; next }
+		{ print }
+		END { if (!d) print k "=" v }
+	' "$ENV_FILE" >"$tmp"
 	mv "$tmp" "$ENV_FILE"
 }
 
@@ -68,12 +135,6 @@ env_validate_bind() {
 	return 1
 }
 
-env_validate_totp() {
-	case "$1" in off | optional | required) return 0 ;; esac
-	warn "只能是 off / optional / required"
-	return 1
-}
-
 # ── 空则询问、非空跳过 ──────────────────────────────────────────────────────
 # ensure_env KEY 说明 [默认值] [可选=1] [校验函数]
 # 已有非空值（且不是示例占位符）直接跳过；交互模式下才询问。
@@ -82,10 +143,17 @@ ensure_env() {
 	local cur value
 	cur="$(get_env "$key")"
 	if [ -n "$cur" ] && ! env_is_placeholder "$cur"; then
-		ok "${key} 已配置，跳过"
-		return 0
-	fi
-	if [ "$INTERACTIVE" != "1" ]; then
+		# 已有值也要过一遍校验：否则写错的 PROXY_PORT=abc / DSH_BIND=foo
+		# 会被"已配置，跳过"悄悄放过去。
+		if [ -z "$validator" ] || "$validator" "$cur"; then
+			ok "${key} 已配置，跳过"
+			return 0
+		fi
+		if [ "$INTERACTIVE" != "1" ]; then
+			die "${key} 的当前值不合规，请在 ${ENV_FILE} 里修正后重试"
+		fi
+		warn "${key} 的当前值不合规，请重新输入"
+	elif [ "$INTERACTIVE" != "1" ]; then
 		if [ -n "$default" ]; then
 			set_env "$key" "$default"
 			ok "${key} 未配置，非交互模式使用默认值：${default}"
@@ -132,17 +200,11 @@ ensure_password() {
 	hdr "设置登录密码"
 	printf '    规则：至少 14 位，且包含%s大写 / 小写 / 数字 / 特殊符号%s\n' "${B:-}" "${RST:-}"
 	while :; do
-		if command -v read_secret >/dev/null 2>&1; then
-			read_secret "    新密码："
-			p1="$SECRET"
-			read_secret "    再输一次确认："
-			p2="$SECRET"
-		else
-			printf '    新密码：'
-			IFS= read -r p1 || p1=""
-			printf '    再输一次确认：'
-			IFS= read -r p2 || p2=""
-		fi
+		# read_secret 由本文件提供；测试里可以覆盖它以喂入固定密码
+		read_secret "    新密码："
+		p1="$SECRET"
+		read_secret "    再输一次确认："
+		p2="$SECRET"
 		if [ "$p1" != "$p2" ]; then
 			warn "两次输入不一致，请重新输入"
 			continue

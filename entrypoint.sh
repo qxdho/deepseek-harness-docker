@@ -99,7 +99,11 @@ if [ "$workspace_ok" != "1" ]; then
   if [ "$WORKSPACE_STRICT" = "1" ]; then
     exit 1
   fi
-  mkdir -p "$FALLBACK_WORKSPACE"
+  # 这里显式判断：set -e 下 mkdir 失败会直接退出，只剩一句 mkdir 的报错，
+  # 用户看不到下面「退路也不可写」的说明。
+  if ! mkdir -p "$FALLBACK_WORKSPACE" 2>/dev/null; then
+    die "退路目录 ${FALLBACK_WORKSPACE} 创建失败，无法启动（要恢复「不可写就退出」设 DSH_WORKSPACE_STRICT=1）"
+  fi
   if ! ( : >"${FALLBACK_WORKSPACE}/.dsh-write-test" ) 2>/dev/null; then
     rm -f "${FALLBACK_WORKSPACE}/.dsh-write-test" 2>/dev/null || true
     die "退路 ${FALLBACK_WORKSPACE} 也不可写，无法启动（要恢复「不可写就退出」设 DSH_WORKSPACE_STRICT=1）"
@@ -195,7 +199,7 @@ if [ ! -s "$DSH_HOME/auth/users.yaml" ]; then
   fi
   chmod 600 "$DSH_HOME/auth/users.yaml" 2>/dev/null || true
 else
-  log "检测到已有用户文件，跳过创建（改密码：docker exec -it <容器> dsh-auth-user passwd <用户名>）"
+  log "检测到已有用户文件，跳过创建（改密码：在宿主机执行 ./dshm auth password）"
 fi
 
 # ── 4. 启动 dsh（仅回环）────────────────────────────────────────────────────

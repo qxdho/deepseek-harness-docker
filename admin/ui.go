@@ -51,7 +51,7 @@ const indexHTML = `<!doctype html>
 
   <div id="panel" style="display:none">
     <h1>DSH 管理面板 <span class="muted" style="font-weight:400;font-size:12px">容器 <span id="cname"></span></span></h1>
-    <div id="err"></div>
+    <div id="panelErr"></div>
 
     <div class="card">
       <div class="row">
@@ -106,7 +106,16 @@ const indexHTML = `<!doctype html>
 (function () {
   'use strict';
   var $ = function (id) { return document.getElementById(id); };
-  function err(msg) { $('err').textContent = msg || ''; }
+  function err(msg) {
+    // 登录页和面板各有一个错误位，写到当前可见的那个（原来是两个同 id 的 div，
+    // 登录后消息会写进已隐藏的那个，看起来像什么都没发生）。
+    var loginErr = document.getElementById('err');
+    var panelErr = document.getElementById('panelErr');
+    if (loginErr) { loginErr.textContent = ''; }
+    if (panelErr) { panelErr.textContent = ''; }
+    var target = (panelErr && $('panel').style.display !== 'none') ? panelErr : loginErr;
+    if (target) { target.textContent = msg || ''; }
+  }
   function show(panel) {
     $('login').style.display = panel ? 'none' : 'block';
     $('panel').style.display = panel ? 'block' : 'none';
@@ -165,7 +174,7 @@ const indexHTML = `<!doctype html>
     api('/api/disk').then(function (d) {
       var rows = [
         ['镜像', d.images], ['容器可写层', d.containers],
-        ['数据卷', d.volumes], ['构建缓存', d.buildCache], ['合计', d.total]
+        ['数据卷', d.volumes], ['构建缓存', d.buildCache], ['合计（近似，镜像层有共享）', d.total]
       ];
       var html = '';
       rows.forEach(function (r) {

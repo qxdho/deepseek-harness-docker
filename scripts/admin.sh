@@ -12,8 +12,8 @@
 #
 # 这样 dsh 容器始终碰不到 docker.sock，面板是唯一持有它的组件。
 #
-# 调用方（dshm）需已提供：hdr/info/ok/warn/die、read_secret/SECRET、
-# env_value、is_root、PROJECT_DIR/CONTAINER。
+# 调用方（dshm）需已提供：hdr/info/ok/warn/die、env_value、is_root、
+# PROJECT_DIR/CONTAINER；read_secret/SECRET 由 scripts/env-config.sh 提供。
 
 ADMIN_SERVICE=dsh-admin
 
@@ -106,6 +106,12 @@ admin_ask_password() {
 	[ "${#SECRET}" -ge 12 ] || die "面板密码至少 12 位"
 }
 
+# JSON 字符串转义：路径里带 " 或 \ 时（Windows 拷贝过来的路径、带引号的目录名）
+# 直接拼进 config.json 会让面板解析失败。
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 # admin_write_config 路径 listen socket container [project_dir] [compose_project]
 admin_write_config() {
 	local path="$1" listen="$2" socket="$3" container="$4"
@@ -114,6 +120,12 @@ admin_write_config() {
 	hash="$(printf '%s' "$SECRET" | admin_hash_password)" || die "计算口令哈希失败"
 	secret="$(admin_gen_secret)" || die "生成会话密钥失败"
 	[ -n "$hash" ] && [ -n "$secret" ] || die "生成配置失败（面板二进制不可用）"
+	# 口令哈希/会话密钥是十六进制串，不含需要转义的字符；路径类字段才需要。
+	listen="$(json_escape "$listen")"
+	container="$(json_escape "$container")"
+	socket="$(json_escape "$socket")"
+	project_dir="$(json_escape "$project_dir")"
+	compose_project="$(json_escape "$compose_project")"
 	mkdir -p "$(dirname "$path")"
 	tmp="$(mktemp)"
 	cat >"$tmp" <<EOF
@@ -145,12 +157,17 @@ admin_detect_compose_project() {
 # 二进制、配置、pidfile、日志全部放同一个目录，默认 /dsh-manager。
 # 想换地方就设 DSH_ADMIN_DIR（例如 $HOME/dsh-manager，免 sudo）。
 # 注意：默认 /dsh-manager 在根目录下，首次创建需要 sudo。
+# 这个值是脚本自己用的（不经过 Compose），所以 ~ / $HOME / ${HOME} 都会被展开。
 admin_dir() {
 	local d
 	d="$(env_value DSH_ADMIN_DIR /dsh-manager)"
 	case "$d" in
 	"~") d="$HOME" ;;
 	"~/"*) d="$HOME/${d#\~/}" ;;
+	'$HOME') d="$HOME" ;;
+	'$HOME/'*) d="$HOME/${d#\$HOME/}" ;;
+	'${HOME}') d="$HOME" ;;
+	'${HOME}/'*) d="$HOME/${d#\$\{HOME\}/}" ;;
 	/*) ;;
 	*) d="$PROJECT_DIR/${d#./}" ;;
 	esac
@@ -269,16 +286,16 @@ admin_print_url() {
 }
 
 admin_uninstall() {
-	local dir pid
+	local dir pid removed=1
 	dir="$(admin_dir)"
-	if admin_has_systemd; then
+	if admin_has_systemd && [ -f /etc/systemd/system/dsh-admin.service ]; then
 		if is_root; then
 			systemctl disable --now dsh-admin 2>/dev/null || true
 			rm -f /etc/systemd/system/dsh-admin.service
 			systemctl daemon-reload 2>/dev/null || true
 		elif command -v sudo >/dev/null 2>&1; then
 			sudo systemctl disable --now dsh-admin 2>/dev/null || true
-			sudo rm -f /etc/systemd/system/dsh-admin.service
+			sudo rm -f /etc/systemd/system/dsh-admin.service || removed=0
 			sudo systemctl daemon-reload 2>/dev/null || true
 		fi
 	fi
@@ -290,9 +307,17 @@ admin_uninstall() {
 	if [ -w "$dir" ]; then
 		rm -f "$dir/dsh-admin"
 	elif command -v sudo >/dev/null 2>&1; then
-		sudo rm -f "$dir/dsh-admin" 2>/dev/null || true
+		sudo rm -f "$dir/dsh-admin" || removed=0
+	else
+		removed=0
 	fi
-	ok "已停止并移除二进制；配置保留在 $dir/config.json（不需要可自行删掉整个 ${dir}）"
+	if [ "$removed" = "1" ]; then
+		ok "已停止并移除二进制；配置保留在 $dir/config.json（不需要可自行删掉整个 ${dir}）"
+	else
+		warn "服务已停止，但没能删除全部文件（权限不足）；请手动清理：
+      sudo rm -f /etc/systemd/system/dsh-admin.service ${dir}/dsh-admin
+      sudo systemctl daemon-reload"
+	fi
 }
 
 # ── 其它子命令 ──────────────────────────────────────────────────────────────
@@ -313,7 +338,7 @@ admin_url() {
 admin_status() {
 	local dir pid
 	dir="$(admin_dir)"
-	if admin_has_systemd && systemctl list-unit-files dsh-admin.service >/dev/null 2>&1; then
+	if admin_has_systemd && [ -f /etc/systemd/system/dsh-admin.service ]; then
 		systemctl --no-pager status dsh-admin 2>&1 | head -12 || true
 		return
 	fi
@@ -326,7 +351,21 @@ admin_status() {
 }
 
 admin_logs() {
-	tail -n 100 "$(admin_dir)/dsh-admin.log" 2>/dev/null || info "（暂无日志）"
+	local dir
+	dir="$(admin_dir)"
+	# systemd 部署时日志在 journal 里，pidfile 那份日志文件根本不存在 —— 之前这里
+	# 会打印「暂无日志」，把人误导成「面板没输出」。
+	if admin_has_systemd && [ -f /etc/systemd/system/dsh-admin.service ]; then
+		if journalctl -u dsh-admin -n 100 --no-pager 2>/dev/null; then
+			return
+		fi
+		if command -v sudo >/dev/null 2>&1 && sudo -n journalctl -u dsh-admin -n 100 --no-pager 2>/dev/null; then
+			return
+		fi
+		info "面板由 systemd 管理，查看日志：sudo journalctl -u dsh-admin -n 100"
+		return
+	fi
+	tail -n 100 "$dir/dsh-admin.log" 2>/dev/null || info "（暂无日志）"
 }
 
 admin_password() {
@@ -347,7 +386,7 @@ admin_password() {
 		sudo install -m 0600 "$staging" "$dir/config.json"
 		rm -f "$staging"
 	fi
-	if admin_has_systemd; then
+	if admin_has_systemd && [ -f /etc/systemd/system/dsh-admin.service ]; then
 		systemctl restart dsh-admin 2>/dev/null || sudo systemctl restart dsh-admin 2>/dev/null || true
 	elif [ -f "$dir/dsh-admin.pid" ]; then
 		kill "$(cat "$dir/dsh-admin.pid")" 2>/dev/null || true

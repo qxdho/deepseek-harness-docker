@@ -23,36 +23,10 @@ die() { printf '\n%s错误：%s%s\n\n' "$RED" "$*" "$RST" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || die "未安装 docker"
 docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"
 
-# ── 隐藏输入 + 星号回显 ─────────────────────────────────────────────────────
-SECRET=""
-read_secret() {
-	local prompt="$1" ch
-	SECRET=""
-	printf '%s' "$prompt"
-	if [ ! -t 0 ]; then
-		IFS= read -rs SECRET || true
-		printf '\n'
-		return
-	fi
-	while IFS= read -rs -n1 ch; do
-		case "$ch" in "" | $'\n' | $'\r') break ;; esac
-		if [ "$ch" = $'\x7f' ] || [ "$ch" = $'\b' ]; then
-			if [ -n "$SECRET" ]; then
-				SECRET="${SECRET%?}"
-				printf '\b \b'
-			fi
-			continue
-		fi
-		SECRET+="$ch"
-		printf '*'
-	done
-	SECRET="${SECRET%$'\r'}"
-	printf '\n'
-}
-
 [ -f .env ] || { cp .env.example .env; ok "已生成 .env"; }
 
-# 配置项读写 + 「空则询问、非空跳过」逻辑（可单测：scripts/test-env-config.sh）
+# 配置项读写 + 「空则询问、非空跳过」逻辑 + 隐藏输入 read_secret
+# （可单测：scripts/test-env-config.sh）
 # shellcheck source=scripts/env-config.sh
 . ./scripts/env-config.sh
 
@@ -67,12 +41,8 @@ ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区路径" "/workspace" 0 ""
 ensure_env DSH_HOME_HOST "dsh 数据目录（宿主，bind 挂到容器）" "/dsh" 0 ""
 ensure_env DSH_HOME "容器内 dsh 数据目录" "/dsh" 0 ""
 
-# 数据目录换了、工作区还留在旧默认时，让工作区跟着走，避免一个在 /dsh 一个在别处
-_home_host="$(get_env DSH_HOME_HOST)"
-if [ -n "$_home_host" ] && [ "$_home_host" != "/dsh" ] && [ "$(get_env DSH_WORKSPACE)" = "/dsh/workspace" ]; then
-	set_env DSH_WORKSPACE "${_home_host}/workspace"
-	ok "DSH_WORKSPACE 跟随数据目录改为 ${_home_host}/workspace"
-fi
+# 数据目录换了、工作区还留在旧默认时，让工作区跟着走（与 dshm service up 同一实现）
+sync_workspace_default
 
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────
 hdr "获取镜像"
@@ -105,8 +75,19 @@ elapsed=0
 last=-10
 for _ in $(seq 1 72); do
 	# 一次 inspect 同时取运行状态与健康状态，别为了两行信息调两次 docker。
-	read -r running s <<<"$(docker inspect \
-		--format '{{.State.Running}} {{.State.Health.Status}}' qxdho-dsh 2>/dev/null || echo 'false unknown')"
+	# inspect 自身失败（守护进程忙、容器刚创建还没注册）不能当成「容器异常」：
+	# 那是一次瞬时错误，直接退出会把正常启动判成失败。
+	if ! insp="$(docker inspect \
+		--format '{{.State.Running}} {{.State.Health.Status}}' qxdho-dsh 2>/dev/null)"; then
+		printf '    暂时读不到容器状态（docker inspect 失败），继续等待…\n'
+		sleep 5
+		elapsed=$((elapsed + 5))
+		continue
+	fi
+	read -r running s <<<"$insp"
+	running="${running:-unknown}"
+	# 没配 healthcheck 时 Health 段为空，取值会得到空串
+	s="${s:-unknown}"
 	if [ "$s" = "healthy" ]; then
 		healthy=1
 		break

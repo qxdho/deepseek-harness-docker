@@ -5,5 +5,12 @@ data/
 node_modules/
 # 管理面板配置（含口令哈希与会话密钥）与本地构建产物
 admin/dsh-admin
+admin/dsh-admin-*
 admin/.admin-test.*
 .build/
+# 测试临时目录（容器 /tmp 常是 noexec，脚本会在仓库内建临时目录）
+.tmptest/
+.gocache/
+.gopath/
+.gotmp/
+.gotool/

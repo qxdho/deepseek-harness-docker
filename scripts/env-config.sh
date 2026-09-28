@@ -144,6 +144,54 @@ has_key() {
 	grep -qE "^$1=" "$ENV_FILE" 2>/dev/null
 }
 
+# ── 生效配置汇总 ────────────────────────────────────────────────────────────
+# 配置项多，静默跳过会让用户不知道最终跑的是什么。install.sh 与 dshm service up
+# 读取完配置后调用这里，把实际生效的值列出来（等于默认值时标注「默认」）。
+summary_line() { # KEY 说明 默认值
+	local key="$1" label="$2" default="$3" v note
+	v="$(env_value_new "$key" "$default")"
+	if [ -z "$v" ]; then
+		note="（空）"
+	elif [ "$v" = "$default" ]; then
+		note="（默认）"
+	else
+		note="（已改）"
+	fi
+	printf '    %s：%s=%s %s\n' "$label" "$key" "$v" "$note"
+}
+
+# 密码只报「已设置 / 未设置」，绝不回显
+summary_secret() { # KEY 说明
+	local v
+	v="$(env_value_new "$1" "")"
+	if [ -n "$v" ]; then
+		printf '    %s：%s=已设置（不显示）\n' "$2" "$1"
+	else
+		printf '    %s：%s=未设置\n' "$2" "$1"
+	fi
+}
+
+config_summary() {
+	hdr "生效配置"
+	summary_line DSH_HTTP_PORT "宿主访问端口" "3080"
+	summary_line DSH_BIND "宿主监听地址" "127.0.0.1"
+	summary_line DSH_HOME_HOST "数据目录（宿主）" "/dsh"
+	summary_line DSH_HOME_CONTAINER "数据目录（容器）" "/dsh"
+	summary_line DSH_WORKSPACE_HOST "工作区（宿主）" "/dsh/workspace"
+	summary_line DSH_WORKSPACE_CONTAINER "工作区（容器）" "/workspace"
+	printf '    容器运行身份：DSH_UID:DSH_GID=%s:%s\n' \
+		"$(env_value DSH_UID 1000)" "$(env_value DSH_GID 1000)"
+	summary_line DSH_AUTH_USER "登录用户" "admin"
+	summary_secret DSH_AUTH_PASSWORD "登录密码"
+	summary_line DSH_AUTH_TOTP "两步验证" "optional"
+	summary_line DSH_COOKIE_SECURE "Cookie Secure" "0"
+	summary_line DSH_PUBLIC_HOST "登录页域名" ""
+	summary_line DSH_IMAGE "镜像" "ghcr.io/qxdho/deepseek-harness-docker:latest"
+	summary_line DSH_ADMIN_DIR "管理面板目录" "/dsh-manager"
+	info "改配置：编辑 ${ENV_FILE} 后执行 ./dshm service up（restart 不重读）"
+	info "各项含义：见 .env.example 注释，或 ./dshm help"
+}
+
 # 写回一个键。值通过环境变量传给 awk —— 用 `awk -v v=...` 会把值里的
 # 反斜杠序列当转义处理（`a\b` 会写成退格符），密码里带 \ 就再也登不进去。
 set_env() {
@@ -257,7 +305,7 @@ ensure_env() {
 
 	if [ -n "$cur" ] && ! env_is_placeholder "$cur"; then
 		if [ -z "$validator" ] || "$validator" "$cur"; then
-			ok "${key} 已配置，跳过"
+			ok "${key}=${cur}（已配置，跳过）"
 			return 0
 		fi
 		if [ -n "$default" ]; then

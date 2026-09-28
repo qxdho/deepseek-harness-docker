@@ -52,6 +52,9 @@ ensure_env DSH_AUTH_TOTP "两步验证（off/optional/required）" "optional" 0 
 # 历史默认值对齐（只处理容器内数据目录的旧默认 /home/node/.dsh）
 normalize_defaults
 
+# 把最终生效的配置列出来：静默跳过会让用户不知道跑的是什么
+config_summary
+
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────
 hdr "获取镜像"
 if docker compose pull; then

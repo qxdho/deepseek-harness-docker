@@ -64,7 +64,9 @@ paths) **use that default without prompting**. Only required items without a def
 password) are asked for. Invalid legacy values are replaced by the default with a notice — for
 example the legacy `DSH_HOME=/home/node/.dsh` becomes `DSH_HOME_CONTAINER=/dsh`, and an empty workspace mount point becomes
 `/workspace`. The password must be at least 14 characters and contain uppercase, lowercase, digits,
-and symbols.
+and symbols. After reading the configuration, a **configuration summary** is printed (host port,
+data directory, workspace, container identity, login, image, …), marking each item as "default" or
+"changed"; `./dshm service up` prints the same summary before starting.
 
 Then open `http://<host>:3080/` and sign in as `admin` with that password.
 

@@ -362,6 +362,8 @@ up)
 		docker compose build
 	fi
 	prepare_workspace
+	# 启动前把生效配置列出来：改没改、改的是哪一项，一眼能看到
+	config_summary
 	hdr "启动服务"
 	docker compose up -d
 	hdr "等待健康检查"
@@ -559,6 +561,7 @@ update)
 		fi
 	fi
 
+	config_summary
 	hdr "重建容器"
 	docker compose up -d
 	if wait_healthy; then

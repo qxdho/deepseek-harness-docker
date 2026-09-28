@@ -21,6 +21,7 @@ ENV_FILE="$sandbox/.env"
 hdr() { :; }
 ok() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
+info() { :; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # shellcheck source=scripts/env-config.sh
@@ -203,6 +204,19 @@ INTERACTIVE=0 ensure_env DSH_AUTH_TOTP "两步验证" "optional" 0 env_validate_
 printf 'DSH_AUTH_TOTP=required\n' >"$ENV_FILE"
 INTERACTIVE=0 ensure_env DSH_AUTH_TOTP "两步验证" "optional" 0 env_validate_totp >/dev/null
 [ "$(get_env DSH_AUTH_TOTP)" = "required" ] && pass "合法值保留" || fail "合法值被改动"
+
+echo "== 20. 生效配置汇总 =="
+# 静默跳过会让用户不知道最终跑的是什么，所以每项都要列出来并标注默认/已改
+printf 'DSH_HTTP_PORT=9090\nDSH_WORKSPACE_HOST=/root/my-ws\nDSH_AUTH_PASSWORD=SuperSecret!12345\n' >"$ENV_FILE"
+out="$(config_summary 2>&1)"
+case "$out" in *"DSH_HTTP_PORT=9090 （已改）"*) pass "改过的项标为「已改」" ;; *) fail "未标注已改：$out" ;; esac
+case "$out" in *"DSH_HOME_HOST=/dsh （默认）"*) pass "默认值也列出来并标注" ;; *) fail "未列出默认值" ;; esac
+case "$out" in *"DSH_WORKSPACE_HOST=/root/my-ws"*) pass "列出了工作区路径" ;; *) fail "未列出工作区" ;; esac
+case "$out" in
+*SuperSecret*) fail "密码被回显到汇总里" ;;
+*) pass "密码未回显" ;;
+esac
+case "$out" in *"DSH_AUTH_PASSWORD=已设置"*) pass "密码只报已设置" ;; *) fail "密码状态未显示" ;; esac
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

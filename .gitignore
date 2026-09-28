@@ -14,3 +14,4 @@ admin/.admin-test.*
 .gopath/
 .gotmp/
 .gotool/
+.tmptest-watch.sh

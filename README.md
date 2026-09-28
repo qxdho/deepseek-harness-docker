@@ -195,14 +195,25 @@ DSH_WORKSPACE_CONTAINER=/workspace    # 容器内工作区路径
 
 ### 从旧版本升级
 
-旧版本将数据存放于命名卷 `dsh-home`，现改为 bind 挂载。升级后若表现为全新安装，执行：
+旧版本将数据存放于命名卷 `dsh-home`，现改为 bind 挂载。该迁移已内置，升级流程只需：
+
+```bash
+git pull --ff-only      # 取到新版脚本
+docker rm -f dsh        # 旧容器名，视旧版本而定；也可先 docker ps -a 确认
+./install.sh            # 检测到旧卷且宿主目录为空时，先自动迁移再启动
+```
+
+自动迁移只在「存在旧命名卷」且「`DSH_HOME_HOST` 为空目录」时执行：源卷以只读方式挂载，
+复制完成后**不删除原卷**，因此随时可以回退。仍有容器挂着旧卷时，只停止名称或镜像属于本项目的
+容器；若占用者是其他容器，则跳过迁移并提示。
+
+其他情况可手工执行：
 
 ```bash
 ./dshm service migrate-home
 ```
 
-该命令将旧卷内容复制到 `DSH_HOME_HOST`（源卷以只读方式挂载，不修改原数据），
-确认无误后按输出提示删除旧卷。
+目标目录非空时该命令会拒绝执行，以免覆盖已有数据。
 
 ## 目录属主与权限
 
@@ -263,7 +274,12 @@ docker image prune -a && docker builder prune
 
 **密码正确但反复跳回登录页**：`DSH_COOKIE_SECURE=1` 却在使用 HTTP，改回 `0`。
 
-**从旧版本升级**：容器名已由 `dsh` 改为 `qxdho-dsh`，先删除旧容器：`docker rm -f dsh`。
+**从旧版本升级**：容器名已由 `dsh` 改为 `qxdho-dsh`，先删除旧容器（`docker rm -f dsh`）。
+旧版数据在命名卷 `dsh-home` 中，`./install.sh` 与 `./dshm service up` 会在检测到旧卷且宿主
+目录为空时自动迁移；若被跳过，执行 `./dshm service migrate-home`，详见「从旧版本升级」。
+
+**升级后数据不见了**：宿主目录里已有其他内容，自动迁移因此跳过了。执行
+`./dshm service migrate-home` 查看原因（目标非空会被明确拒绝）。
 
 ## 第三方组件
 

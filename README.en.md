@@ -211,16 +211,28 @@ delete it.
 
 ### Upgrading from an older version
 
-Older versions stored data in the named volume `dsh-home`; the current version uses bind mounts. If
-the service starts up looking like a fresh installation after upgrading, run:
+Older versions stored data in the named volume `dsh-home`; the current version uses bind mounts. That
+migration is built in, so upgrading only takes:
+
+```bash
+git pull --ff-only      # fetch the current scripts
+docker rm -f dsh        # the old container name; check docker ps -a first
+./install.sh            # migrates automatically when needed, then starts
+```
+
+The automatic migration runs only when a legacy volume exists **and** `DSH_HOME_HOST` is an empty
+directory: the source volume is mounted read-only, the old volume is **not** deleted afterwards, so
+the change stays reversible. If a container still holds the volume, only containers whose name or
+image belongs to this project are stopped; if another container holds it, migration is skipped with
+a notice.
+
+In any other case, run it explicitly:
 
 ```bash
 ./dshm service migrate-home
 ```
 
-This copies the old volume into `DSH_HOME_HOST` (the source volume is mounted read-only and is not
-modified). Once the result has been verified, delete the old volume as instructed by the command
-output.
+The command refuses to run when the destination is not empty, so existing data is never overwritten.
 
 ## Directory ownership and permissions
 
@@ -288,7 +300,14 @@ docker image prune -a && docker builder prune
 the service is served over plain HTTP; set it to `0`.
 
 **Upgrading from an older version**: the container was renamed from `dsh` to `qxdho-dsh`; remove the
-old container first with `docker rm -f dsh`.
+old container first with `docker rm -f dsh`. Older data lives in the named volume `dsh-home`, and
+`./install.sh` (or `./dshm service up`) migrates it automatically once the legacy volume is found and
+the host directory is still empty. If that was skipped, run `./dshm service migrate-home`; see
+"Upgrading from an older version".
+
+**The data is gone after upgrading**: the host directory already contained something, so the
+automatic migration was skipped. Run `./dshm service migrate-home` to see why (a non-empty
+destination is refused explicitly).
 
 ## Third-party components
 

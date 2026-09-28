@@ -108,6 +108,11 @@ jobs:
           chmod +x scripts/env-config.sh scripts/test-env-config.sh
           ./scripts/test-env-config.sh
 
+      - name: 旧卷迁移逻辑测试
+        run: |
+          chmod +x scripts/migrate-home.sh scripts/test-migrate-home.sh
+          ./scripts/test-migrate-home.sh
+
       - name: 管理面板离线测试
         run: |
           chmod +x admin/test-admin.sh

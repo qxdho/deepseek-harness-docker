@@ -54,6 +54,9 @@ require_running() {
 # .env 的读写统一走 lib，和 install.sh 共用一份实现，避免两套解析器慢慢跑偏。
 # shellcheck source=scripts/env-config.sh
 . ./scripts/env-config.sh
+# 旧命名卷 → 宿主目录的搬迁同样共用一份实现（install.sh 也会 source 它）
+# shellcheck source=scripts/migrate-home.sh
+. ./scripts/migrate-home.sh
 
 # ── 注册为系统命令 ──────────────────────────────────────────────────────────
 warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
@@ -210,6 +213,9 @@ wait_healthy() {
 # dockerd 会把源目录建 root 属主，容器里写不进去，只能靠降级悄悄跑。
 prepare_workspace() {
 	sync_workspace_default
+	# 旧版数据在命名卷里：目标目录还是空的就先自动搬过来，否则新版起来会
+	# 「看起来像全新安装」。只在这一次会真正动手，之后目标非空即跳过。
+	auto_migrate_legacy_home
 	hdr "准备工作区"
 	# shellcheck source=scripts/preflight.sh
 	. ./scripts/preflight.sh
@@ -234,6 +240,7 @@ ${B}服务${RST} — 管理 dsh 容器
   dshm service update [版本] [--build]
                                  升级：默认拉预构建镜像（快）；--build 才本地构建
   dshm service migrate-home      把旧命名卷 dsh-home 的数据迁到宿主数据目录
+                                 （install.sh / service up 已自动执行，通常无需手工调用）
   dshm service url               一次性 launch URL（排障）
   dshm service disk              磁盘占用 / 清理命令
 EOF
@@ -567,33 +574,17 @@ version)
 
 migrate-home | migrate)
 	# 旧版本把 DSH_HOME 放在命名卷 dsh-home 里；现在默认是宿主 bind 挂载。
-	# 升级后用它把老数据搬过来，避免"看起来像全新安装"。
+	# 实现放在 scripts/migrate-home.sh（install.sh 与 dshm service up 会自动调用），
+	# 这里保留显式入口，供自动迁移跳过时手工收尾。
 	require_docker
-	hdr "迁移旧命名卷数据到宿主数据目录"
-	dest="$(dsh_home_host)"
-	vol="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '(^|_)dsh-home$' | head -n1 || true)"
-	if [ -z "$vol" ]; then
-		ok "没找到旧的 dsh-home 命名卷，无需迁移"
-	elif [ -d "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
-		die "$dest 里已有数据，为避免覆盖请先自行确认；手工迁移命令见 README「从命名卷迁移」"
-	else
-		if ! mkdir -p "$dest" 2>/dev/null; then
-			command -v sudo >/dev/null 2>&1 || die "无法创建 $dest"
-			sudo mkdir -p "$dest"
-		fi
-		info "从卷 ${vol} 复制到 ${dest}（只读挂载源卷，不动原数据）…"
-		docker run --rm --user 0:0 \
-			-v "${vol}:/from:ro" -v "${dest}:/to" alpine:3.21 \
-			sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)' || die "迁移失败"
-		cu="$(env_value DSH_UID 1000)"; cg="$(env_value DSH_GID 1000)"
-		if [ "$(id -u)" = "0" ]; then
-			chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
-		elif command -v sudo >/dev/null 2>&1; then
-			sudo chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
-		fi
-		ok "迁移完成：${vol} → ${dest}"
-		info "确认 dsh 正常后，可以删掉旧卷： docker volume rm ${vol}"
-	fi
+	set +e
+	migrate_legacy_home explicit
+	rc=$?
+	set -e
+	case "$rc" in
+	1) ok "没找到旧的 dsh-home 命名卷，无需迁移" ;;
+	2) die "$(env_value DSH_HOME_HOST /dsh) 里已有数据，为避免覆盖请先自行确认；手工迁移命令见 README「从旧版本升级」" ;;
+	esac
 	;;
 
 install-self | link | install-cli)

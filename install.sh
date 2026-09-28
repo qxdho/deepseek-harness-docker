@@ -4,8 +4,8 @@
 #   ./install.sh
 #
 # 步骤：生成 .env（若缺失）→ 逐项检查配置（为空才询问，已有值跳过）→
-#       拉 GHCR 镜像（拉不到就本地构建）→ 准备宿主工作区（属主/可写性预检）
-#       → 启动 → 等待健康 → 打印访问地址。
+#       拉 GHCR 镜像（拉不到就本地构建）→ 旧命名卷数据迁移（仅旧版升级时需要）
+#       → 准备宿主工作区（属主/可写性预检）→ 启动 → 等待健康 → 打印访问地址。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -16,6 +16,7 @@ else
 	B=; DIM=; GRN=; RED=; YEL=; RST=
 fi
 hdr() { printf '\n%s==> %s%s\n' "$B" "$*" "$RST"; }
+info() { printf '    %s\n' "$*"; }
 ok() { printf '    %s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
 die() { printf '\n%s错误：%s%s\n\n' "$RED" "$*" "$RST" >&2; exit 1; }
@@ -29,6 +30,9 @@ docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"
 # （可单测：scripts/test-env-config.sh）
 # shellcheck source=scripts/env-config.sh
 . ./scripts/env-config.sh
+# 旧命名卷 → 宿主目录的自动迁移（与 dshm 共用同一份实现）
+# shellcheck source=scripts/migrate-home.sh
+. ./scripts/migrate-home.sh
 
 # ── 1. 配置项：为空则询问，已有值则跳过 ─────────────────────────────────────
 hdr "检查 .env 配置项"
@@ -53,7 +57,10 @@ else
 	docker compose build
 fi
 
-# ── 3. 准备宿主工作区 ───────────────────────────────────────────────────────
+# ── 3. 旧版命名卷 → 宿主目录（仅第一次升级会真正执行，之后目标非空即跳过）──
+auto_migrate_legacy_home
+
+# ── 4. 准备宿主工作区 ───────────────────────────────────────────────────────
 # 必须在 docker compose up 之前：源目录不存在时是 dockerd（root）替你建的，
 # 容器里的 node(1000) 就写不进去。提前建好，属主就是当前用户。
 hdr "准备工作区"
@@ -64,11 +71,11 @@ if ! check_workspace "$PWD" auto 1; then
 fi
 ok "工作区就绪：${DSH_WORKSPACE_DIR}"
 
-# ── 4. 启动 ─────────────────────────────────────────────────────────────────
+# ── 5. 启动 ─────────────────────────────────────────────────────────────────
 hdr "启动服务"
 docker compose up -d
 
-# ── 5. 等健康 ───────────────────────────────────────────────────────────────
+# ── 6. 等健康 ───────────────────────────────────────────────────────────────
 hdr "等待服务就绪"
 healthy=0
 elapsed=0

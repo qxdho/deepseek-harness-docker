@@ -20,24 +20,31 @@ FAIL=0
 ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
 
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+cleanup() {
+	docker rm -f "$NAME" >/dev/null 2>&1 || true
+	docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
-# 容器内的数据根与 profile（与 docker-compose.yml 的默认值一致）
+# 容器内的数据根。必须与 docker-compose.yml 一致：compose 把宿主目录挂到
+# ${DSH_HOME_CONTAINER:-/dsh}，并注入同名的 DSH_HOME / HOME。裸 docker run 时
+# 镜像的 ENV 是 /home/node/.dsh，与之不符 —— 所以这里显式模拟 compose：挂一个
+# 卷到 /dsh，并把 DSH_HOME / HOME 都指过去。否则测的就不是生产形态。
 CONTAINER_HOME="${CONTAINER_HOME:-/dsh}"
 PROFILE="$CONTAINER_HOME/profiles/web"
+VOLUME="dsh-plugin-smoke-$$"
 
 start_container() {
 	cleanup
 	docker run -d --name "$NAME" \
+		-v "$VOLUME:$CONTAINER_HOME" \
+		-e DSH_HOME="$CONTAINER_HOME" \
+		-e HOME="$CONTAINER_HOME" \
 		-e DSH_AUTH_USER=admin \
 		-e DSH_AUTH_PASSWORD='SmokePass-1234!' \
-		"$@" \
 		"$IMAGE" >/dev/null
-	# 等 healthcheck 之外的东西就绪：只要 entrypoint 跑过清理逻辑即可
-	local i
+	local i st
 	for i in $(seq 1 72); do
-		local st
 		st="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
 		[ "$st" = "healthy" ] && return 0
 		sleep 5
@@ -92,7 +99,8 @@ fi
 echo "== B. 真的装一次插件（需要网络；无网络时跳过）=="
 # 用已经装过的包做「幂等 add」：不需要新下载，但仍会让 pnpm 走一遍
 # store 兼容性检查 —— 正是这一步在旧镜像上抛 ERR_PNPM_UNEXPECTED_STORE。
-if docker exec "$NAME" sh -c "cd '$PROFILE' && pnpm config get registry" >/dev/null 2>&1; then
+# pnpm 是全局装的，直接用即可（dsh 内部也是调它）。
+if docker exec "$NAME" sh -c 'command -v pnpm >/dev/null 2>&1'; then
 	set +e
 	out="$(docker exec -w "$PROFILE" "$NAME" pnpm add dsh-auth-gate@0.15.0 2>&1)"
 	rc=$?
@@ -102,13 +110,20 @@ if docker exec "$NAME" sh -c "cd '$PROFILE' && pnpm config get registry" >/dev/n
 		printf '%s\n' "$out" | tail -5 | sed 's/^/      /'
 	elif [ "$rc" -eq 0 ]; then
 		ok "pnpm add 成功（无 store 失配）"
+		# 装完后记录应当指向数据目录（即 .env 定义的 DSH_HOME）
+		rec="$(docker exec "$NAME" sh -c "sed -n 's/.*\"storeDir\": *\"\\([^\"]*\\)\".*/\\1/p' '$PROFILE/node_modules/.modules.yaml' 2>/dev/null | head -1")"
+		case "$rec" in
+		"$CONTAINER_HOME"/*) ok "store 记录落在数据目录内（$rec）" ;;
+		"") bad "装完后没有 store 记录" ;;
+		*) bad "store 记录不在数据目录内：$rec" ;;
+		esac
 	else
 		# 网络不可用等外部原因不算失败，但要说明
 		printf '  \033[33mSKIP\033[0m pnpm add 未成功但非 store 失配（rc=%s，可能是无网络）\n' "$rc"
 		printf '%s\n' "$out" | tail -3 | sed 's/^/      /'
 	fi
 else
-	echo "  SKIP 容器内无法运行 pnpm"
+	echo "  SKIP 容器内没有 pnpm"
 fi
 
 echo

@@ -61,26 +61,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - id: meta-admin
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-admin
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=sha,format=short
-
-      - name: 构建并推送管理面板镜像
-        uses: docker/build-push-action@v6
-        with:
-          context: ./admin
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-admin.outputs.tags }}
-          labels: ${{ steps.meta-admin.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   # 单架构构建 + 真实起容器冒烟（PR 也跑）
   smoke:
     runs-on: ubuntu-latest

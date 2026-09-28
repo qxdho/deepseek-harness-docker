@@ -86,7 +86,7 @@ cd deepseek-harness-docker
 ./dshm auth totp enable    # 开启两步验证
 
 # 管理面板 / 自身
-./dshm admin install       # 安装 Docker 管理面板（宿主 / 容器二选一）
+./dshm admin install       # 安装 Docker 管理面板（宿主机进程）
 ./dshm self install        # 把 dshm 注册为系统命令（之后任意目录直接用 dshm）
 ```
 
@@ -94,23 +94,21 @@ cd deepseek-harness-docker
 
 ## 管理面板
 
-`./dshm admin install` 装一个独立的 Docker 管理面板：容器状态、启动/停止/重启、日志、
-磁盘占用与一键清理。安装时可选择形态：
+`./dshm admin install` 装一个 Docker 管理面板：容器状态、启动/停止/重启、日志、
+磁盘占用、一键清理，以及一个跑 `dshm` 命令的命令台。
 
-| | 宿主（推荐） | 容器 |
-|---|---|---|
-| 权限边界 | **只有宿主进程持有 docker.sock，任何容器都碰不到** | 只有 `qxdho-admin` 容器挂 socket，dsh 容器不挂 |
-| 依赖 | 单个静态二进制；有 systemd 用 systemd，没有就 pidfile | 免 root，随 compose 管理 |
-| 适用 | 自己的 VPS / 有 root 或 sudo | 群晖、macOS、无 root、面板托管的环境 |
+面板是**宿主机上的一个进程，不额外起容器**，所以 dsh 容器始终碰不到 `docker.sock`：
+
+- 有 root / 可 sudo：装到 `/usr/local/bin` + `/etc/dsh-admin`，用 systemd 常驻、开机自启；
+- **没有 root 也能用**：装到 `~/.local/bin` + `~/.config/dsh-admin`，用 pidfile 后台运行
+  （不会随开机自启，需要就自己加 crontab）。
 
 ```bash
-./dshm admin install            # 交互选择宿主 / 容器
-./dshm admin install --host     # 直接指定
-./dshm admin install --container
+./dshm admin install            # 安装（不需要 sudo 也能装）
 ./dshm admin url                # 地址（默认 http://127.0.0.1:3090/）
 ./dshm admin password           # 改面板密码
 ./dshm admin status | logs
-./dshm admin uninstall --host   # 卸载
+./dshm admin uninstall          # 停止并移除
 ```
 
 远程访问用 SSH 隧道：`ssh -L 3090:127.0.0.1:3090 user@服务器`，或放到 HTTPS 反代后面。
@@ -119,7 +117,7 @@ cd deepseek-harness-docker
 > 面板只调固定几个 Docker Engine 接口（不做任意透传），独立密码 + 会话 cookie（`HttpOnly`、
 > `SameSite=Strict`）、写操作要求自定义头防 CSRF。
 
-宿主二进制从 GitHub Releases 下载，也可本机 `go build`（`admin/` 目录，仅标准库、零运行时依赖）。
+二进制从 GitHub Releases 下载，也可本机 `go build`（`admin/` 目录，仅标准库、零运行时依赖）。
 
 ### 面板里能做什么
 
@@ -148,9 +146,9 @@ cd deepseek-harness-docker
 |---|---|---|
 | dsh `/home/node/.dsh` | 命名卷 `dsh-home` | `/var/lib/docker/volumes/<项目名>_dsh-home/_data` |
 | dsh `/workspace` | bind | `<项目目录>/workspace`（可用 `DSH_WORKSPACE` 改） |
-| 面板 `/var/run/docker.sock` | bind | 宿主同路径 |
-| 面板 `/config/config.json` | bind(只读) | `<项目目录>/admin/config.json` |
-| 面板 `/project` | bind | `<项目目录>`（命令台要用 `dshm`；仅面板容器可见） |
+
+面板跑在宿主机上，不占容器的挂载；它的配置在 `/etc/dsh-admin/config.json`
+（无 root 时 `~/.config/dsh-admin/config.json`），其中 `allow_exec` 控制命令台开关。
 
 ## 界面重启
 

@@ -1,38 +1,33 @@
 #!/usr/bin/env bash
 # DSH Docker 管理面板的安装/管理逻辑，由 dshm source。
 #
-#   ./dshm admin install [--host|--container]
-#   ./dshm admin uninstall [--host|--container|--all]
-#   ./dshm admin url | password | status | logs | help
+#   ./dshm admin install
+#   ./dshm admin url | password | status | logs
+#   ./dshm admin uninstall
 #
-# 两种形态：
-#   host      —— 静态二进制 + systemd(或 pidfile)。dsh 容器摸不到 docker.sock，
-#                安全性最好；需要 root/sudo 才能装到 /usr/local/bin 并常驻。
-#   container —— compose profile "admin" 里的独立小容器。免 root，跟 dsh 一起管理，
-#                dsh 容器同样不挂 socket（只有这个面板容器挂）。
+# 面板是一个**静态二进制，直接跑在宿主机上**（不额外起容器）：
+#   - 有 root/可 sudo：装到 /usr/local/bin + /etc/dsh-admin，用 systemd 常驻、开机自启；
+#   - 没有 root：装到 ~/.local/bin + ~/.config/dsh-admin，用 pidfile 后台运行（不随开机自启）。
+#
+# 这样 dsh 容器始终碰不到 docker.sock，面板是唯一持有它的组件。
 #
 # 调用方（dshm）需已提供：hdr/info/ok/warn/die、read_secret/SECRET、
-# env_value/set_env、require_docker/require_env、is_root/cli_dir、
-# PROJECT_DIR/ENV_FILE/CONTAINER。
+# env_value、is_root、PROJECT_DIR/CONTAINER。
 
-ADMIN_CONTAINER=qxdho-admin
 ADMIN_SERVICE=dsh-admin
-ADMIN_DEFAULT_IMAGE=ghcr.io/qxdho/deepseek-harness-docker-admin:latest
-ADMIN_CONFIG_REL=admin/config.json
 
 admin_help() {
 	cat <<EOF
 
-${B}dshm admin${RST} — 安装/管理 DSH Docker 管理面板
+${B}dshm admin${RST} — 安装/管理 DSH Docker 管理面板（宿主进程，不额外起容器）
 
-  ${B}./dshm admin install${RST}              安装（交互选择宿主 or 容器）
-  ${B}./dshm admin install --host${RST}       安装到宿主机（完整功能，安全性最好）
-  ${B}./dshm admin install --container${RST}  安装到容器（免 root，随 compose 管理）
-  ${B}./dshm admin url${RST}                  打印面板地址
-  ${B}./dshm admin password${RST}             修改面板密码
-  ${B}./dshm admin status${RST}               面板运行状态
-  ${B}./dshm admin logs${RST}                 面板日志
-  ${B}./dshm admin uninstall${RST} [--host|--container|--all]
+  ${B}./dshm admin install${RST}     安装（有 root 用 /usr/local/bin + systemd；
+                             没有 root 就装 ~/.local/bin + pidfile，不需要 sudo）
+  ${B}./dshm admin url${RST}         打印面板地址
+  ${B}./dshm admin password${RST}    修改面板密码
+  ${B}./dshm admin status${RST}      面板运行状态
+  ${B}./dshm admin logs${RST}        面板日志
+  ${B}./dshm admin uninstall${RST}   停止并移除面板
 
 ${DIM}面板只调固定几个 Docker Engine 接口，独立密码 + 会话 cookie，默认只监听 127.0.0.1。${RST}
 ${DIM}注意：管理面板持有 docker.sock，等于宿主 root，请勿对公网直接暴露。${RST}
@@ -40,7 +35,7 @@ ${DIM}注意：管理面板持有 docker.sock，等于宿主 root，请勿对公
 EOF
 }
 
-# ── 找到可用的 dsh-admin 二进制 / 镜像 ───────────────────────────────────────
+# ── 找到可用的 dsh-admin 二进制 ─────────────────────────────────────────────
 
 admin_arch() {
 	case "$(uname -m)" in
@@ -82,24 +77,10 @@ admin_locate_bin() {
 	return 1
 }
 
-# ── 生成配置 ────────────────────────────────────────────────────────────────
+# ── 口令与会话密钥（都交给面板二进制算，dshm 只负责拼配置）─────────────────
 
-# ADMIN_RUN_MODE=bin|docker；对应 ADMIN_BIN_PATH / ADMIN_IMAGE
-admin_hash_password() {
-	if [ "$ADMIN_RUN_MODE" = "bin" ]; then
-		"$ADMIN_BIN_PATH" -hash
-	else
-		docker run --rm -i --entrypoint /dsh-admin "$ADMIN_IMAGE" -hash
-	fi
-}
-
-admin_gen_secret() {
-	if [ "$ADMIN_RUN_MODE" = "bin" ]; then
-		"$ADMIN_BIN_PATH" -gen-secret
-	else
-		docker run --rm --entrypoint /dsh-admin "$ADMIN_IMAGE" -gen-secret
-	fi
-}
+admin_hash_password() { "$ADMIN_BIN_PATH" -hash; }
+admin_gen_secret() { "$ADMIN_BIN_PATH" -gen-secret; }
 
 admin_ask_password() {
 	local pw=""
@@ -131,7 +112,7 @@ admin_write_config() {
 	local hash secret tmp
 	hash="$(printf '%s' "$SECRET" | admin_hash_password)" || die "计算口令哈希失败"
 	secret="$(admin_gen_secret)" || die "生成会话密钥失败"
-	[ -n "$hash" ] && [ -n "$secret" ] || die "生成配置失败（面板二进制/镜像不可用）"
+	[ -n "$hash" ] && [ -n "$secret" ] || die "生成配置失败（面板二进制不可用）"
 	mkdir -p "$(dirname "$path")"
 	tmp="$(mktemp)"
 	cat >"$tmp" <<EOF
@@ -151,16 +132,16 @@ EOF
 	chmod 600 "$path"
 }
 
-# 当前 compose 项目名。容器版命令台必须显式带上它：面板把项目目录挂到
-# /project，compose 会按挂载目录的 basename 推断成 "project"，从而管到别的栈上。
+# 当前 compose 项目名。带上它，命令台里的 `dshm service …` 才会作用到同一个
+# compose 项目（项目名默认取目录 basename，目录改名/软链后会对不上）。
 admin_detect_compose_project() {
 	command -v docker >/dev/null 2>&1 || return 0
 	docker inspect "$CONTAINER" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true
 }
 
-# ── host 形态 ───────────────────────────────────────────────────────────────
+# ── 安装位置：有 root 走系统目录，没有就走用户目录 ─────────────────────────
 
-admin_host_bindir() {
+admin_bindir() {
 	if [ -w /usr/local/bin ] 2>/dev/null || is_root; then
 		printf '%s' /usr/local/bin
 	elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
@@ -170,45 +151,73 @@ admin_host_bindir() {
 	fi
 }
 
-admin_host_confdir() {
-	case "$(admin_host_bindir)" in
+admin_confdir() {
+	case "$(admin_bindir)" in
 	/usr/local/bin) printf '%s' /etc/dsh-admin ;;
 	*) printf '%s' "${HOME}/.config/dsh-admin" ;;
 	esac
 }
 
-admin_host_install() {
+admin_has_systemd() {
+	command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+admin_can_systemd() {
+	admin_has_systemd && { is_root || { command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; }; }
+}
+
+# ── 安装 / 卸载 ─────────────────────────────────────────────────────────────
+
+admin_install() {
 	local src bin_dir conf_dir bin cfg port bind unit
 	src="$(admin_locate_bin)" || die "找不到 dsh-admin 二进制（可用 DSH_ADMIN_BIN 指定，或安装 go / 放开网络后重试）"
-	bin_dir="$(admin_host_bindir)"
-	conf_dir="$(admin_host_confdir)"
+	bin_dir="$(admin_bindir)"
+	conf_dir="$(admin_confdir)"
 	bin="$bin_dir/dsh-admin"
 	cfg="$conf_dir/config.json"
 	port="$(env_value DSH_ADMIN_PORT 3090)"
 	bind="$(env_value DSH_ADMIN_BIND 127.0.0.1)"
 
-	ADMIN_RUN_MODE=bin
 	ADMIN_BIN_PATH="$src"
 	admin_ask_password
 
 	hdr "安装面板二进制"
-	mkdir -p "$bin_dir" 2>/dev/null || true
 	if [ -w "$bin_dir" ] || is_root; then
+		mkdir -p "$bin_dir"
 		install -m 0755 "$src" "$bin"
-	else
-		command -v sudo >/dev/null 2>&1 || die "无法写入 $bin_dir"
+	elif command -v sudo >/dev/null 2>&1; then
 		sudo mkdir -p "$bin_dir" "$conf_dir"
 		sudo install -m 0755 "$src" "$bin"
+	else
+		mkdir -p "$bin_dir" 2>/dev/null || die "无法写入 $bin_dir"
+		install -m 0755 "$src" "$bin" 2>/dev/null || die "无法写入 $bin_dir"
 	fi
 	ok "已安装：$bin"
+	# 后续要调面板二进制算哈希；若装到系统目录但当前非 root，用源二进制即可
+	ADMIN_BIN_PATH="$src"
 
 	hdr "写入面板配置"
-	admin_write_config "$cfg" "${bind}:${port}" /var/run/docker.sock "$CONTAINER" "$PROJECT_DIR" "$(admin_detect_compose_project)"
+	# 目录可能还不存在，先建（免 root 时就是 ~/.config/dsh-admin）
+	mkdir -p "$conf_dir" 2>/dev/null || true
+	if [ -w "$conf_dir" ] || is_root; then
+		admin_write_config "$cfg" "${bind}:${port}" /var/run/docker.sock "$CONTAINER" \
+			"$PROJECT_DIR" "$(admin_detect_compose_project)"
+	elif command -v sudo >/dev/null 2>&1; then
+		# 目录归 root 时：先在当前用户可写处生成，再 sudo 放进去，避免权限纠缠
+		local staging
+		staging="$(mktemp)"
+		admin_write_config "$staging" "${bind}:${port}" /var/run/docker.sock "$CONTAINER" \
+			"$PROJECT_DIR" "$(admin_detect_compose_project)"
+		sudo mkdir -p "$conf_dir"
+		sudo install -m 0600 "$staging" "$cfg"
+		rm -f "$staging"
+	else
+		die "无法写入 $conf_dir"
+	fi
 	ok "配置：$cfg（权限 600）"
 
 	hdr "启动面板"
-	if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] &&
-		{ is_root || sudo -n true 2>/dev/null; }; then
+	if admin_can_systemd; then
 		unit="/etc/systemd/system/dsh-admin.service"
 		tmp="$(mktemp)"
 		cat >"$tmp" <<EOF
@@ -236,9 +245,15 @@ EOF
 		rm -f "$tmp"
 		ok "已注册 systemd 服务 dsh-admin（开机自启）"
 	else
-		setsid "$bin" -config "$cfg" >>"$conf_dir/dsh-admin.log" 2>&1 &
+		# 无 systemd（或没有权限）：用 pidfile 后台跑。免 root 场景走的就是这条。
+		if [ -f "$conf_dir/dsh-admin.pid" ] && kill -0 "$(cat "$conf_dir/dsh-admin.pid")" 2>/dev/null; then
+			kill "$(cat "$conf_dir/dsh-admin.pid")" 2>/dev/null || true
+			sleep 0.3
+		fi
+		setsid "$bin_dir/dsh-admin" -config "$cfg" >>"$conf_dir/dsh-admin.log" 2>&1 &
 		echo $! >"$conf_dir/dsh-admin.pid"
-		ok "已在后台启动（无 systemd，pidfile：$conf_dir/dsh-admin.pid）"
+		ok "已在后台启动（无 systemd；pidfile：$conf_dir/dsh-admin.pid）"
+		warn "这种方式不会随开机自启；需要自启请加进 crontab 或改用有 root 的 systemd 部署"
 	fi
 	admin_print_url "$bind" "$port"
 }
@@ -254,11 +269,11 @@ admin_print_url() {
 	fi
 }
 
-admin_host_uninstall() {
+admin_uninstall() {
 	local bin_dir conf_dir pid
-	bin_dir="$(admin_host_bindir)"
-	conf_dir="$(admin_host_confdir)"
-	if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+	bin_dir="$(admin_bindir)"
+	conf_dir="$(admin_confdir)"
+	if admin_has_systemd; then
 		if is_root; then
 			systemctl disable --now dsh-admin 2>/dev/null || true
 			rm -f /etc/systemd/system/dsh-admin.service
@@ -276,74 +291,17 @@ admin_host_uninstall() {
 	fi
 	if [ -w "$bin_dir" ] || is_root; then
 		rm -f "$bin_dir/dsh-admin"
-	else
+	elif command -v sudo >/dev/null 2>&1; then
 		sudo rm -f "$bin_dir/dsh-admin" 2>/dev/null || true
 	fi
 	ok "已停止并移除面板二进制（配置保留在 $conf_dir，不需要可自行删除）"
-}
-
-# ── container 形态 ──────────────────────────────────────────────────────────
-
-admin_container_image() { env_value DSH_ADMIN_IMAGE "$ADMIN_DEFAULT_IMAGE"; }
-
-admin_container_install() {
-	local port bind image
-	require_docker; require_env
-	port="$(env_value DSH_ADMIN_PORT 3090)"
-	bind="$(env_value DSH_ADMIN_BIND 127.0.0.1)"
-	image="$(admin_container_image)"
-
-	hdr "准备面板镜像"
-	if ! docker image inspect "$image" >/dev/null 2>&1; then
-		if [ -d "$PROJECT_DIR/admin" ] && docker compose build "$ADMIN_SERVICE"; then
-			ok "已本地构建 $ADMIN_SERVICE"
-		elif docker compose pull "$ADMIN_SERVICE"; then
-			ok "已拉取镜像"
-		else
-			die "既无法本地构建也拉不到面板镜像（检查 ./admin 或网络）"
-		fi
-	fi
-
-	ADMIN_RUN_MODE=docker
-	ADMIN_IMAGE="$image"
-	admin_ask_password
-
-	hdr "写入面板配置"
-	# 容器内监听 0.0.0.0，宿主侧由 ports 绑定控制
-	admin_write_config "$PROJECT_DIR/$ADMIN_CONFIG_REL" "0.0.0.0:3090" /var/run/docker.sock "$CONTAINER" /project "$(admin_detect_compose_project)"
-	ok "配置：$ADMIN_CONFIG_REL（权限 600）"
-
-	hdr "启用 compose profile"
-	set_env COMPOSE_PROFILES admin
-	set_env DSH_ADMIN_PORT "$port"
-	set_env DSH_ADMIN_BIND "$bind"
-	ok "已写入 .env：COMPOSE_PROFILES=admin"
-
-	hdr "启动面板容器"
-	docker compose up -d "$ADMIN_SERVICE"
-	admin_print_url "$bind" "$port"
-}
-
-admin_container_uninstall() {
-	require_docker
-	docker compose rm -sf "$ADMIN_SERVICE" >/dev/null 2>&1 || true
-	rm -f "$PROJECT_DIR/$ADMIN_CONFIG_REL"
-	# 关掉 profile（保留端口设置）
-	if [ -f "$ENV_FILE" ]; then
-		grep -q '^COMPOSE_PROFILES=admin' "$ENV_FILE" && set_env COMPOSE_PROFILES ""
-	fi
-	ok "已移除面板容器与配置"
 }
 
 # ── 其它子命令 ──────────────────────────────────────────────────────────────
 
 admin_url() {
 	local host_cfg listen
-	host_cfg="$(admin_host_confdir)/config.json"
-	if [ -f "$PROJECT_DIR/$ADMIN_CONFIG_REL" ] || grep -q '^COMPOSE_PROFILES=admin' "$ENV_FILE" 2>/dev/null; then
-		admin_print_url "$(env_value DSH_ADMIN_BIND 127.0.0.1)" "$(env_value DSH_ADMIN_PORT 3090)"
-		return 0
-	fi
+	host_cfg="$(admin_confdir)/config.json"
 	if [ -f "$host_cfg" ]; then
 		listen="$(sed -n 's/.*"listen"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$host_cfg" | head -1)"
 		if [ -n "$listen" ]; then
@@ -355,62 +313,45 @@ admin_url() {
 }
 
 admin_status() {
-	if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files dsh-admin.service >/dev/null 2>&1; then
+	local conf pid
+	if admin_has_systemd && systemctl list-unit-files dsh-admin.service >/dev/null 2>&1; then
 		systemctl --no-pager status dsh-admin 2>&1 | head -12 || true
-	elif [ -f "$PROJECT_DIR/$ADMIN_CONFIG_REL" ]; then
-		require_docker
-		docker ps -a --filter "name=$ADMIN_CONTAINER" --format '{{.Names}}  {{.Status}}'
+		return
+	fi
+	conf="$(admin_confdir)/dsh-admin.pid"
+	if [ -f "$conf" ] && kill -0 "$(cat "$conf")" 2>/dev/null; then
+		pid="$(cat "$conf")"
+		info "运行中（pid ${pid}）"
 	else
-		local conf pid
-		conf="$(admin_host_confdir)/dsh-admin.pid"
-		[ -f "$conf" ] && info "pid $(cat "$conf")（运行中：$(kill -0 "$(cat "$conf")" 2>/dev/null && echo 是 || echo 否)）" || info "未发现运行中的面板"
+		info "未在运行"
 	fi
 }
 
 admin_logs() {
-	if [ -f "$PROJECT_DIR/$ADMIN_CONFIG_REL" ]; then
-		require_docker
-		docker logs --tail 100 "$ADMIN_CONTAINER" 2>&1 || true
-	else
-		tail -n 100 "$(admin_host_confdir)/dsh-admin.log" 2>/dev/null || info "（暂无日志）"
-	fi
+	tail -n 100 "$(admin_confdir)/dsh-admin.log" 2>/dev/null || info "（暂无日志）"
 }
 
 admin_password() {
+	ADMIN_BIN_PATH="$(admin_locate_bin)" || die "找不到 dsh-admin 二进制"
 	admin_ask_password
-	if [ -f "$PROJECT_DIR/$ADMIN_CONFIG_REL" ]; then
-		ADMIN_RUN_MODE=docker
-		ADMIN_IMAGE="$(admin_container_image)"
-		admin_write_config "$PROJECT_DIR/$ADMIN_CONFIG_REL" "0.0.0.0:3090" /var/run/docker.sock "$CONTAINER" /project "$(admin_detect_compose_project)"
-		docker compose up -d --force-recreate "$ADMIN_SERVICE"
-		ok "面板密码已更新，容器已重建"
+	admin_write_config "$(admin_confdir)/config.json" \
+		"$(env_value DSH_ADMIN_BIND 127.0.0.1):$(env_value DSH_ADMIN_PORT 3090)" \
+		/var/run/docker.sock "$CONTAINER" "$PROJECT_DIR" "$(admin_detect_compose_project)"
+	if admin_has_systemd; then
+		systemctl restart dsh-admin 2>/dev/null || sudo systemctl restart dsh-admin 2>/dev/null || true
 	else
-		admin_write_config "$(admin_host_confdir)/config.json" \
-			"$(env_value DSH_ADMIN_BIND 127.0.0.1):$(env_value DSH_ADMIN_PORT 3090)" \
-			/var/run/docker.sock "$CONTAINER" "$PROJECT_DIR" "$(admin_detect_compose_project)"
-		if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-			systemctl restart dsh-admin 2>/dev/null || sudo systemctl restart dsh-admin 2>/dev/null || true
+		local conf pid
+		conf="$(admin_confdir)"
+		if [ -f "$conf/dsh-admin.pid" ]; then
+			kill "$(cat "$conf/dsh-admin.pid")" 2>/dev/null || true
+			setsid "$(admin_bindir)/dsh-admin" -config "$conf/config.json" >>"$conf/dsh-admin.log" 2>&1 &
+			echo $! >"$conf/dsh-admin.pid"
 		fi
-		ok "面板密码已更新（已重写配置；非 systemd 部署请手动重启面板进程）"
 	fi
+	ok "面板密码已更新"
 }
 
-# ── 交互入口 ────────────────────────────────────────────────────────────────
-
-admin_choose_mode() {
-	if [ ! -t 0 ]; then
-		printf '%s' container
-		return 0
-	fi
-	local ans
-	printf '    安装到哪？  %s1%s 宿主机（完整功能，推荐）   %s2%s 容器（免 root）\n' "$B" "$RST" "$B" "$RST"
-	printf '    选择 [1/2]（默认 1）：'
-	IFS= read -r ans || ans=""
-	case "$ans" in
-	2 | c | container) printf '%s' container ;;
-	*) printf '%s' host ;;
-	esac
-}
+# ── 入口 ────────────────────────────────────────────────────────────────────
 
 # dshm admin <sub> [args]
 admin_dispatch() {
@@ -419,26 +360,14 @@ admin_dispatch() {
 	case "$sub" in
 	install)
 		case "${1:-}" in
-		--host | -H) admin_host_install ;;
-		--container | -c) admin_container_install ;;
-		"") case "$(admin_choose_mode)" in
-			host) admin_host_install ;;
-			container) admin_container_install ;;
-			esac ;;
-		*) die "未知参数：$1（用 --host 或 --container）" ;;
-		esac
-		;;
-	uninstall | remove)
-		case "${1:-}" in
-		--host) admin_host_uninstall ;;
-		--container) admin_container_uninstall ;;
-		--all | "")
-			admin_host_uninstall || true
-			admin_container_uninstall || true
+		"" | --host | -H) admin_install ;;
+		--container | -c)
+			die "已移除容器版面板：宿主模式在没有 root 时会装到 ~/.local/bin 并用 pidfile 运行，不需要 sudo"
 			;;
-		*) die "未知参数：$1" ;;
+		*) die "未知参数：$1（本命令不再接受参数）" ;;
 		esac
 		;;
+	uninstall | remove) admin_uninstall ;;
 	url | address) admin_url ;;
 	password | pw) admin_password ;;
 	status) admin_status ;;

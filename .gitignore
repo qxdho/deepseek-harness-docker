@@ -4,7 +4,6 @@ data/
 *.log
 node_modules/
 # 管理面板配置（含口令哈希与会话密钥）与本地构建产物
-admin/config.json
 admin/dsh-admin
 admin/.admin-test.*
 .build/

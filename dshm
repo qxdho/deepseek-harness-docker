@@ -285,7 +285,7 @@ EOF
 	cat <<EOF
 
 ${B}面板${RST}
-  dshm admin install            安装管理面板（宿主 / 容器二选一）
+  dshm admin install            安装管理面板（宿主机进程）
   dshm admin url|password|status|logs|uninstall
   dshm admin help               面板详细说明
 EOF

@@ -31,7 +31,7 @@ docker run -d --name "$NAME" \
 	-p "127.0.0.1:${PORT}:3080" \
 	-e DSH_AUTH_USER="$LOGIN_USER" \
 	-e DSH_AUTH_PASSWORD="$LOGIN_PASS" \
-	-e DSH_TOTP=off \
+	-e DSH_AUTH_TOTP=off \
 	"$IMAGE" >/dev/null
 
 echo "== 等健康 =="

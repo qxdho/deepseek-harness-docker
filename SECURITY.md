@@ -20,7 +20,7 @@ is effectively a remote control plane for the container it runs in. Treat this i
   attacker. Upstream `SAFETY.md` says sandboxing/prompts reduce risk but do not guarantee isolation.
 - **Provider keys.** They live in `$DSH_HOME/.credentials.yaml`; anyone who can read that volume or run
   commands as the container user can read them. Use narrowly scoped, revocable keys.
-- **`DEV_TOOLS=full` / `danger-full-access`.** Both widen the blast radius; enable only when intended.
+- **`DSH_DEV_TOOLS=full` / `danger-full-access`.** Both widen the blast radius; enable only when intended.
 
 ## Recommended deployment
 

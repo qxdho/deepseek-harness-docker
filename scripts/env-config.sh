@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# .env 配置项的读写，以及「为空则询问、已有值则跳过」的交互逻辑。
+# .env 配置项的读写、命名迁移，以及「有默认值就直接采用」的配置逻辑。
+#
+# 键名约定（改名前请先读这里）：
+#   * 本项目自己的配置一律 DSH_ 前缀，构建期参数也一样；
+#   * 宿主侧路径用 _HOST 结尾，容器侧路径用 _CONTAINER 结尾；
+#   * 上游 dsh 自己的变量（DSH_HOME、DSH_HOST、DSH_PORT、DSH_PERMISSION_MODE、
+#     DSH_TELEMETRY_DISABLED 等）由镜像和 compose 注入，不写进 .env。
 #
 # 被 install.sh / dshm 复用；可单独测试：scripts/test-env-config.sh
 #
@@ -10,6 +16,63 @@
 if [ -z "${INTERACTIVE:-}" ]; then
 	if [ -t 0 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
 fi
+
+# ── 键名迁移 ────────────────────────────────────────────────────────────────
+# 新名=旧名。历史上这几个键命名不统一（宿主/容器不分、缺前缀），改名后老 .env
+# 里的旧键要能继续用：读的时候回退到旧键，启动时再就地改名。
+LEGACY_KEYS="DSH_HTTP_PORT=PROXY_PORT
+DSH_WORKSPACE_HOST=DSH_WORKSPACE
+DSH_HOME_CONTAINER=DSH_HOME
+DSH_AUTH_TOTP=DSH_TOTP
+DSH_AUTH_GATE_VERSION=AUTH_GATE_VERSION
+DSH_DEV_TOOLS=DEV_TOOLS"
+
+# legacy_key_of 新键名 → 旧键名（没有则输出空）
+legacy_key_of() {
+	local pair
+	for pair in $LEGACY_KEYS; do
+		case "$pair" in "$1="*) printf '%s' "${pair#*=}"; return 0 ;; esac
+	done
+	return 0
+}
+
+# env_value_new 新键名 [默认值] —— 新键优先，其次旧键，最后默认值。
+# 给那些「不启动容器、只读配置」的命令用，保证迁移还没跑时也能读到用户的值。
+env_value_new() {
+	local v old
+	v="$(get_env "$1")"
+	if [ -z "$v" ]; then
+		old="$(legacy_key_of "$1")"
+		[ -z "$old" ] || v="$(get_env "$old")"
+	fi
+	printf '%s' "${v:-$2}"
+}
+
+# 把 .env 里存在的旧键改名为新键（值不变）。新键已有值时以新键为准，并删掉旧键，
+# 避免同一个配置出现两个来源。ENV_FILE 不可写时只告警，不阻断命令。
+migrate_legacy_keys() {
+	local pair old new val
+	for pair in $LEGACY_KEYS; do
+		old="${pair#*=}"
+		new="${pair%%=*}"
+		has_key "$old" || continue
+		val="$(get_env "$old")"
+		if [ -n "$(get_env "$new")" ]; then
+			unset_env "$old" 2>/dev/null || {
+				warn "请手工删除 ${ENV_FILE} 里的 ${old}（已有 ${new}）"
+				continue
+			}
+			warn "${old} 与 ${new} 同时存在，已删除旧键 ${old}"
+			continue
+		fi
+		if set_env "$new" "$val" 2>/dev/null && unset_env "$old" 2>/dev/null; then
+			ok "配置项改名：${old} → ${new}（值不变）"
+		else
+			warn "无法改写 ${ENV_FILE}（权限不足？），请手工把 ${old} 改名为 ${new}"
+		fi
+	done
+	return 0
+}
 
 # ── 隐藏输入 + 星号回显 ─────────────────────────────────────────────────────
 # 用法：read_secret "提示文字"  → 结果在变量 SECRET 里。
@@ -65,21 +128,26 @@ env_value() {
 #      DSH_HOME_HOST 会留下一个 /dsh/workspace —— 在宿主上多半是 root 建的、
 #      容器写不进去的目录。
 #   2) 容器内数据目录还是旧默认 /home/node/.dsh → 改成 /dsh。这里只改**容器内
-#      路径**，宿主一侧的 DSH_HOME_HOST 不动，所以不会搬动任何数据，只是让挂载点
-#      与文档/默认值保持一致（旧值会让 dshm、文档命令里的路径对不上）。
+#      路径**（DSH_HOME_CONTAINER），宿主一侧的 DSH_HOME_HOST 不动，所以不会搬动
+#      任何数据，只是让挂载点与文档/默认值保持一致（旧值会让 dshm 里的路径对不上）。
 normalize_defaults() {
 	local home_host ws home
-	home_host="$(get_env DSH_HOME_HOST)"
-	ws="$(get_env DSH_WORKSPACE)"
-	if [ -n "$home_host" ] && [ "$home_host" != "/dsh" ] && [ "$ws" = "/dsh/workspace" ]; then
-		set_env DSH_WORKSPACE "${home_host}/workspace"
-		ok "DSH_WORKSPACE 跟随数据目录改为 ${home_host}/workspace"
+	home_host="$(env_value_new DSH_HOME_HOST /dsh)"
+	ws="$(env_value_new DSH_WORKSPACE_HOST /dsh/workspace)"
+	if [ "$home_host" != "/dsh" ] && [ "$ws" = "/dsh/workspace" ]; then
+		set_env DSH_WORKSPACE_HOST "${home_host}/workspace"
+		ok "DSH_WORKSPACE_HOST 跟随数据目录改为 ${home_host}/workspace"
 	fi
-	home="$(get_env DSH_HOME)"
+	home="$(env_value_new DSH_HOME_CONTAINER /dsh)"
 	if [ "$home" = "/home/node/.dsh" ]; then
-		set_env DSH_HOME "/dsh"
-		ok "DSH_HOME 由旧默认 /home/node/.dsh 改为当前默认 /dsh（宿主目录不变）"
+		set_env DSH_HOME_CONTAINER "/dsh"
+		ok "DSH_HOME_CONTAINER 由旧默认 /home/node/.dsh 改为当前默认 /dsh（宿主目录不变）"
 	fi
+}
+
+# 键是否存在（哪怕值为空）
+has_key() {
+	grep -qE "^$1=" "$ENV_FILE" 2>/dev/null
 }
 
 # 写回一个键。值通过环境变量传给 awk —— 用 `awk -v v=...` 会把值里的
@@ -93,6 +161,14 @@ set_env() {
 		{ print }
 		END { if (!d) print k "=" v }
 	' "$ENV_FILE" >"$tmp"
+	mv "$tmp" "$ENV_FILE"
+}
+
+# 删除一个键（连同它的整行）
+unset_env() {
+	local k="$1" tmp
+	tmp="$(mktemp)"
+	K="$k" awk '$0 !~ ("^" ENVIRON["K"] "=")' "$ENV_FILE" >"$tmp"
 	mv "$tmp" "$ENV_FILE"
 }
 
@@ -141,6 +217,12 @@ env_validate_port() {
 env_validate_bind() {
 	case "$1" in 127.0.0.1 | 0.0.0.0 | localhost) return 0 ;; esac
 	warn "只支持 127.0.0.1（仅本机）或 0.0.0.0（局域网可访问）"
+	return 1
+}
+
+env_validate_totp() {
+	case "$1" in off | optional | required) return 0 ;; esac
+	warn "只能是 off / optional / required"
 	return 1
 }
 

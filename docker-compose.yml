@@ -7,8 +7,8 @@ services:
       context: .
       args:
         DSH_VERSION: ${DSH_VERSION:-0.1.7-rc.2}
-        AUTH_GATE_VERSION: ${AUTH_GATE_VERSION:-0.15.0}
-        DEV_TOOLS: ${DEV_TOOLS:-none}
+        DSH_AUTH_GATE_VERSION: ${DSH_AUTH_GATE_VERSION:-0.15.0}
+        DSH_DEV_TOOLS: ${DSH_DEV_TOOLS:-none}
     container_name: qxdho-dsh
     restart: unless-stopped
     # 容器内以哪个 uid/gid 运行。默认 1000:1000（镜像的 USER node）。
@@ -23,41 +23,38 @@ services:
     ports:
       # 默认绑 127.0.0.1：只有宿主机自己能访问，供你在宿主机上加 HTTPS 反代。
       # 想直接从局域网访问（未加反代前测试用），把 DSH_BIND 改成 0.0.0.0。
-      - "${DSH_BIND:-127.0.0.1}:${PROXY_PORT:-3080}:3080"
+      # DSH_HTTP_PORT 是**宿主发布端口**；容器内代理固定 3080（见下面的 PROXY_PORT）。
+      - "${DSH_BIND:-127.0.0.1}:${DSH_HTTP_PORT:-3080}:3080"
     environment:
-      # 必须和下面 volumes: 里数据目录的容器侧路径完全一致。镜像的 ENV 是
-      # /home/node/.dsh，若 .env 没写 DSH_HOME，就会出现「挂载点是 /dsh、
-      # dsh 却把数据写进 /home/node/.dsh」——数据不进宿主机目录，等于没持久化。
-      # 同理 env_file 里若有 DSH_HOME，也不能让它覆盖掉挂载点。
-      DSH_HOME: ${DSH_HOME:-/dsh}
+      # 容器内的数据根。上游 dsh 自己在进程里读的是 DSH_HOME，所以这里注入的是
+      # DSH_HOME，而它的值必须与下面 volumes: 的目标路径完全一致 —— 镜像的 ENV 是
+      # /home/node/.dsh，若两者不一致，就会出现「挂载点在 /dsh、dsh 却把数据写进
+      # /home/node/.dsh」，数据不进宿主机目录，等于没持久化。用 environment 而不是
+      # 依赖 .env：它的优先级高于 env_file，谁也覆盖不了。
+      DSH_HOME: ${DSH_HOME_CONTAINER:-/dsh}
       DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}
       DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?请在 .env 中设置 DSH_AUTH_PASSWORD}
-      # HOME 指向数据目录（DSH_HOME），别用镜像里的 /home/node：npm / pnpm / git
+      # HOME 指向数据根（DSH_HOME_CONTAINER），别用镜像里的 /home/node：npm / pnpm / git
       # 都会往 $HOME 写缓存或配置，而 /home/node 的属主不一定对得上容器用户。
-      HOME: ${DSH_HOME:-/dsh}
-      # 容器内代理固定监听 3080，与上面 ports: 的容器侧一致。
-      # 必须在这里钉死：`env_file: .env` 会把 .env 里的 PROXY_PORT（它表示**宿主
-      # 端口**）也注入容器，覆盖镜像的 ENV PROXY_PORT=3080，于是代理会去监听
-      # 9090 之类，而 ports: 仍然映射宿主 9090 -> 容器 3080 —— 结果容器自称健康、
-      # 外部却连不上。environment 的优先级高于 env_file，所以这里写 3080 即可让
-      # PROXY_PORT 只表示宿主端口。
+      HOME: ${DSH_HOME_CONTAINER:-/dsh}
+      # 容器内代理自己监听的端口（proxy/index.js），与上面 ports: 的容器侧一致。
+      # 必须在这里钉死：容器内 PROXY_PORT 与宿主的 DSH_HTTP_PORT 是两回事，写混了
+      # 就会出现「代理监听 9090、映射却是 3080」的容器（自称健康、外部连不上）。
       PROXY_PORT: 3080
       # off | optional | required
-      DSH_TOTP: ${DSH_TOTP:-optional}
+      DSH_AUTH_TOTP: ${DSH_AUTH_TOTP:-optional}
       # 走 HTTPS 时设为 1（否则会话 cookie 不带 Secure）
       DSH_COOKIE_SECURE: ${DSH_COOKIE_SECURE:-0}
       # 登录页显示的域名，例如 dsh.example.com；留空则显示回环地址
       DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:-}
     volumes:
-      # dsh 数据根（DSH_HOME）：宿主目录 bind 到容器。
-      #   宿主：${DSH_HOME_HOST:-/dsh}    容器：${DSH_HOME:-/dsh}
-      # DSH_HOME 就是根目录本身，不会再拼一层 .dsh。
-      - ${DSH_HOME_HOST:-/dsh}:${DSH_HOME:-/dsh}
+      # dsh 数据根：宿主目录 bind 到容器。DSH_HOME_CONTAINER 就是根目录本身，
+      # 不会再拼一层 .dsh。
+      - ${DSH_HOME_HOST:-/dsh}:${DSH_HOME_CONTAINER:-/dsh}
       # 工作区：宿主默认放在数据目录下的 workspace/，容器内默认 /workspace。
-      - ${DSH_WORKSPACE:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}
+      - ${DSH_WORKSPACE_HOST:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     stop_grace_period: 20s
-

@@ -34,10 +34,10 @@ jobs:
         run: |
           set -euo pipefail
           dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
-          gate="$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
           # 读不到就会生成空 tag / 空构建参数（装成 latest），必须在这里就失败
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
-          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG AUTH_GATE_VERSION" >&2; exit 1; }
+          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
@@ -69,7 +69,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             DSH_VERSION=${{ steps.ver.outputs.dsh }}
-            AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}
+            DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -84,10 +84,10 @@ jobs:
         run: |
           set -euo pipefail
           dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
-          gate="$(grep -oP 'ARG AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
           # 读不到就会生成空 tag / 空构建参数（装成 latest），必须在这里就失败
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
-          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG AUTH_GATE_VERSION" >&2; exit 1; }
+          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
@@ -141,7 +141,7 @@ jobs:
           tags: dsh-test:smoke
           build-args: |
             DSH_VERSION=${{ steps.ver.outputs.dsh }}
-            AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}
+            DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}
           cache-from: type=gha
 
       - name: 冒烟测试

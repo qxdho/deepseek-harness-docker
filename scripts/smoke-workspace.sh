@@ -44,7 +44,7 @@ wait_exit() {
 echo "== A. /workspace 不可写时降级启动（默认行为，不能无限重启）=="
 # 默认不是 exit 1：compose 用的是 restart: unless-stopped，非 0 退出会被无限重拉，
 # 用户看到的是「docker 一直重启、网页打不开」，比带病运行更糟。默认应降级到
-# $DSH_HOME/workspace 继续启动，UI 可用 + 日志里一条醒目横幅。
+# $DSH_HOME/.workspace 继续启动，UI 可用 + 日志里一条醒目横幅。
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
 	--tmpfs /workspace:rw,mode=0755 \
@@ -84,7 +84,7 @@ case "$logs" in
 *) bad "日志缺少 chown 提示" ;;
 esac
 case "$logs" in
-*DSH_WORKSPACE*) ok "日志含「换个目录」替代方案" ;;
+*DSH_WORKSPACE_HOST*) ok "日志含「换个目录」替代方案" ;;
 *) bad "日志缺少替代方案" ;;
 esac
 # 降级必须把「工作区换到哪」讲清楚，否则用户会以为文件写到了宿主目录

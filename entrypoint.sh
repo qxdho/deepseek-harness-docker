@@ -19,7 +19,7 @@ die() { log "ERROR: $*"; exit 1; }
 : "${DSH_PORT:=3079}"
 : "${PROXY_PORT:=3080}"
 : "${DSH_AUTH_USER:=admin}"
-: "${DSH_TOTP:=optional}"          # off | optional | required
+: "${DSH_AUTH_TOTP:=optional}"          # off | optional | required
 : "${DSH_COOKIE_SECURE:=0}"        # 通过 HTTPS 访问时设为 1
 : "${DSH_PUBLIC_HOST:=}"           # 登录页显示的域名（反代改写 Host 时建议设置）
 : "${DSH_CLIENT_IP_HEADER:=x-forwarded-for}"
@@ -37,7 +37,7 @@ if ! mkdir -p "$DSH_HOME/profiles" 2>/dev/null; then
   log "ERROR: 数据目录 ${DSH_HOME} 不可写（属主 ${ws_owner}，当前用户 $(id -un) $(id -u):$(id -g)）"
   log "        它是 bind mount，属主由宿主机决定。在宿主机上二选一："
   log "          A. sudo mkdir -p <DSH_HOME_HOST> && sudo chown -R $(id -u):$(id -g) <DSH_HOME_HOST>"
-  log "          B. 把 .env 的 DSH_HOME_HOST / DSH_WORKSPACE 换到你自己的目录，再 ./dshm service up"
+  log "          B. 把 .env 的 DSH_HOME_HOST / DSH_WORKSPACE_HOST 换到你自己的目录，再 ./dshm service up"
   exit 1
 fi
 
@@ -91,10 +91,10 @@ if [ "$workspace_ok" != "1" ]; then
   log "ERROR: /workspace 不可写（属主 ${ws_owner}，当前用户 $(id -un) $(id -u):$(id -g)）"
   log "        /workspace 是 bind mount，属主由宿主机决定，镜像里的 chown 会被遮蔽。"
   log "        在宿主机上二选一："
-  log "          A. sudo chown -R 1000:1000 <宿主机上 DSH_WORKSPACE 指向的目录>"
-  log "          B. 在 .env 里把 DSH_WORKSPACE 改成一个绝对路径（Compose 不展开 ~ 和 \$HOME）："
-  log "             root 部署：DSH_WORKSPACE=/dsh/workspace"
-  log "             普通用户：DSH_WORKSPACE=/home/你的用户名/dsh-workspace"
+  log "          A. sudo chown -R 1000:1000 <宿主机上 DSH_WORKSPACE_HOST 指向的目录>"
+  log "          B. 在 .env 里把 DSH_WORKSPACE_HOST 改成一个绝对路径（Compose 不展开 ~ 和 \$HOME）："
+  log "             root 部署：DSH_WORKSPACE_HOST=/dsh/workspace"
+  log "             普通用户：DSH_WORKSPACE_HOST=/home/你的用户名/dsh-workspace"
   log "             改完执行 docker compose down && docker compose up -d   # 必须 down+up，restart 不生效"
   if [ "$WORKSPACE_STRICT" = "1" ]; then
     exit 1
@@ -114,7 +114,7 @@ if [ "$workspace_ok" != "1" ]; then
   log " 工作区降级：宿主 /workspace 不可写，本次改用容器内目录启动"
   log "   ${FALLBACK_WORKSPACE}"
   log " agent 的文件会写在这里（随 dsh_home 持久卷保留），不会出现在"
-  log " 宿主机 DSH_WORKSPACE 指向的目录下。"
+  log " 宿主机 DSH_WORKSPACE_HOST 指向的目录下。"
   log " 按上面的 A 或 B 修好后执行 docker compose down && up -d 即可切回。"
   log "======================================================================"
   log ""
@@ -172,14 +172,14 @@ done
 # ── 2. 写插件配置（每次启动按环境变量刷新）──────────────────────────────────
 cookie_secure=false
 [ "$DSH_COOKIE_SECURE" = "1" ] && cookie_secure=true
-case "$DSH_TOTP" in off | optional | required) ;; *) die "DSH_TOTP 只能是 off/optional/required" ;; esac
+case "$DSH_AUTH_TOTP" in off | optional | required) ;; *) die "DSH_AUTH_TOTP 只能是 off/optional/required" ;; esac
 
 cat >"$PROFILE/cordis.patch.yml" <<EOF
 # 由容器 entrypoint 依据环境变量生成，请改 .env 而不是改这里。
 - id: dsh-auth-gate
   config:
     mode: password
-    totp: "${DSH_TOTP}"
+    totp: "${DSH_AUTH_TOTP}"
     cookieSecure: ${cookie_secure}
     clientIpHeader: "${DSH_CLIENT_IP_HEADER}"
     trustedProxyCidrs: ["127.0.0.0/8"]

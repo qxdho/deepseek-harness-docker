@@ -73,7 +73,7 @@ the need for per-domain `--trusted-host` configuration.
 
 ### 5.1 The `/workspace` bind-mount ownership trap
 
-`${DSH_WORKSPACE:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}` is a bind mount, and **a bind mount shadows whatever the
+`${DSH_WORKSPACE_HOST:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}` is a bind mount, and **a bind mount shadows whatever the
 image set up underneath it**. The `chown -R node:node … /workspace` in the Dockerfile is therefore a
 no-op at runtime. Worse, when the host-side source directory does not exist, the Docker daemon creates
 it **as root** (Compose ignores `bind.create_host_path: false` —
@@ -97,7 +97,7 @@ The chosen approach, matching the rootless-container consensus
    Creating the directory while the user still owns it is the whole fix. If it already exists with the
    wrong owner, it chowns via `sudo` when available and otherwise prints the exact command.
 2. **Container side** — `entrypoint.sh` probes writability of `/workspace` early (before dsh starts). If it
-   is not writable it prints the same actionable message and then **degrades to `$DSH_HOME/workspace`**
+   is not writable it prints the same actionable message and then **degrades to `$DSH_HOME/.workspace`**
    instead of exiting: under `restart: unless-stopped` a non-zero exit becomes an infinite restart loop,
    which the user experiences as "the page never opens" — worse than running with a fallback. The
    degraded run logs a loud banner and keeps the UI usable. `DSH_WORKSPACE_STRICT=1` restores fail-fast.
@@ -115,18 +115,18 @@ container user — typically root (`sudo ./install.sh`, root VPS, 1Panel): `./wo
 - **A preflight-only override.** A `DSH_UID` that the preflight reads but `docker-compose.yml` ignores makes
   the check reason about a UID the container never uses — a false pass or fail. `DSH_UID`/`DSH_GID` are
   therefore wired into `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` and read from `.env` first (like
-  `DSH_WORKSPACE`), because `sudo ./install.sh` does not export `.env` into the shell.
+  `DSH_WORKSPACE_HOST`), because `sudo ./install.sh` does not export `.env` into the shell.
 - **Moving the container user.** Running the entrypoint as root to `chown`, then dropping via `setpriv`
   (available in the image), would silently defeat `DSH_PERMISSION_MODE=workspace-write`: Landlock does not
   confine root. Same reason as §5.1.
 
-The data directory is a **host bind mount** (`DSH_HOME_HOST`, default `/dsh`, mounted at `DSH_HOME`,
+The data directory is a **host bind mount** (`DSH_HOME_HOST`, default `/dsh`, mounted at `DSH_HOME_CONTAINER`,
 default `/dsh`), so its ownership comes from the host like the workspace. `check_dsh_home_dir()` applies the
 same container-UID rule and repairs it with `chown` (root or passwordless `sudo`) — no named volume and no
 disposable root container involved.
 
-Container path and host path are both configurable (`DSH_HOME`, `DSH_HOME_HOST`), and so is the workspace
-(`DSH_WORKSPACE_CONTAINER`, `DSH_WORKSPACE`, default `DSH_HOME_HOST/workspace`). All are read from `.env`,
+Container path and host path are both configurable (`DSH_HOME_CONTAINER`, `DSH_HOME_HOST`), and so is the workspace
+(`DSH_WORKSPACE_CONTAINER`, `DSH_WORKSPACE_HOST`, default `DSH_HOME_HOST/workspace`). All are read from `.env`,
 so compose, the preflight and `dshm` cannot drift apart.
 
 ## 6. Verification

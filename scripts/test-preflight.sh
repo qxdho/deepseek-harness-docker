@@ -29,7 +29,7 @@ have_sudo() { command -v sudo >/dev/null 2>&1; }
 # uid」，此时目录属主天然对得上。「两者不一致」的场景由第 6b 节专门验证，那正是
 # root 部署出问题的那条路径。
 #
-# 注意 DSH_UID 的取值优先来自 .env（与 DSH_WORKSPACE 一致），所以这里写进 .env
+# 注意 DSH_UID 的取值优先来自 .env（与 DSH_WORKSPACE_HOST 一致），所以这里写进 .env
 # 而不是 export。不再 export DSH_UID，以便第 6c 节能验证「shell 环境不会意外生效」。
 #
 # 凡「预期通过」的用例，.env 里必须带上 DSH_UID/DSH_GID=当前 uid：容器 uid 的默认值
@@ -41,7 +41,7 @@ write_env() {
 	mkdir -p "${project}/dsh-home"
 	{
 		printf 'DSH_HOME_HOST=%s/dsh-home\n' "$project"
-		[ -n "$ws" ] && printf 'DSH_WORKSPACE=%s\n' "$ws"
+		[ -n "$ws" ] && printf 'DSH_WORKSPACE_HOST=%s\n' "$ws"
 		printf 'DSH_UID=%s\nDSH_GID=%s\n' "$uid" "$gid"
 	} >"${project}/.env"
 }
@@ -83,7 +83,7 @@ else
 	ok "探测临时文件已清理"
 fi
 
-echo "== 2. 默认值：.env 未设 DSH_WORKSPACE =="
+echo "== 2. 默认值：.env 未设 DSH_WORKSPACE_HOST =="
 # 默认工作区现在是 $DSH_HOME_HOST/workspace（绝对路径 /dsh/workspace），
 # 不再是项目目录下的 ./workspace。非 root 下 /dsh 建不出来，应报错并指明路径。
 if [ "$(id -u)" = "0" ]; then
@@ -175,7 +175,7 @@ case "$out" in
 *) bad "报错缺少 chown 提示：$out" ;;
 esac
 case "$out" in
-*"DSH_WORKSPACE"*) ok "报错里给出了换目录的替代方案" ;;
+*"DSH_WORKSPACE_HOST"*) ok "报错里给出了换目录的替代方案" ;;
 *) bad "报错缺少替代方案" ;;
 esac
 # 方案 B 若打印字面量 $HOME，用户照着写进 .env 会被 compose 当成相对路径
@@ -259,7 +259,7 @@ echo "== 6b. 部署者能写、容器 uid 不能写（root 部署的核心回归
 # 旧实现拿「当前用户」的写测试当结论：root 部署时 ./workspace 是 root:root 0755，
 # root 写得进 → 预检假通过 → 容器里的 node(1000) 写不进 → crash-loop。
 # 这里构造「部署者可写、容器 uid 不可写」，必须被拦下。
-# 容器 uid 走 .env 设置（与 DSH_WORKSPACE 一致的取值来源）。
+# 容器 uid 走 .env 设置（与 DSH_WORKSPACE_HOST 一致的取值来源）。
 project="$sandbox/foreign-uid"
 mkdir -p "$project/workspace"
 chmod 700 "$project/workspace"
@@ -313,7 +313,7 @@ project="$sandbox/homecheck"
 mkdir -p "$project/data" "$project/ws"
 # 这里必须显式写上 DSH_UID/DSH_GID：容器 uid 默认 1000，而 runner 的 uid 是 1001，
 # 走权限位推断时会得出「不可写」，导致「可写的数据目录应通过」在 CI 上假失败。
-homecheck_env=(DSH_HOME_HOST="$project/data" DSH_WORKSPACE="$project/ws" DSH_UID="$TEST_UID" DSH_GID="$TEST_GID")
+homecheck_env=(DSH_HOME_HOST="$project/data" DSH_WORKSPACE_HOST="$project/ws" DSH_UID="$TEST_UID" DSH_GID="$TEST_GID")
 printf '%s\n' "${homecheck_env[@]}" >"$project/.env"
 if check_dsh_home_dir "$project" auto 0 >/dev/null 2>&1; then
 	ok "可写的数据目录通过"
@@ -372,7 +372,7 @@ echo "== 6g. uid 不匹配 + 权限 000（perm_for_uid 短 mode 回归）=="
 project="$sandbox/zero"
 mkdir -p "$project/ws"
 chmod 000 "$project/ws"
-printf 'DSH_WORKSPACE=%s/ws\nDSH_UID=4242\nDSH_GID=4242\n' "$project" >"$project/.env"
+printf 'DSH_WORKSPACE_HOST=%s/ws\nDSH_UID=4242\nDSH_GID=4242\n' "$project" >"$project/.env"
 set +e
 out="$(check_workspace_dir "$project" never 0 2>&1)"
 rc=$?

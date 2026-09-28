@@ -129,10 +129,10 @@ set -e
 echo "== 15. 容器侧路径必须绝对（空值/相对值自动纠正为默认）=="
 printf 'DSH_WORKSPACE_CONTAINER=\nDSH_HOME=\n' >"$ENV_FILE"
 INTERACTIVE=0 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区" "/workspace" 0 env_validate_abspath >/dev/null
-INTERACTIVE=0 ensure_env DSH_HOME "容器内数据目录" "/dsh" 0 env_validate_abspath >/dev/null
+INTERACTIVE=0 ensure_env DSH_HOME_CONTAINER "容器内数据目录" "/dsh" 0 env_validate_abspath >/dev/null
 [ "$(get_env DSH_WORKSPACE_CONTAINER)" = "/workspace" ] && pass "空的工作区挂载点被补成 /workspace" \
 	|| fail "未补默认值：$(get_env DSH_WORKSPACE_CONTAINER)"
-[ "$(get_env DSH_HOME)" = "/dsh" ] && pass "空的数据目录挂载点被补成 /dsh" || fail "未补默认值：$(get_env DSH_HOME)"
+[ "$(get_env DSH_HOME_CONTAINER)" = "/dsh" ] && pass "空的数据目录挂载点被补成 /dsh" || fail "未补默认值：$(get_env DSH_HOME_CONTAINER)"
 printf 'DSH_WORKSPACE_CONTAINER=workspace\n' >"$ENV_FILE"
 INTERACTIVE=0 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区" "/workspace" 0 env_validate_abspath >/dev/null
 [ "$(get_env DSH_WORKSPACE_CONTAINER)" = "/workspace" ] && pass "相对路径被纠正为默认值" \
@@ -140,28 +140,70 @@ INTERACTIVE=0 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区" "/workspac
 
 echo "== 16. 历史默认值对齐 =="
 # 换了数据目录、工作区还是旧默认 → 工作区跟随
-printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE=/dsh/workspace\n' >"$ENV_FILE"
+printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE_HOST=/dsh/workspace\n' >"$ENV_FILE"
 normalize_defaults >/dev/null
-[ "$(get_env DSH_WORKSPACE)" = "/data/workspace" ] && pass "工作区跟随数据目录" \
-	|| fail "未跟随：$(get_env DSH_WORKSPACE)"
+[ "$(get_env DSH_WORKSPACE_HOST)" = "/data/workspace" ] && pass "工作区跟随数据目录" \
+	|| fail "未跟随：$(get_env DSH_WORKSPACE_HOST)"
 
 # 用户自己指定的工作区不动
-printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE=/root/my-ws\n' >"$ENV_FILE"
+printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE_HOST=/root/my-ws\n' >"$ENV_FILE"
 normalize_defaults >/dev/null
-[ "$(get_env DSH_WORKSPACE)" = "/root/my-ws" ] && pass "自定义工作区不被改动" \
-	|| fail "被改成了：$(get_env DSH_WORKSPACE)"
+[ "$(get_env DSH_WORKSPACE_HOST)" = "/root/my-ws" ] && pass "自定义工作区不被改动" \
+	|| fail "被改成了：$(get_env DSH_WORKSPACE_HOST)"
 
 # 旧默认容器路径 → 当前默认（宿主目录不变，不搬数据）
-printf 'DSH_HOME_HOST=/data\nDSH_HOME=/home/node/.dsh\n' >"$ENV_FILE"
+printf 'DSH_HOME_HOST=/data\nDSH_HOME_CONTAINER=/home/node/.dsh\n' >"$ENV_FILE"
 normalize_defaults >/dev/null
-[ "$(get_env DSH_HOME)" = "/dsh" ] && pass "旧容器路径改为 /dsh" || fail "未改：$(get_env DSH_HOME)"
+[ "$(get_env DSH_HOME_CONTAINER)" = "/dsh" ] && pass "旧容器路径改为 /dsh" || fail "未改：$(get_env DSH_HOME_CONTAINER)"
 [ "$(get_env DSH_HOME_HOST)" = "/data" ] && pass "宿主数据目录保持不动" || fail "宿主目录被改了"
 
 # 已经是当前默认 → 不重复写入（文件内容保持原样，不产生无意义的变更日志）
-printf 'DSH_HOME_HOST=/dsh\nDSH_HOME=/dsh\nDSH_WORKSPACE=/dsh/workspace\n' >"$ENV_FILE"
+printf 'DSH_HOME_HOST=/dsh\nDSH_HOME_CONTAINER=/dsh\nDSH_WORKSPACE_HOST=/dsh/workspace\n' >"$ENV_FILE"
 before="$(cat "$ENV_FILE")"
 normalize_defaults >/dev/null
 [ "$(cat "$ENV_FILE")" = "$before" ] && pass "默认值场景下不改动文件" || fail "文件被无谓改动"
+
+echo "== 17. 旧键改名迁移 =="
+printf 'PROXY_PORT=9090\nDSH_WORKSPACE=/root/ws\nDSH_HOME=/home/node/.dsh\nDSH_TOTP=required\nAUTH_GATE_VERSION=0.16.0\nDEV_TOOLS=full\n' >"$ENV_FILE"
+migrate_legacy_keys >/dev/null
+[ "$(get_env DSH_HTTP_PORT)" = "9090" ] && pass "PROXY_PORT → DSH_HTTP_PORT" || fail "端口未迁移"
+[ "$(get_env DSH_WORKSPACE_HOST)" = "/root/ws" ] && pass "DSH_WORKSPACE → DSH_WORKSPACE_HOST" || fail "工作区未迁移"
+[ "$(get_env DSH_HOME_CONTAINER)" = "/home/node/.dsh" ] && pass "DSH_HOME → DSH_HOME_CONTAINER" || fail "数据目录未迁移"
+[ "$(get_env DSH_AUTH_TOTP)" = "required" ] && pass "DSH_TOTP → DSH_AUTH_TOTP" || fail "TOTP 未迁移"
+[ "$(get_env DSH_AUTH_GATE_VERSION)" = "0.16.0" ] && pass "AUTH_GATE_VERSION → DSH_AUTH_GATE_VERSION" || fail "插件版本未迁移"
+[ "$(get_env DSH_DEV_TOOLS)" = "full" ] && pass "DEV_TOOLS → DSH_DEV_TOOLS" || fail "构建参数未迁移"
+for old in PROXY_PORT DSH_WORKSPACE DSH_HOME DSH_TOTP AUTH_GATE_VERSION DEV_TOOLS; do
+	has_key "$old" && fail "旧键 ${old} 仍留在 .env"
+done
+pass "旧键已从 .env 中删除，不会出现两个来源"
+
+# 幂等：再跑一次不应改动文件
+before="$(cat "$ENV_FILE")"
+migrate_legacy_keys >/dev/null
+[ "$(cat "$ENV_FILE")" = "$before" ] && pass "重复执行不改动文件" || fail "重复执行改动了文件"
+
+# 新旧键同时存在 → 以新键为准，删掉旧键
+printf 'DSH_HTTP_PORT=8081\nPROXY_PORT=9090\n' >"$ENV_FILE"
+migrate_legacy_keys >/dev/null
+[ "$(get_env DSH_HTTP_PORT)" = "8081" ] && pass "同时存在时保留新键" || fail "新键被旧键覆盖"
+has_key PROXY_PORT && fail "旧键未被删除" || pass "旧键被删除"
+
+echo "== 18. 迁移前也能读到旧键（兼容读取）=="
+printf 'PROXY_PORT=7070\nDSH_WORKSPACE=/srv/ws\n' >"$ENV_FILE"
+[ "$(env_value_new DSH_HTTP_PORT 3080)" = "7070" ] && pass "新键缺失时回退到旧键" || fail "未回退到旧键"
+[ "$(env_value_new DSH_WORKSPACE_HOST /dsh/workspace)" = "/srv/ws" ] && pass "工作区同样回退" || fail "工作区未回退"
+printf 'DSH_HTTP_PORT=8080\nPROXY_PORT=7070\n' >"$ENV_FILE"
+[ "$(env_value_new DSH_HTTP_PORT 3080)" = "8080" ] && pass "新键优先于旧键" || fail "旧键压过了新键"
+: >"$ENV_FILE"
+[ "$(env_value_new DSH_HTTP_PORT 3080)" = "3080" ] && pass "都没有时用默认值" || fail "默认值未生效"
+
+echo "== 19. TOTP 取值校验 =="
+printf 'DSH_AUTH_TOTP=banana\n' >"$ENV_FILE"
+INTERACTIVE=0 ensure_env DSH_AUTH_TOTP "两步验证" "optional" 0 env_validate_totp >/dev/null 2>&1
+[ "$(get_env DSH_AUTH_TOTP)" = "optional" ] && pass "非法值被默认值覆盖" || fail "非法 TOTP 未被纠正：$(get_env DSH_AUTH_TOTP)"
+printf 'DSH_AUTH_TOTP=required\n' >"$ENV_FILE"
+INTERACTIVE=0 ensure_env DSH_AUTH_TOTP "两步验证" "optional" 0 env_validate_totp >/dev/null
+[ "$(get_env DSH_AUTH_TOTP)" = "required" ] && pass "合法值保留" || fail "合法值被改动"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

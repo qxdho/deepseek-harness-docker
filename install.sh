@@ -36,14 +36,18 @@ docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"
 
 # ── 1. 配置项：有默认值的直接采用，只有必填且无默认值的才询问 ───────────────
 hdr "检查 .env 配置项"
+# 先做键名迁移：老 .env 里的 PROXY_PORT / DSH_WORKSPACE / DSH_HOME 等旧键
+# 改成新名字（值不变），后面统一按新键读写。
+migrate_legacy_keys
 ensure_password
 ensure_env DSH_AUTH_USER "登录用户名" "admin" 0 env_validate_username
-ensure_env PROXY_PORT "对外端口" "3080" 0 env_validate_port
+ensure_env DSH_HTTP_PORT "对外端口" "3080" 0 env_validate_port
 ensure_env DSH_BIND "监听地址（127.0.0.1=仅本机，0.0.0.0=局域网可访问）" "127.0.0.1" 0 env_validate_bind
-ensure_env DSH_WORKSPACE "工作区目录（宿主，挂到容器）" "/dsh/workspace" 0 ""
+ensure_env DSH_WORKSPACE_HOST "工作区目录（宿主，挂到容器）" "/dsh/workspace" 0 ""
 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区路径" "/workspace" 0 env_validate_abspath
 ensure_env DSH_HOME_HOST "dsh 数据目录（宿主，bind 挂到容器）" "/dsh" 0 ""
-ensure_env DSH_HOME "容器内 dsh 数据目录" "/dsh" 0 env_validate_abspath
+ensure_env DSH_HOME_CONTAINER "容器内 dsh 数据目录" "/dsh" 0 env_validate_abspath
+ensure_env DSH_AUTH_TOTP "两步验证（off/optional/required）" "optional" 0 env_validate_totp
 
 # 数据目录换了、工作区还留在旧默认时，让工作区跟着走（与 dshm service up 同一实现）
 normalize_defaults
@@ -119,7 +123,7 @@ if [ "$healthy" != "1" ]; then
 fi
 ok "服务已健康（用时约 ${elapsed}s）"
 
-port="$(get_env PROXY_PORT)"; port="${port:-3080}"
+port="$(env_value_new DSH_HTTP_PORT 3080)"
 bind="$(get_env DSH_BIND)"; bind="${bind:-127.0.0.1}"
 
 hdr "部署完成"

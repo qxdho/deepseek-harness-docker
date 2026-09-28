@@ -54,7 +54,7 @@ cd deepseek-harness-docker
 安装脚本会逐项检查 `.env`：已有合法值的跳过；未配置但有默认值的项（用户名、端口、监听地址、
 数据目录、工作区、容器内路径）**直接采用默认值，不逐个询问**；只有必填且没有默认值的项
 （登录密码）才要求输入。不合规的历史值会被默认值覆盖并给出提示，例如旧版的
-`DSH_HOME=/home/node/.dsh` 会改为 `/dsh`、空的工作区挂载点会补成 `/workspace`。
+旧键 `DSH_HOME=/home/node/.dsh` 会改为 `DSH_HOME_CONTAINER=/dsh`、空的工作区挂载点会补成 `/workspace`。
 密码要求至少 14 位，且同时包含大写字母、小写字母、数字与符号。
 
 完成后访问 `http://<服务器IP>:3080/`，用户名 `admin`，密码为上述设置值。
@@ -139,31 +139,53 @@ cd deepseek-harness-docker
 
 修改 `.env` 后需执行 `./dshm service up` 生效。`restart` 不会重建容器，环境变量不会重新读取。
 
+键名约定：本项目自己的配置一律 `DSH_` 前缀；宿主侧路径以 `_HOST` 结尾，容器侧路径以
+`_CONTAINER` 结尾。旧键（`PROXY_PORT`、`DSH_WORKSPACE`、`DSH_HOME`、`DSH_TOTP`、
+`AUTH_GATE_VERSION`、`DEV_TOOLS`）会在启动时自动改名，值不变。
+
+**宿主侧**
+
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `DSH_AUTH_PASSWORD` | 无（必填） | 首次启动建号使用；至少 14 位，含大小写字母、数字与符号。后续修改用 `./dshm auth password` |
-| `PROXY_PORT` | `3080` | 宿主机端口 |
-| `DSH_BIND` | `127.0.0.1` | 改为 `0.0.0.0` 后局域网可直连 |
+| `DSH_HTTP_PORT` | `3080` | 宿主发布端口（容器内代理固定 3080，与它无关） |
+| `DSH_BIND` | `127.0.0.1` | 宿主监听地址；改为 `0.0.0.0` 后局域网可直连 |
 | `DSH_HOME_HOST` | `/dsh` | 宿主机数据目录。位于根目录，首次创建需要 sudo；也可设为其他目录，如 `/home/user/dsh`。必须为绝对路径 |
-| `DSH_HOME` | `/dsh` | 容器内数据目录，须与 `DSH_HOME_HOST` 的挂载点一致。该值即根目录本身，不会追加 `.dsh` |
-| `DSH_WORKSPACE` | `/dsh/workspace` | 宿主机工作区目录，默认跟随数据目录。必须为绝对路径 |
-| `DSH_WORKSPACE_CONTAINER` | `/workspace` | 容器内工作区路径 |
+| `DSH_WORKSPACE_HOST` | `/dsh/workspace` | 宿主机工作区目录，默认跟随数据目录。必须为绝对路径 |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | 容器运行身份。宿主 uid 非 1000 时改为 `id -u` / `id -g` |
-| `DSH_TOTP` | `optional` | `off`、`optional`、`required` |
+| `DSH_DISK_MIN_MB` | `256` | 启动时要求的最小磁盘余量（MB） |
+| `DSH_WORKSPACE_STRICT` | `0` | 置 `1` 后工作区不可写即退出（而非降级启动） |
+| `DSH_ADMIN_DIR` | `/dsh-manager` | 管理面板安装目录。该值由 `dshm` 读取，可使用 `$HOME` 写法 |
+
+**容器侧**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DSH_HOME_CONTAINER` | `/dsh` | 容器内数据目录，即 bind 挂载的目标路径。该值即根目录本身，不会追加 `.dsh` |
+| `DSH_WORKSPACE_CONTAINER` | `/workspace` | 容器内工作区路径 |
+
+**登录与反向代理**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DSH_AUTH_USER` | `admin` | 登录用户名 |
+| `DSH_AUTH_PASSWORD` | 无（必填） | 首次启动建号使用；至少 14 位，含大小写字母、数字与符号。后续修改用 `./dshm auth password` |
+| `DSH_AUTH_TOTP` | `optional` | `off`、`optional`、`required` |
 | `DSH_COOKIE_SECURE` | `0` | 使用 HTTPS 时设为 `1`；纯 HTTP 必须为 `0` |
 | `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名 |
 | `DSH_TRUST_XFF` | `0` | 置 `1` 后代理信任 `X-Forwarded-For`，用于反代后的客户端地址识别。仅在确有反代改写该头时开启 |
-| `DSH_DISK_MIN_MB` | `256` | 启动时要求的最小磁盘余量（MB） |
-| `DSH_ADMIN_DIR` | `/dsh-manager` | 管理面板安装目录。该值由 `dshm` 读取，可使用 `$HOME` 写法 |
+| `DSH_CLIENT_IP_HEADER` | `x-forwarded-for` | dsh 自身从哪个请求头取客户端 IP |
 
-构建期变量（修改后需重建镜像）：`DSH_VERSION`、`AUTH_GATE_VERSION`、`DEV_TOOLS`。
+**构建期**（修改后需重建镜像）：`DSH_VERSION`、`DSH_AUTH_GATE_VERSION`、`DSH_DEV_TOOLS`。
 `DSH_IMAGE` 决定拉取或构建哪个镜像，`./dshm service update` 会按需写入。
 其余配置项的含义见 `.env.example` 注释。
+
+上游 dsh 自己的变量（`DSH_HOME`、`DSH_HOST`、`DSH_PORT`、`DSH_PERMISSION_MODE`、
+`DSH_TELEMETRY_DISABLED`）由镜像与 compose 注入，不要写进 `.env`。
 
 两点需要留意：
 
 - 用户名与密码仅在**首次启动**（尚无用户文件时）生效。
-- `AUTH_GATE_VERSION` 仅在 profile 不存在时生效。如需强制重新播种：
+- `DSH_AUTH_GATE_VERSION` 仅在 profile 不存在时生效。如需强制重新播种：
   `docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm service up`。
 
 ## 数据目录
@@ -171,13 +193,13 @@ cd deepseek-harness-docker
 数据目录与工作区均为 bind 挂载，两侧路径均可配置：
 
 ```bash
-DSH_HOME_HOST=/dsh                    # 宿主机数据目录
-DSH_HOME=/dsh                         # 容器内挂载点
-DSH_WORKSPACE=/dsh/workspace          # 宿主机工作区
-DSH_WORKSPACE_CONTAINER=/workspace    # 容器内工作区路径
+DSH_HOME_HOST=/dsh                     # 宿主机数据目录
+DSH_HOME_CONTAINER=/dsh                # 容器内挂载点
+DSH_WORKSPACE_HOST=/dsh/workspace      # 宿主机工作区
+DSH_WORKSPACE_CONTAINER=/workspace     # 容器内工作区路径
 ```
 
-`DSH_HOME` 即根目录本身，不会追加 `.dsh`（设为 `/data` 时数据直接位于 `/data` 下）。
+`DSH_HOME_CONTAINER` 即根目录本身，不会追加 `.dsh`（设为 `/data` 时数据直接位于 `/data` 下）。
 宿主机目录的属主必须是容器内的 uid（默认 1000）。预检会检查并在权限允许时修正，
 否则输出修复命令。
 
@@ -230,7 +252,7 @@ EACCES: permission denied, mkdir '/workspace/xxx'
 `./install.sh` 与 `./dshm service up` 会在启动前检查，存在 root 或免密 sudo 时直接修正，
 否则输出命令供手工执行。
 
-工作区不可写时，容器不会退出，而是降级到 `$DSH_HOME/.workspace` 继续启动并在日志中提示，
+工作区不可写时，容器不会退出，而是降级到数据根下的 `.workspace`（容器内 `$DSH_HOME/.workspace`）
 以避免 `restart: unless-stopped` 造成无限重启。如需在不可写时直接退出，设置
 `DSH_WORKSPACE_STRICT=1`。
 
@@ -243,7 +265,7 @@ sudo chown -R 1000:1000 /dsh && ./dshm service up
 mkdir -p /home/user/dsh-data
 # 然后修改 .env（须写绝对路径：Compose 不展开 ~ 与 $HOME）：
 #   DSH_HOME_HOST=/home/user/dsh-data
-#   DSH_WORKSPACE=/home/user/dsh-data/workspace
+#   DSH_WORKSPACE_HOST=/home/user/dsh-data/workspace
 ./dshm service up
 ```
 

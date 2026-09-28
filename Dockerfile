@@ -21,7 +21,7 @@ ARG NODE_IMAGE=node:24-bookworm-slim
 FROM ${NODE_IMAGE} AS builder
 ARG DSH_VERSION=0.1.7-rc.2
 ARG PNPM_VERSION=11.7.0
-ARG AUTH_GATE_VERSION=0.15.0
+ARG DSH_AUTH_GATE_VERSION=0.15.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 # node-pty 在 Linux 没有预编译产物，安装 dsh 时会用 node-gyp 现场编译
@@ -44,7 +44,7 @@ RUN set -eux; \
     mkdir -p "${DSH_HOME}"; \
     DSH_BIN="$(npm root --global)/@deepseek-ai/dsh/lib/bin.js"; \
     node --expose-internals "$DSH_BIN" --profile web --dump-config >/dev/null; \
-    node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-auth-gate@${AUTH_GATE_VERSION}"; \
+    node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-auth-gate@${DSH_AUTH_GATE_VERSION}"; \
     # dsh 会校验 profile 插件行的 peer 依赖（storage-domain 缺失会让 web 起不来），
     # dsh-auth-gate 的 CLI 也需要它们。补软链；目标不存在时直接构建失败，避免像以前
     # 那样发出悬空软链、等到运行时才炸（entrypoint 也会在每次启动时幂等补齐）。
@@ -67,7 +67,7 @@ FROM ${NODE_IMAGE}
 
 # DSH_VERSION 只在 builder 阶段用到（决定 npm 装哪个版本）；运行阶段不需要，
 # 留在这里只会变成没人读的构建参数。
-ARG DEV_TOOLS=none
+ARG DSH_DEV_TOOLS=none
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/node \
@@ -82,13 +82,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     npm_config_fund=false \
     npm_config_audit=false
 
-# 基础运行/agent 工具。DEV_TOOLS=full 时再加编译链，供容器内现场安装带
+# 基础运行/agent 工具。DSH_DEV_TOOLS=full 时再加编译链，供容器内现场安装带
 # 原生依赖的插件（dsh-auth-gate 已预装，不需要它）。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git ripgrep jq procps tini unzip zip; \
-    if [ "${DEV_TOOLS}" = "full" ]; then \
+    if [ "${DSH_DEV_TOOLS}" = "full" ]; then \
         apt-get install -y --no-install-recommends python3 make g++ pkg-config vim less; \
     fi; \
     rm -rf /var/lib/apt/lists/*

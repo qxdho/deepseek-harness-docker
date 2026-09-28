@@ -62,7 +62,7 @@ The installer checks `.env` item by item: values that are already valid are kept
 unset but have a default (username, port, bind address, data directory, workspace, in-container
 paths) **use that default without prompting**. Only required items without a default (the login
 password) are asked for. Invalid legacy values are replaced by the default with a notice — for
-example `DSH_HOME=/home/node/.dsh` becomes `/dsh`, and an empty workspace mount point becomes
+example the legacy `DSH_HOME=/home/node/.dsh` becomes `DSH_HOME_CONTAINER=/dsh`, and an empty workspace mount point becomes
 `/workspace`. The password must be at least 14 characters and contain uppercase, lowercase, digits,
 and symbols.
 
@@ -154,30 +154,54 @@ Note that the panel holds `docker.sock`, which is equivalent to host root. It th
 Changes in `.env` take effect after `./dshm service up`. `restart` does not recreate the container,
 so environment variables are not re-read.
 
+Naming convention: variables of this project all carry the `DSH_` prefix; host-side paths end in
+`_HOST` and in-container paths end in `_CONTAINER`. The legacy names (`PROXY_PORT`,
+`DSH_WORKSPACE`, `DSH_HOME`, `DSH_TOTP`, `AUTH_GATE_VERSION`, `DEV_TOOLS`) are renamed
+automatically at start-up, keeping their values.
+
+**Host side**
+
 | Variable | Default | Notes |
 |---|---|---|
-| `DSH_AUTH_PASSWORD` | none (required) | Used to create the account on first start; ≥14 characters with upper/lower/digit/symbol. Change later with `./dshm auth password` |
-| `PROXY_PORT` | `3080` | Host port |
-| `DSH_BIND` | `127.0.0.1` | Set to `0.0.0.0` for direct LAN access |
+| `DSH_HTTP_PORT` | `3080` | Host published port (the proxy listens on 3080 inside the container, unrelated) |
+| `DSH_BIND` | `127.0.0.1` | Host listen address; set to `0.0.0.0` for direct LAN access |
 | `DSH_HOME_HOST` | `/dsh` | Host data directory. Under the filesystem root, so first creation needs sudo; another directory such as `/home/user/dsh` also works. Must be an absolute path |
-| `DSH_HOME` | `/dsh` | In-container data directory; must match the mount target of `DSH_HOME_HOST`. This value is the root itself; no `.dsh` is appended |
-| `DSH_WORKSPACE` | `/dsh/workspace` | Host workspace directory; follows the data directory by default. Must be an absolute path |
-| `DSH_WORKSPACE_CONTAINER` | `/workspace` | In-container workspace path |
+| `DSH_WORKSPACE_HOST` | `/dsh/workspace` | Host workspace directory; follows the data directory by default. Must be an absolute path |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | Container identity. Set to `id -u` / `id -g` when the host UID differs |
-| `DSH_TOTP` | `optional` | `off`, `optional`, or `required` |
+| `DSH_DISK_MIN_MB` | `256` | Minimum free disk space (MB) required at start-up |
+| `DSH_WORKSPACE_STRICT` | `0` | When `1`, exit instead of degrading if the workspace is not writable |
+| `DSH_ADMIN_DIR` | `/dsh-manager` | Admin panel install directory. Read by `dshm`, so `$HOME` may be used |
+
+**Container side**
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DSH_HOME_CONTAINER` | `/dsh` | In-container data directory, i.e. the bind mount target. This value is the root itself; no `.dsh` is appended |
+| `DSH_WORKSPACE_CONTAINER` | `/workspace` | In-container workspace path |
+
+**Login and reverse proxy**
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DSH_AUTH_USER` | `admin` | Login username |
+| `DSH_AUTH_PASSWORD` | none (required) | Used to create the account on first start; ≥14 characters with upper/lower/digit/symbol. Change later with `./dshm auth password` |
+| `DSH_AUTH_TOTP` | `optional` | `off`, `optional`, or `required` |
 | `DSH_COOKIE_SECURE` | `0` | Set to `1` for HTTPS; must remain `0` over plain HTTP |
 | `DSH_PUBLIC_HOST` | empty | Domain shown on the login page |
 | `DSH_TRUST_XFF` | `0` | When `1`, the proxy trusts `X-Forwarded-For` for client-address detection behind a reverse proxy. Enable only when a proxy really rewrites that header |
-| `DSH_DISK_MIN_MB` | `256` | Minimum free disk space (MB) required at start-up |
-| `DSH_ADMIN_DIR` | `/dsh-manager` | Admin panel install directory. Read by `dshm`, so `$HOME` may be used |
+| `DSH_CLIENT_IP_HEADER` | `x-forwarded-for` | Header dsh itself reads the client IP from |
 
-Build-time variables (a rebuild is required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DEV_TOOLS`.
+**Build time** (a rebuild is required): `DSH_VERSION`, `DSH_AUTH_GATE_VERSION`, `DSH_DEV_TOOLS`.
 `DSH_IMAGE` selects which image is pulled or built, and `./dshm service update` writes it as needed.
+The remaining options are documented in `.env.example`.
+
+Upstream dsh variables (`DSH_HOME`, `DSH_HOST`, `DSH_PORT`, `DSH_PERMISSION_MODE`,
+`DSH_TELEMETRY_DISABLED`) are injected by the image and compose; do not put them in `.env`.
 
 Two points to keep in mind:
 
 - The username and password only apply on the **first start**, when no user file exists yet.
-- `AUTH_GATE_VERSION` only applies when the profile is absent. To force a re-seed:
+- `DSH_AUTH_GATE_VERSION` only applies when the profile is absent. To force a re-seed:
   `docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm service up`.
 
 ## Data directory
@@ -185,13 +209,13 @@ Two points to keep in mind:
 Both the data directory and the workspace are bind mounts, and both paths are configurable:
 
 ```bash
-DSH_HOME_HOST=/dsh                    # host data directory
-DSH_HOME=/dsh                         # in-container mount point
-DSH_WORKSPACE=/dsh/workspace          # host workspace
-DSH_WORKSPACE_CONTAINER=/workspace    # in-container workspace path
+DSH_HOME_HOST=/dsh                     # host data directory
+DSH_HOME_CONTAINER=/dsh                # in-container mount point
+DSH_WORKSPACE_HOST=/dsh/workspace      # host workspace
+DSH_WORKSPACE_CONTAINER=/workspace     # in-container workspace path
 ```
 
-`DSH_HOME` is the root itself; no `.dsh` is appended (setting it to `/data` places the data directly
+`DSH_HOME_CONTAINER` is the root itself; no `.dsh` is appended (setting it to `/data` places the data directly
 under `/data`). The host directory must be writable by the container UID (1000 by default). The
 preflight check verifies this and repairs it when permissions allow, otherwise it prints the
 required command.
@@ -263,7 +287,7 @@ sudo chown -R 1000:1000 /dsh && ./dshm service up
 mkdir -p /home/user/dsh-data
 # then edit .env (absolute paths only: Compose does not expand ~ or $HOME):
 #   DSH_HOME_HOST=/home/user/dsh-data
-#   DSH_WORKSPACE=/home/user/dsh-data/workspace
+#   DSH_WORKSPACE_HOST=/home/user/dsh-data/workspace
 ./dshm service up
 ```
 

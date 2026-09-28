@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 部署前预检：确保 DSH_WORKSPACE 指向的宿主目录存在，且容器内的 node 用户
+# 部署前预检：确保 DSH_WORKSPACE_HOST 指向的宿主目录存在，且容器内的 node 用户
 # （uid/gid 1000）真的能写。
 #
 # 为什么必须有这一步
 # ------------------
-# docker-compose.yml 里 `- ${DSH_WORKSPACE:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}` 是 bind mount。
+# docker-compose.yml 里 `- ${DSH_WORKSPACE_HOST:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}` 是 bind mount。
 # 两个后果：
 #
 #   1. bind mount 会完全遮蔽镜像内 /workspace 的属主。Dockerfile 里那句
@@ -38,7 +38,7 @@ env_file_value() {
 	printf '%s' "$line"
 }
 
-# 进入项目目录后，${DSH_WORKSPACE} 的相对路径与 docker compose 的解析一致
+# 进入项目目录后，${DSH_WORKSPACE_HOST} 的相对路径与 docker compose 的解析一致
 # （compose 以 --project-directory，默认是 compose 文件所在目录为准）。
 absolute_workspace_path() {
 	local project_dir="$1" raw="$2" expanded
@@ -68,7 +68,7 @@ absolute_workspace_path() {
 # 里有对应的 `user: "${DSH_UID:-1000}:${DSH_GID:-1000}"` —— 这两处必须成对存在，
 # 否则就是「预检按 A 判断、容器按 B 运行」的假通过（这个 bug 曾经出现过）。
 #
-# 取值优先读 .env，与 DSH_WORKSPACE 一致：项目所有配置都在 .env 里，而
+# 取值优先读 .env，与 DSH_WORKSPACE_HOST 一致：项目所有配置都在 .env 里，而
 # `sudo ./install.sh` 之类不会把 .env 导进 shell 环境。shell 环境变量作为回退，
 # 便于测试直接覆盖。
 #
@@ -254,7 +254,7 @@ check_host_dir() {
          mkdir -p "${home_root}"
          然后把 .env 改成（必须写绝对路径，Compose 不展开 ~ 这类 shell 写法）：
            DSH_HOME_HOST=${home_root}
-           DSH_WORKSPACE=${home_root}/workspace
+           DSH_WORKSPACE_HOST=${home_root}/workspace
 $(if [ "$(id -u)" != "$cu" ]; then
 	printf '           DSH_UID=%s\n           DSH_GID=%s   # 你的 uid 不是 %s，必须让容器用同一个 uid\n' "$(id -u)" "$(id -g)" "$cu"
 fi)
@@ -267,12 +267,12 @@ EOF
 # 工作区目录（宿主侧）
 check_workspace_dir() {
 	local project_dir="$1" allow_elevate="$2" auto_fix="$3"
-	check_host_dir "$project_dir" DSH_WORKSPACE "工作区目录" "/dsh/workspace" "$allow_elevate" "$auto_fix" || return 1
+	check_host_dir "$project_dir" DSH_WORKSPACE_HOST "工作区目录" "/dsh/workspace" "$allow_elevate" "$auto_fix" || return 1
 	DSH_WORKSPACE_DIR="$CHECK_HOST_DIR_PATH"
 	return 0
 }
 
-# dsh 数据目录（DSH_HOME 的宿主侧）
+# dsh 数据目录（DSH_HOME_CONTAINER 的宿主侧）
 check_dsh_home_dir() {
 	local project_dir="$1" allow_elevate="$2" auto_fix="$3"
 	check_host_dir "$project_dir" DSH_HOME_HOST "dsh 数据目录" "/dsh" "$allow_elevate" "$auto_fix"
@@ -287,7 +287,7 @@ check_workspace() {
 		return 2
 	fi
 
-	# 数据目录（DSH_HOME 的宿主侧）与工作区都是 bind mount，属主不对容器就写不进。
+	# 数据目录（DSH_HOME_CONTAINER 的宿主侧）与工作区都是 bind mount，属主不对容器就写不进。
 	check_dsh_home_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
 	check_workspace_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
 

@@ -27,7 +27,7 @@ cd "$PROJECT_DIR"
 CLI_NAME=dshm
 ENV_FILE=.env
 CONTAINER=qxdho-dsh
-dsh_home_in_container() { env_value DSH_HOME /dsh; }
+dsh_home_in_container() { env_value_new DSH_HOME_CONTAINER /dsh; }
 dsh_home_host() { env_value DSH_HOME_HOST /dsh; }
 cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" "$(dsh_home_in_container)"; }
 
@@ -208,10 +208,11 @@ wait_healthy() {
 	return 1
 }
 
-# 启动/重建前的统一准备：对齐工作区默认值 + 目录属主预检。
-# up 和 restart 都要走这一步 —— 否则改了 DSH_WORKSPACE 之后直接重建容器，
+# 启动/重建前的统一准备：旧键改名 + 对齐默认值 + 目录属主预检。
+# up 和 restart 都要走这一步 —— 否则改了 DSH_WORKSPACE_HOST 之后直接重建容器，
 # dockerd 会把源目录建 root 属主，容器里写不进去，只能靠降级悄悄跑。
 prepare_workspace() {
+	migrate_legacy_keys
 	normalize_defaults
 	# 旧版数据在命名卷里：目标目录还是空的就先自动搬过来，否则新版起来会
 	# 「看起来像全新安装」。只在这一次会真正动手，之后目标非空即跳过。
@@ -366,7 +367,7 @@ up)
 	hdr "等待健康检查"
 	if wait_healthy; then
 		bind="$(env_value DSH_BIND 127.0.0.1)"
-		port="$(env_value PROXY_PORT 3080)"
+		port="$(env_value_new DSH_HTTP_PORT 3080)"
 		ok "服务已就绪"
 		if [ "$bind" = "0.0.0.0" ]; then
 			info "访问地址：http://<服务器IP>:${port}/"
@@ -392,7 +393,7 @@ restart)
 	hdr "重启服务（会重新读取 .env）"
 	# 用 `up -d` 而不是 `docker compose restart`：后者只是把现有容器里的进程重启，
 	# **不会**重读 .env，也不会因 compose 配置变化而重建容器。也就是说改了
-	# DSH_UID / DSH_WORKSPACE / 端口之后 `restart` 看着成功了、实际毫无变化。
+	# DSH_UID / DSH_WORKSPACE_HOST / 端口之后 `restart` 看着成功了、实际毫无变化。
 	# `up -d` 会按当前 .env 重建有变化的容器，符合「重启使新配置生效」的直觉；
 	# 配置没变时它等价于什么都不做（已是最新）。
 	prepare_workspace
@@ -413,12 +414,12 @@ status)
 	health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo -)"
 	restarts="$(docker inspect --format '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo -)"
 	info "状态：${state}    健康：${health}    重启次数：${restarts}"
-	info "端口：$(env_value DSH_BIND 127.0.0.1):$(env_value PROXY_PORT 3080) -> 容器 3080"
+	info "端口：$(env_value DSH_BIND 127.0.0.1):$(env_value_new DSH_HTTP_PORT 3080) -> 容器 3080"
 	info "登录用户：$(env_value DSH_AUTH_USER admin)"
 	if [ "$(env_value DSH_BIND 127.0.0.1)" = "0.0.0.0" ]; then
-		info "入口：http://<服务器IP>:$(env_value PROXY_PORT 3080)/"
+		info "入口：http://<服务器IP>:$(env_value_new DSH_HTTP_PORT 3080)/"
 	else
-		info "入口：http://127.0.0.1:$(env_value PROXY_PORT 3080)/（仅本机；对外请用反代或 SSH 隧道）"
+		info "入口：http://127.0.0.1:$(env_value_new DSH_HTTP_PORT 3080)/（仅本机；对外请用反代或 SSH 隧道）"
 	fi
 	;;
 
@@ -522,6 +523,7 @@ totp)
 
 update)
 	require_docker; require_env
+	migrate_legacy_keys
 	target=""; build=0
 	for a in "$@"; do
 		case "$a" in

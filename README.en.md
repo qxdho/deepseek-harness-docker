@@ -1,171 +1,289 @@
-# dsh one-click deploy image (DeepSeek Harness + login gate)
+# dsh Docker deployment
 
-Packages the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`@deepseek-ai/dsh`)
-web UI into a Docker image with a built-in login page, optional TOTP, and no token copying.
+> The code and documentation in this project are largely AI-generated. The author has performed
+> basic verification on a local machine, but the project has not been systematically tested.
+> Review the code and configuration before using it in production.
+>
+> This is an unofficial project and is not affiliated with DeepSeek. dsh itself is pre-release.
 
-> Unofficial community project. dsh is pre-release — see [SECURITY.md](SECURITY.md).
+## What this project is
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) is an agent tool: you
+interact with a model in a web UI, and the model can run commands and read or write files inside a
+designated workspace.
+
+Upstream dsh is installed with npm, started from the command line, listens on loopback only, and
+authenticates with a one-time token. Deploying it on a server for browser access therefore requires
+solving persistence, authentication, and reverse proxying separately. This project packages dsh as a
+Docker image and covers those gaps.
+
+```
+browser ──▶ proxy (0.0.0.0:3080) ──▶ dsh (127.0.0.1:3079)
+                                       ├── workspace
+                                       └── data directory (config / credentials / sessions / plugins)
+```
+
+The repository provides:
+
+- **Install script** `install.sh`: inspects `.env`, prompts only for missing values, then pulls the
+  image, checks directories, and starts the service.
+- **Login plugin**: [dsh-auth-gate](https://github.com/TecFancy/dsh-auth-gate) supplies the login
+  page, password authentication, optional TOTP, and login rate limiting, replacing the upstream
+  one-time token.
+- **proxy**: dsh supports loopback listeners only (upstream rejects `--host 0.0.0.0`), so external
+  access is handled by the proxy. It also fixes the settings page being unusable when dsh is reached
+  via a LAN address or domain name.
+- **`dshm` command**: deployment management, grouped into `service`, `auth`, `admin`, and `self`.
+- **Admin panel**: a program that runs on the host, providing status, start/stop/restart, logs, disk
+  usage, cache cleanup, and a console for running dshm commands.
+- **Configurable paths**: data directory, workspace, port, bind address, and container UID are all
+  configurable; the defaults work as-is.
+- **Non-root execution**: the container runs as an unprivileged user with `cap_drop: ALL` and
+  `no-new-privileges`, and file writes are confined to the workspace.
+
+dsh's source is not modified; only its official extension mechanisms are used.
+
+## Requirements
+
+- Docker with compose v2.
+- A directory for data. The default is `/dsh` on the host, which lives under the filesystem root and
+  therefore requires `sudo` on first creation. If sudo is not available, use another directory; see
+  "Data directory".
 
 ## Quick start
 
 ```bash
 git clone https://github.com/qxdho/deepseek-harness-docker.git
 cd deepseek-harness-docker
-./install.sh          # asks once for a password
+./install.sh
 ```
 
-Open `http://<host>:3080/`, sign in with `admin` + your password.
+The installer checks `.env` item by item: values that are already set are kept, empty ones are
+prompted for. These include the login password, username, port, bind address, data directory, and
+workspace. The password must be at least 14 characters and contain uppercase, lowercase, digits, and
+symbols.
 
-Set the model in **Settings → Model**, or add `DEEPSEEK_API_KEY=sk-...` to `.env` and run `./dshm service up`.
+Then open `http://<host>:3080/` and sign in as `admin` with that password.
 
-> Binds `127.0.0.1` by default. For direct IP access set `DSH_BIND=0.0.0.0` and re-run `./install.sh`.
+The service binds `127.0.0.1` by default, meaning it is reachable from the host only; a host-side
+reverse proxy is normally required. To test with direct IP access first, set `DSH_BIND=0.0.0.0` in
+`.env` and run `./install.sh` again.
 
-## Relationship to official dsh
-
-This project is a **deployment shell** around dsh. It does not modify dsh's source; it uses dsh's
-official extension points (profile bundles, the `__DSH_TRANSPORT__` seam).
-
-| | Official dsh | This project |
-|---|---|---|
-| Deployment | npm CLI | Docker image, one command |
-| Auth | one-time token | login page + password + optional TOTP + rate limiting |
-| Network | loopback only (`--host 0.0.0.0` rejected) | proxy exposes it, dsh stays on loopback |
-| LAN/domain | Settings unavailable off-localhost | fixed (`randomUUID` + `ownsHost` injection) |
-| Hardening | you configure it | non-root, `cap_drop: ALL`, `workspace-write` |
-
-```
-browser -> proxy 0.0.0.0:3080 -> dsh 127.0.0.1:3079 (web profile + dsh-auth-gate)
-```
-
-The proxy does **not** authenticate and does **not** touch dsh's files. Host/Origin are rewritten
-consistently to loopback, so no `--trusted-host` configuration is needed.
-
-## Configuration
-
-All in `.env`. Apply changes with `./dshm service up` (`restart` does not recreate the container).
-
-| Variable | Default | Notes |
-|---|---|---|
-| `DSH_AUTH_PASSWORD` | — (**required**) | Used on first boot; ≥14 chars with upper/lower/digit/symbol. Change later with `./dshm auth password` |
-| `PROXY_PORT` | `3080` | Host port |
-| `DSH_BIND` | `127.0.0.1` | `0.0.0.0` = reachable on the LAN |
-| `DSH_HOME_HOST` | `/dsh` | **Host** data dir (bind source). Under `/` by default, so the first run needs `sudo`; `$HOME/dsh` works too |
-| `DSH_HOME` | `/dsh` | **In-container** data dir (bind target); it is the root itself, no extra `.dsh` |
-| `DSH_WORKSPACE` | `/dsh/workspace` | **Host** workspace dir (follows `DSH_HOME_HOST` by default) |
-| `DSH_WORKSPACE_CONTAINER` | `/workspace` | **In-container** workspace path |
-| `DSH_UID` / `DSH_GID` | `1000` / `1000` | Container identity. Set to `id -u` / `id -g` when your host UID differs |
-| `DSH_TOTP` | `optional` | `off` / `optional` / `required` |
-| `DSH_COOKIE_SECURE` | `0` | **Must be 0 over HTTP**; set `1` for HTTPS |
-| `DSH_PUBLIC_HOST` | empty | Domain shown on the login page |
-
-Build-time variables (rebuild required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DEV_TOOLS`, `DSH_IMAGE`.
-
-> `DSH_AUTH_USER` / `DSH_AUTH_PASSWORD` only apply on first boot (no user file yet).
->
-> `AUTH_GATE_VERSION` only applies when the volume has no profile yet. To force a re-seed:
-> ```bash
-> docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm restart
-> ```
+The model API key can be set after signing in under **Settings → Model**, or in `.env` as
+`DEEPSEEK_API_KEY=sk-...` followed by `./dshm service up`.
 
 ## Commands
+
+`dshm` is organised into groups; run `dshm help` for the full list.
 
 ```bash
 # service
 ./dshm service up          # start, or apply .env changes
 ./dshm service restart     # restart
-./dshm service down        # stop (data kept)
+./dshm service down        # stop (data is kept)
 ./dshm service status      # health / port / login user
 ./dshm service logs        # logs
 ./dshm service shell       # shell into the container
 ./dshm service update      # upgrade dsh
+./dshm service disk        # disk usage
 
 # auth
 ./dshm auth password       # change login password
 ./dshm auth user add bob   # add a user
-./dshm auth totp enable    # enable two-factor
+./dshm auth totp enable    # enable two-factor authentication
 
-# panel / self
-./dshm admin install       # install the Docker admin panel (host or container)
+# admin panel / self
+./dshm admin install       # install the admin panel
 ./dshm self install        # register dshm as a system command
 ```
 
-> Flat legacy forms (`./dshm service up`, `./dshm auth password`, …) still work.
+The original flat forms (`./dshm up`, `./dshm pw`, `./dshm user add ...`) still work, but are no
+longer documented.
 
-## HTTPS
+## Admin panel
 
-Terminate TLS on the host with whatever you already run (Nginx, BaoTa, Cloudflare Tunnel) and
-reverse-proxy to `127.0.0.1:3080`. The host proxy must forward WebSocket. Then set
-`DSH_COOKIE_SECURE=1` and `DSH_PUBLIC_HOST=your.domain`.
+The admin panel is not a container; it is a program running on the host. It is installed by default
+into the `/dsh-manager` directory:
 
-## Persistence
+```
+/dsh-manager/dsh-admin        binary
+/dsh-manager/config.json      configuration (password hash, session secret, listen address, ...)
+/dsh-manager/dsh-admin.pid    pid file (only without systemd)
+/dsh-manager/dsh-admin.log    log (only without systemd)
+```
 
-| Location | Contents |
+It provides container status and health, start/stop/restart, logs, Docker disk usage, cleanup of
+dangling images and build cache, and a web console for running dshm commands (an allowlist, not a
+free-form shell).
+
+```bash
+./dshm admin install     # install; default directory /dsh-manager
+./dshm admin url         # print the address, default http://127.0.0.1:3090/
+./dshm admin password    # change the panel password
+./dshm admin status      # show whether it is running
+./dshm admin uninstall   # stop and remove
+```
+
+With root or passwordless sudo the panel runs under systemd and starts on boot; otherwise it runs in
+the background via a pid file and does not start automatically. It listens on `127.0.0.1` only;
+for remote access use an SSH tunnel: `ssh -L 3090:127.0.0.1:3090 user@host`.
+
+To change the install directory, set `DSH_ADMIN_DIR=$HOME/dsh-manager` in `.env`; a directory under
+your home directory needs no sudo.
+
+Note that the panel holds `docker.sock`, which is equivalent to host root. It therefore listens on
+`127.0.0.1` only and must not be exposed to the public internet.
+
+## Configuration
+
+Changes in `.env` take effect after `./dshm service up`. `restart` does not recreate the container,
+so environment variables are not re-read.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DSH_AUTH_PASSWORD` | none (required) | Used to create the account on first start; ≥14 characters with upper/lower/digit/symbol. Change later with `./dshm auth password` |
+| `PROXY_PORT` | `3080` | Host port |
+| `DSH_BIND` | `127.0.0.1` | Set to `0.0.0.0` for direct LAN access |
+| `DSH_HOME_HOST` | `/dsh` | Host data directory. Under the filesystem root, so first creation needs sudo; `$HOME/dsh` also works |
+| `DSH_HOME` | `/dsh` | In-container data directory. This value is the root itself; no `.dsh` is appended |
+| `DSH_WORKSPACE` | `/dsh/workspace` | Host workspace directory; follows the data directory by default |
+| `DSH_WORKSPACE_CONTAINER` | `/workspace` | In-container workspace path |
+| `DSH_UID` / `DSH_GID` | `1000` / `1000` | Container identity. Set to `id -u` / `id -g` when the host UID differs |
+| `DSH_TOTP` | `optional` | `off`, `optional`, or `required` |
+| `DSH_COOKIE_SECURE` | `0` | Set to `1` for HTTPS; must remain `0` over plain HTTP |
+| `DSH_PUBLIC_HOST` | empty | Domain shown on the login page |
+| `DSH_ADMIN_DIR` | `/dsh-manager` | Admin panel install directory |
+
+Build-time variables (a rebuild is required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DEV_TOOLS`,
+`DSH_IMAGE`. The remaining options are documented in `.env.example`.
+
+Two points to keep in mind:
+
+- The username and password only apply on the **first start**, when no user file exists yet.
+- `AUTH_GATE_VERSION` only applies when the profile is absent. To force a re-seed:
+  `docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm service up`.
+
+## Data directory
+
+Both the data directory and the workspace are bind mounts, and both paths are configurable:
+
+```bash
+DSH_HOME_HOST=/dsh                    # host data directory
+DSH_HOME=/dsh                         # in-container mount point
+DSH_WORKSPACE=/dsh/workspace          # host workspace
+DSH_WORKSPACE_CONTAINER=/workspace    # in-container workspace path
+```
+
+`DSH_HOME` is the root itself; no `.dsh` is appended (setting it to `/data` places the data directly
+under `/data`). The host directory must be writable by the container UID (1000 by default). The
+preflight check verifies this and repairs it when permissions allow, otherwise it prints the
+required command.
+
+Contents of the data directory:
+
+| Path | Contents |
 |---|---|
-| Host `DSH_HOME_HOST` (default `/dsh`) | config, credentials, sessions, login users — bind-mounted at the container `DSH_HOME` |
-| Host `DSH_WORKSPACE` (default `DSH_HOME_HOST/workspace`) | agent working files — bind-mounted at `DSH_WORKSPACE_CONTAINER` |
+| `settings.yaml` | UI settings: default model, UI preferences |
+| `.credentials.yaml` | Model API keys and other credentials, plus the session cookie signing secret (changing it forces everyone to sign in again) |
+| `profiles/` | Profiles (`web`, ...): configuration files and `node_modules`; plugins are installed here |
+| `sessions/` | Session records |
+| `storages/` | Plugin and tool state |
+| `attachments/` | Uploaded attachments |
+| `llm-deepseek/` | Local cache for the DeepSeek provider |
+| `home/` | HOME placeholder used by tools |
 
-Recreating the container does not log you out. Back up the host data directory. **Do not delete that
-directory** (`rm -rf /dsh` really deletes the data).
+Backing up this directory backs up the login users, sessions, plugins, and credentials. Do not
+delete it.
 
-Upgrading from the old named volume: `./dshm service migrate-home`.
+### Upgrading from an older version
 
-## Workspace permissions
+Older versions stored data in the named volume `dsh-home`; the current version uses bind mounts. If
+the service starts up looking like a fresh installation after upgrading, run:
 
-The workspace is a host directory bind-mounted at `/workspace` (default `/dsh/workspace`), and **a bind mount shadows the image's ownership**.
-The directory must therefore be writable by the container UID (1000 by default), or the agent fails:
+```bash
+./dshm service migrate-home
+```
+
+This copies the old volume into `DSH_HOME_HOST` (the source volume is mounted read-only and is not
+modified). Once the result has been verified, delete the old volume as instructed by the command
+output.
+
+## Directory ownership and permissions
+
+If the host directory is owned by root (for example when `docker compose up` is run directly and the
+directory is created by dockerd), a process running as UID 1000 inside the container cannot write to
+it. The symptom is a container that keeps restarting, or the agent reporting:
 
 ```
 EACCES: permission denied, mkdir '/workspace/xxx'
 ```
 
-`./install.sh` and `./dshm service up` check this against the container UID and fix it (as root or with
-passwordless `sudo`) before starting. With a bare `docker compose up -d` the container re-checks:
-if unwritable it does **not** exit (a non-zero exit under `restart: unless-stopped` becomes an
-endless restart loop) — it degrades to `$DSH_HOME/workspace`, keeps the UI reachable, and logs a
-banner. `DSH_WORKSPACE_STRICT=1` restores fail-fast.
+`./install.sh` and `./dshm service up` check this before starting and repair it when root or
+passwordless sudo is available; otherwise they print the command to run manually.
 
-Fix by hand:
+When the workspace is not writable, the container does not exit. It falls back to
+`$DSH_HOME/.workspace` and logs a notice, avoiding an endless restart loop under
+`restart: unless-stopped`. Set `DSH_WORKSPACE_STRICT=1` to make it exit instead.
+
+Manual repair:
 
 ```bash
 sudo chown -R 1000:1000 /dsh && ./dshm service up
 
 # Or use a directory you own (no sudo)
-mkdir -p ~/dsh-workspace
-echo 'DSH_WORKSPACE=~/dsh-workspace' >> .env
+mkdir -p ~/dsh-data
+# then edit .env:
+#   DSH_HOME_HOST=$HOME/dsh-data
+#   DSH_WORKSPACE=$HOME/dsh-data/workspace
 ./dshm service up
 ```
 
-**Host UID is not 1000?** (macOS Docker Desktop, NAS) set in `.env`:
+If the host UID is not 1000 (macOS Docker Desktop, NAS systems), make the container use the same
+identity by setting in `.env`:
 
 ```bash
 DSH_UID=1001          # id -u
 DSH_GID=1001          # id -g
 ```
 
-The container then runs as you, so bind-mount ownership matches. preflight checks and repairs the data dir and workspace ownership for the same UID. Re-run
-`./dshm service up` after changing these.
-
 ## Troubleshooting
 
-**Page does not open** → `./dshm logs`. First start takes ~10 s.
+**The page does not open**: run `./dshm service logs`. The first start takes about ten seconds.
 
-**Container keeps restarting** → host workspace ownership; the log contains `/workspace 不可写`.
-See Workspace permissions.
+**The container keeps restarting**: usually incorrect ownership of the data directory or workspace;
+the log states which one.
 
-**Password rejected, bounced back to login** → `DSH_COOKIE_SECURE=1` over plain HTTP; set `0`.
-
-**Upgrading from an older version** → the container was renamed from `dsh` to `qxdho-dsh`:
+**The proxy keeps printing `socket hang up` and the log contains
+`disabling profile plugin row "storage-domain"`**: the profile was seeded by an older image and is
+missing a peer symlink. Current versions repair this at startup; on an older image, re-seed once:
 
 ```bash
-docker rm -f dsh && ./dshm service up
+docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm service up
 ```
+
+**The service crashes after installing a plugin, or the log contains `No space left on device`**:
+the disk is full. Inspect usage and clean up:
+
+```bash
+./dshm service disk
+docker exec qxdho-dsh rm -rf /dsh/.npm /tmp/npm-cache
+docker image prune -a && docker builder prune
+```
+
+**The password is correct but the login page keeps coming back**: `DSH_COOKIE_SECURE=1` is set while
+the service is served over plain HTTP; set it to `0`.
+
+**Upgrading from an older version**: the container was renamed from `dsh` to `qxdho-dsh`; remove the
+old container first with `docker rm -f dsh`.
 
 ## Third-party components
 
-- [`dsh-auth-gate`](https://github.com/TecFancy/dsh-auth-gate) (MIT, v0.15.0) — login page, sessions, TOTP, rate limiting, token bridge
+- [dsh-auth-gate](https://github.com/TecFancy/dsh-auth-gate) (MIT, v0.15.0): login page, sessions,
+  TOTP, rate limiting, token-to-cookie bridge
 - `http-proxy` (MIT), `tini`, `pnpm`, `node:24-bookworm-slim`
-
-No source of these components is modified.
 
 ## License
 
-MIT. DeepSeek Harness and `dsh-auth-gate` are licensed separately.
+MIT. DeepSeek Harness and dsh-auth-gate are licensed separately.
+
+See [SECURITY.md](SECURITY.md) for security notes.

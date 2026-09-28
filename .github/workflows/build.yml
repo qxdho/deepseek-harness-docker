@@ -8,11 +8,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# 同一个 ref 上只保留最新一次运行：main 上连续 push 时，旧的那次推镜像已无意义，
-# PR 更是改一次就作废一次。tag 运行不取消（发布必须完整跑完）。
+# 同一个 ref 上不并行跑两次（后到的排队），但**不取消正在运行的运行**：
+# 多架构构建被半路掐断，GHCR 上可能只推了一半的 tag，比排队更糟。
+# 曾经写成 `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`，
+# 实测 push 时也会取消前一次运行（867c388 的 build 就这样被掐掉）。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io

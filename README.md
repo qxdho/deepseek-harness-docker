@@ -58,6 +58,7 @@ cd deepseek-harness-docker
 | `DSH_TOTP` | `optional` | `off` / `optional` / `required` |
 | `DSH_COOKIE_SECURE` | `0` | **HTTP 必须 0**；HTTPS 建议 `1` |
 | `DSH_PUBLIC_HOST` | 空 | 登录页显示的域名 |
+| `DSH_ADMIN_DIR` | `/dsh-manager` | 管理面板的安装目录（二进制 / 配置 / pidfile / 日志都在里面） |
 
 构建期变量（改了需重建镜像）：`DSH_VERSION`、`AUTH_GATE_VERSION`、`DEV_TOOLS`、`DSH_IMAGE`。
 
@@ -100,14 +101,24 @@ cd deepseek-harness-docker
 `./dshm admin install` 装一个 Docker 管理面板：容器状态、启动/停止/重启、日志、
 磁盘占用、一键清理，以及一个跑 `dshm` 命令的命令台。
 
-面板是**宿主机上的一个进程，不额外起容器**，所以 dsh 容器始终碰不到 `docker.sock`：
+面板是**宿主机上的一个进程，不额外起容器**，所以 dsh 容器始终碰不到 `docker.sock`。
+二进制、配置、pidfile、日志都放在**同一个目录**，默认 `/dsh-manager`（`.env` 的 `DSH_ADMIN_DIR` 可改）：
 
-- 有 root / 可 sudo：装到 `/usr/local/bin` + `/etc/dsh-admin`，用 systemd 常驻、开机自启；
-- **没有 root 也能用**：装到 `~/.local/bin` + `~/.config/dsh-admin`，用 pidfile 后台运行
-  （不会随开机自启，需要就自己加 crontab）。
+```
+/dsh-manager/dsh-admin        二进制
+/dsh-manager/config.json      配置（口令哈希、会话密钥、监听地址、allow_exec）
+/dsh-manager/dsh-admin.pid    pidfile（仅无 systemd 时）
+/dsh-manager/dsh-admin.log    日志（仅无 systemd 时）
+```
+
+- 有 root / 可 sudo：systemd 常驻、开机自启（unit 仍在 `/etc/systemd/system/`，里面用绝对路径）；
+- **没有 root**：把 `DSH_ADMIN_DIR` 设成你自己的目录（如 `$HOME/dsh-manager`），改用 pidfile
+  后台运行（不随开机自启）。
+
+> 默认 `/dsh-manager` 在根目录下，首次创建要 `sudo`——和 `DSH_HOME_HOST=/dsh` 同理。
 
 ```bash
-./dshm admin install            # 安装（不需要 sudo 也能装）
+./dshm admin install            # 安装（默认 /dsh-manager；放到 $HOME 下则免 sudo）
 ./dshm admin url                # 地址（默认 http://127.0.0.1:3090/）
 ./dshm admin password           # 改面板密码
 ./dshm admin status | logs

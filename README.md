@@ -168,14 +168,40 @@ cd deepseek-harness-docker
 
 ## 数据
 
-| 位置 | 内容 |
+dsh 把所有用户数据放在**一个根目录**里（上游叫 `DSH_HOME`，默认 `~/.dsh`）。本项目默认:
+
+```
+容器内 /home/node/.dsh  ←  命名卷 dsh-home  ←  宿主 /var/lib/docker/volumes/<项目名>_dsh-home/_data
+```
+
+`DSH_HOME` 就是**根目录本身**，不会再拼一层 `.dsh`（`DSH_HOME=/data` 的话数据直接摊在 `/data` 下）。
+想换容器内路径，在 `.env` 里改，然后 `./dshm service up`：
+
+```bash
+DSH_HOME=/data/.dsh        # 数据出现在 /data/.dsh 下
+```
+
+> 自定义路径时镜像里没有那个目录，命名卷首次使用会是 root 属主；预检会先用
+> `docker compose create` 把卷物化出来再修属主，所以照常 `./dshm service up` 即可。
+
+### DSH_HOME 里都有什么
+
+| 路径 | 作用 |
 |---|---|
-| 命名卷 `dsh-home` | 配置、模型凭据、会话、登录用户 |
-| `./workspace` | agent 工作文件 |
+| `settings.yaml` | 界面设置：默认模型、UI 偏好 |
+| `.credentials.yaml` | 模型 API Key 等凭据 + 会话 cookie 的签名密钥（动它会让所有人重新登录） |
+| `.anonymous-user-id` | 匿名使用统计的稳定 ID |
+| `profiles/` | profile（`web` 等）：`cordis.yml`、`cordis.patch.yml`、`package.json`、`node_modules`（插件装在这里） |
+| `sessions/` | 会话记录（按工作区分目录） |
+| `storages/` | 插件 / 工具的状态存储 |
+| `attachments/` | 上传的附件 |
+| `llm-deepseek/` | DeepSeek provider 的本地状态 / 缓存 |
+| `home/` | 给工具用的 HOME 占位目录 |
+| `workspace/` | 工作区降级目录（宿主 `/workspace` 不可写时才用） |
+
+**备份就备份整个 `dsh-home` 卷**：登录用户、会话、插件、凭据都在里面。
 
 重建容器不丢，不用重新登录。**不要用 `docker compose down -v`**（会删卷）。
-
-卷的实际位置：`/var/lib/docker/volumes/<项目名>_dsh-home/_data`。
 
 ## 工作区权限
 

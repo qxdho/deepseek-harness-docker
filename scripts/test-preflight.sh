@@ -293,6 +293,33 @@ else
 	bad "卷内检查路径不对：$(grep -n 'target=' scripts/preflight.sh | head -2)"
 fi
 
+echo "== 6f. DSH_HOME 可配置，卷查找跟随它 =="
+proj="$sandbox/dshhome"
+mkdir -p "$proj"
+printf 'DSH_HOME=/data/.dsh\n' >"$proj/.env"
+got="$(dsh_home_destination "$proj/.env")"
+[ "$got" = "/data/.dsh" ] && ok "读取 .env 里的 DSH_HOME" || bad "DSH_HOME 解析错误：$got"
+printf 'DSH_HOME=/data/"; rm -rf x\n' >"$proj/.env"
+got="$(dsh_home_destination "$proj/.env")"
+[ "$got" = "/home/node/.dsh" ] && ok "非法路径回退默认" || bad "非法路径未回退：$got"
+
+stub2="$sandbox/stub2"
+mkdir -p "$stub2"
+cat >"$stub2/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+"compose ps") echo deadbeefcafe ;;
+"inspect deadbeefcafe") echo "$4" ;;
+*) exit 0 ;;
+esac
+STUB
+chmod +x "$stub2/docker"
+got="$(PATH="$stub2:$PATH" dsh_home_volume_from_container /data/.dsh)"
+case "$got" in
+*"/data/.dsh"*) ok "卷查找按配置的挂载点匹配（而不是写死默认路径）" ;;
+*) bad "卷查找未使用配置路径：$got" ;;
+esac
+
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。
 # 覆盖两条路径：DSH_WORKSPACE_STRICT=1 时 fail-fast；默认时降级到容器内目录 ——

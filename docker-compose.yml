@@ -47,7 +47,10 @@ services:
       # 登录页显示的域名，例如 dsh.example.com；留空则显示回环地址
       DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:-}
     volumes:
-      - dsh-home:/home/node/.dsh
+      # DSH_HOME（dsh 的数据根：设置/凭据/会话/插件）挂在这里。默认
+      # /home/node/.dsh；在 .env 里改 DSH_HOME 即可换到别的容器内路径
+      # （例如 /data/.dsh）。注意 DSH_HOME 就是根目录本身，不会再拼一层 .dsh。
+      - dsh-home:${DSH_HOME:-/home/node/.dsh}
       - ${DSH_WORKSPACE:-./workspace}:/workspace
     security_opt:
       - no-new-privileges:true

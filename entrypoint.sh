@@ -50,8 +50,8 @@ for mount in "$DSH_HOME" "$WORKSPACE"; do
     log "ERROR: $mount 所在磁盘仅剩 ${free_mb}MB（阈值 ${DISK_MIN_MB}MB）"
     log "        装插件 / npm 缓存写满磁盘后，会 ENOSPC，dsh 起来又退出、代理刷 ECONNREFUSED。"
     log "        清理（在宿主机执行）："
-    log "          docker exec <容器> sh -c 'du -xh /home/node/.dsh --max-depth=2 | sort -h | tail -15'"
-    log "          docker exec <容器> rm -rf /home/node/.dsh/.npm    # npm 下载缓存"
+    log "          docker exec <容器> sh -c 'du -xh ${DSH_HOME} --max-depth=2 | sort -h | tail -15'"
+    log "          docker exec <容器> rm -rf ${DSH_HOME}/.npm    # npm 下载缓存"
     log "          docker system prune -a                            # 镜像 / 构建缓存"
     log "        或把 Docker 数据目录换到更大的盘上。"
   fi

@@ -116,6 +116,19 @@ if [ -x "$(dirname "$0")/smoke-workspace.sh" ]; then
 	fi
 fi
 
+# pnpm store 记账回归：镜像不能烤进 storeDir 记录，否则用户第一次装插件必然报
+# ERR_PNPM_UNEXPECTED_STORE。此前没有任何测试覆盖「装插件」这条路径，所以这个
+# bug 溜进了发布镜像。
+if [ -x "$(dirname "$0")/smoke-plugin.sh" ]; then
+	echo
+	echo "== 插件安装回归 =="
+	if "$(dirname "$0")/smoke-plugin.sh" "$IMAGE"; then
+		ok "插件安装回归通过"
+	else
+		bad "插件安装回归失败"
+	fi
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

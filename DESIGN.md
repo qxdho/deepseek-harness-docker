@@ -147,3 +147,31 @@ ignores permission bits, so a `chmod`-based fixture would pass even with the bug
 
 Linux hosts, amd64 and arm64. `scripts/preflight.sh` uses GNU `stat -c`; BSD/macOS `stat` is not supported
 (Docker Desktop's bind mounts do not reproduce the ownership problem anyway). Windows hosts are untested.
+
+## 8. The pnpm store record in the baked profile
+
+Installing a plugin at runtime fails with `ERR_PNPM_UNEXPECTED_STORE` unless the store path pnpm *computes*
+equals the one recorded in `node_modules/.modules.yaml`. The baked profile violated this: the build ran as
+root (`HOME=/root`) while the runtime is `HOME=$DSH_HOME`, so the record said
+`/root/.local/share/pnpm/store/v11` and the runtime computed `$DSH_HOME/.local/share/pnpm/store/v11`.
+
+Facts established by measurement (pnpm 11.7.0), each of which rules out an obvious-looking fix:
+
+- The store location comes from **`$PNPM_HOME/store`, else `$XDG_DATA_HOME/pnpm/store`, else
+  `$HOME/.local/share/pnpm/store`**. The current directory and project `.npmrc` are irrelevant.
+- **`store-dir` in `.npmrc` is ignored entirely** — project-level, `$HOME`-level and relative forms all had no
+  effect. Do not "fix" this by writing an `.npmrc`.
+- Environment overrides need the **`pnpm_config_`** prefix: pnpm 11 dropped `npm_config_*`
+  (`npm_config_registry` → `pnpm_config_registry` in the 11.0.0 release notes), so `npm_config_store_dir` is
+  silently discarded. `pnpm_config_store_dir` / `PNPM_CONFIG_STORE_DIR` do work.
+- Setting `pnpm_config_store_dir` alone does **not** clear the mismatch — the stale `storeDir` in
+  `.modules.yaml` still wins. The recorded and computed paths must match.
+- A relative `pnpm_config_store_dir` resolves against the profile, but pnpm records the **resolved absolute
+  path**, so copying the profile anywhere (exactly what seeding into the volume does) breaks it again.
+
+Since the profile is copied from the image into the data volume, its absolute path necessarily changes, so no
+"same path in both places" trick survives. The fix is to ship the profile **without** the record: the build
+deletes `node_modules/.modules.yaml`, and `entrypoint.sh` deletes it from the volume as well (which also heals
+deployments created by earlier images). pnpm then recomputes the store on the first plugin install and writes
+it back inside the `.env`-defined `DSH_HOME`. The installed plugin itself is untouched, so this does not
+reintroduce a network requirement for the first install.

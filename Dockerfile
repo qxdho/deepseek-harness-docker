@@ -39,7 +39,19 @@ RUN --mount=type=cache,target=/root/.npm \
  && test "$(dsh --version)" = "${DSH_VERSION}"
 
 # 预置一个带 dsh-auth-gate 的 web profile。装进镜像后，首次启动无需联网装插件。
-ENV DSH_HOME=/opt/dsh-seed
+#
+# HOME 必须显式设成 DSH_HOME：基础镜像的 HOME 是 /root，而 pnpm 把 store 位置
+# 记在 `node_modules/.modules.yaml` 里（默认 $HOME/.local/share/pnpm/store 或
+# $XDG_DATA_HOME/pnpm/store）。不设就会记成 /root/...，而运行期 HOME=$DSH_HOME，
+# 两个路径对不上 → 用户第一次装插件报 ERR_PNPM_UNEXPECTED_STORE。
+#
+# 但仅仅让两边 HOME 一致还不够：profile 在运行期会被复制进数据卷，绝对路径必然
+# 与镜像内不同，而 pnpm 记的是**解析后的绝对路径**。所以构建完直接删掉这个记账
+# 文件（见本 RUN 末尾）—— 运行期第一次装插件时 pnpm 会按当时的环境重新算并写回，
+# 也就落在 .env 定义的 DSH_HOME 里。插件本体已随 profile 进镜像，删除记账文件
+# 不影响「首次装插件无需联网」。
+ENV DSH_HOME=/opt/dsh-seed \
+    HOME=/opt/dsh-seed
 RUN set -eux; \
     mkdir -p "${DSH_HOME}"; \
     DSH_BIN="$(npm root --global)/@deepseek-ai/dsh/lib/bin.js"; \
@@ -60,6 +72,9 @@ RUN set -eux; \
       | node "${DSH_HOME}/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" user add build-smoke --password-stdin; \
     test -s "${DSH_HOME}/auth/users.yaml"; \
     rm -rf "${DSH_HOME}/auth"; \
+    # 丢掉构建期的 store 记账（它是本镜像内的绝对路径，运行期必然失配），
+    # 让运行期第一次 pnpm 操作时按 .env 定义的 DSH_HOME 重新计算并写回。
+    rm -f "${DSH_HOME}/profiles/web/node_modules/.modules.yaml"; \
     node --expose-internals "$DSH_BIN" --version
 
 # ── 阶段 2：运行镜像 ────────────────────────────────────────────────────────

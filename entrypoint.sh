@@ -132,6 +132,22 @@ if [ ! -f "$PROFILE/node_modules/dsh-auth-gate/lib/cli.js" ]; then
   die "profile 里没有 dsh-auth-gate，请重建镜像或执行 dsh plugin --profile web add dsh-auth-gate"
 fi
 
+# pnpm 把 store 位置记在 node_modules/.modules.yaml，运行期每次装插件都拿它跟当前
+# 环境算出的位置比对，不一致就报 ERR_PNPM_UNEXPECTED_STORE 拒绝安装。
+#
+# 记录的是构建期的绝对路径，而 profile 会被复制进数据卷、路径必然不同；旧镜像还会
+# 记成 /root/.local/share/pnpm/store（构建期 HOME=/root）。所以直接删除：pnpm 下一次
+# 装插件时会按当时的环境（.env 定义的 DSH_HOME/HOME）重新计算并写回。插件本体不受
+# 影响，也不影响「首次装插件无需联网」。
+#
+# 这里不比较路径，因为要复刻 pnpm 的优先级（XDG_DATA_HOME 优先于 HOME）容易算错，
+# 而删掉本来就是我们要的结果 —— 新镜像构建时已删除该文件，此处对存量卷是幂等的。
+PROFILE_MODULES_YAML="$PROFILE/node_modules/.modules.yaml"
+if [ -f "$PROFILE_MODULES_YAML" ]; then
+  log "清理 profile 里过期的 pnpm store 记账，改为按当前数据目录重新计算"
+  rm -f "$PROFILE_MODULES_YAML"
+fi
+
 # dsh 会校验 profile 插件行的 peer 依赖。profile 存在持久卷里，可能是旧镜像播种的
 # （或者中途跑过 npm，把手工加的软链当 extraneous 删了），于是 peer 缺失/悬空，dsh
 # 打印 disabling profile plugin row "storage-domain" … ENOENT … package.json 之后

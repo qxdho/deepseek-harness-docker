@@ -100,7 +100,11 @@ perm_for_uid() {
 	o_uid="$(stat -c '%u' "$dir" 2>/dev/null)" || return 1
 	o_gid="$(stat -c '%g' "$dir" 2>/dev/null)" || return 1
 	mode="$(stat -c '%a' "$dir" 2>/dev/null)" || return 1
-	mode="${mode: -3}" # 去掉 setuid/setgid/sticky 位
+	# stat %a 对 000 只输出 "0"（不是 "000"）；短于 3 位时不能切片，
+	# 否则 ${mode: -3} 会得到空串，下面 10#$mode 直接报算术错误。
+	if [ "${#mode}" -ge 3 ]; then
+		mode="${mode: -3}" # 去掉 setuid/setgid/sticky 位
+	fi
 	m=$((10#$mode))
 	u=$(((m / 100) % 10))
 	g=$(((m / 10) % 10))
@@ -221,9 +225,15 @@ check_host_dir() {
     A. 把属主改为容器内的 uid ${cu}：
          ${fixcmd}
 
-    B. 换成一个你自己拥有的目录（不需要 sudo），在 .env 里改后 ./dshm service up：
-         mkdir -p "\$HOME/dsh-data"
-         把 ${key} 指过去；工作区若在数据目录下也要一起改（见 README）
+    B. 换成一个你自己拥有的目录（不需要 sudo）：
+         mkdir -p "\$HOME/dsh"
+         然后把 .env 改成：
+           DSH_HOME_HOST=\$HOME/dsh
+           DSH_WORKSPACE=\$HOME/dsh/workspace
+$(if [ "$(id -u)" != "$cu" ]; then
+	printf '           DSH_UID=%s\n           DSH_GID=%s   # 你的 uid 不是 %s，必须让容器用同一个 uid\n' "$(id -u)" "$(id -g)" "$cu"
+fi)
+         ./dshm service up
 
 EOF
 	return 1

@@ -304,6 +304,23 @@ else
 fi
 
 
+echo "== 6g. uid 不匹配 + 权限 000（perm_for_uid 短 mode 回归）=="
+# stat %a 对 000 只输出 "0"；若直接 ${mode: -3} 会得到空串，10#$mode 报算术错误。
+project="$sandbox/zero"
+mkdir -p "$project/ws"
+chmod 000 "$project/ws"
+printf 'DSH_WORKSPACE=%s/ws\nDSH_UID=4242\nDSH_GID=4242\n' "$project" >"$project/.env"
+set +e
+out="$(check_workspace_dir "$project" never 0 2>&1)"
+rc=$?
+set -e
+chmod 755 "$project/ws"
+[ "$rc" -ne 0 ] && ok "不可写被拦下（rc=$rc）" || bad "应被拦下"
+case "$out" in
+*"invalid integer"*) bad "perm_for_uid 出现算术错误：$out" ;;
+*) ok "没有算术错误，给出的是正常诊断" ;;
+esac
+
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。
 # 覆盖两条路径：DSH_WORKSPACE_STRICT=1 时 fail-fast；默认时降级到容器内目录 ——

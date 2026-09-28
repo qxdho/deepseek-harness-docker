@@ -77,6 +77,12 @@ RUN set -eux; \
     rm -f "${DSH_HOME}/profiles/web/node_modules/.modules.yaml"; \
     node --expose-internals "$DSH_BIN" --version
 
+# 预置 profile 必须归 node 所有。首启播种是运行期以 node 身份 `cp -a` 镜像里的
+# 这份 profile 到数据目录，而 profile 里含有 pnpm 以 600/700 建的文件
+# （package.json、.plugin-manager）—— 属主是 root 时 node 连读都读不到，
+# `cp -a` 直接失败、容器起不来（数据目录为空的全新部署必然踩到）。
+RUN chown -R node:node /opt/dsh-seed
+
 # ── 阶段 2：运行镜像 ────────────────────────────────────────────────────────
 FROM ${NODE_IMAGE}
 

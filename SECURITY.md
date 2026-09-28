@@ -10,7 +10,7 @@ is effectively a remote control plane for the container it runs in. Treat this i
 - Non-root runtime user (`node`, uid 1000), `cap_drop: ALL`, `no-new-privileges:true`.
 - File sandbox defaults to `workspace-write`, enforced by Landlock on Linux (no capabilities needed).
 - No Docker socket, host root, or extra host paths are mounted by default.
-- Login users and the dsh cookie signing secret live in the `dsh-home` volume, not in the image.
+- Login users and the dsh cookie signing secret live in the host data directory (`DSH_HOME_HOST`, default `/dsh`), not in the image.
 
 ## What this does NOT protect you from
 

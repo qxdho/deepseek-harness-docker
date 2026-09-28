@@ -15,7 +15,7 @@ cd deepseek-harness-docker
 
 Open `http://<host>:3080/`, sign in with `admin` + your password.
 
-Set the model in **Settings → Model**, or add `DEEPSEEK_API_KEY=sk-...` to `.env` and run `./dshm up`.
+Set the model in **Settings → Model**, or add `DEEPSEEK_API_KEY=sk-...` to `.env` and run `./dshm service up`.
 
 > Binds `127.0.0.1` by default. For direct IP access set `DSH_BIND=0.0.0.0` and re-run `./install.sh`.
 
@@ -41,14 +41,17 @@ consistently to loopback, so no `--trusted-host` configuration is needed.
 
 ## Configuration
 
-All in `.env`. Apply changes with `./dshm up` (`restart` does not recreate the container).
+All in `.env`. Apply changes with `./dshm service up` (`restart` does not recreate the container).
 
 | Variable | Default | Notes |
 |---|---|---|
-| `DSH_AUTH_PASSWORD` | — (**required**) | Used on first boot; ≥14 chars with upper/lower/digit/symbol. Change later with `./dshm pw` |
+| `DSH_AUTH_PASSWORD` | — (**required**) | Used on first boot; ≥14 chars with upper/lower/digit/symbol. Change later with `./dshm auth password` |
 | `PROXY_PORT` | `3080` | Host port |
 | `DSH_BIND` | `127.0.0.1` | `0.0.0.0` = reachable on the LAN |
-| `DSH_WORKSPACE` | `./workspace` | Agent working directory — see Workspace permissions |
+| `DSH_HOME_HOST` | `/dsh` | **Host** data dir (bind source). Under `/` by default, so the first run needs `sudo`; `$HOME/dsh` works too |
+| `DSH_HOME` | `/dsh` | **In-container** data dir (bind target); it is the root itself, no extra `.dsh` |
+| `DSH_WORKSPACE` | `/dsh/workspace` | **Host** workspace dir (follows `DSH_HOME_HOST` by default) |
+| `DSH_WORKSPACE_CONTAINER` | `/workspace` | **In-container** workspace path |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | Container identity. Set to `id -u` / `id -g` when your host UID differs |
 | `DSH_TOTP` | `optional` | `off` / `optional` / `required` |
 | `DSH_COOKIE_SECURE` | `0` | **Must be 0 over HTTP**; set `1` for HTTPS |
@@ -60,7 +63,7 @@ Build-time variables (rebuild required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DE
 >
 > `AUTH_GATE_VERSION` only applies when the volume has no profile yet. To force a re-seed:
 > ```bash
-> docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web && ./dshm restart
+> docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm restart
 > ```
 
 ## Commands
@@ -85,7 +88,7 @@ Build-time variables (rebuild required): `DSH_VERSION`, `AUTH_GATE_VERSION`, `DE
 ./dshm self install        # register dshm as a system command
 ```
 
-> Flat legacy forms (`./dshm up`, `./dshm pw`, …) still work.
+> Flat legacy forms (`./dshm service up`, `./dshm auth password`, …) still work.
 
 ## HTTPS
 
@@ -97,24 +100,24 @@ reverse-proxy to `127.0.0.1:3080`. The host proxy must forward WebSocket. Then s
 
 | Location | Contents |
 |---|---|
-| `dsh-home` named volume | config, credentials, sessions, login users |
-| `./workspace` | agent working files |
+| Host `DSH_HOME_HOST` (default `/dsh`) | config, credentials, sessions, login users — bind-mounted at the container `DSH_HOME` |
+| Host `DSH_WORKSPACE` (default `DSH_HOME_HOST/workspace`) | agent working files — bind-mounted at `DSH_WORKSPACE_CONTAINER` |
 
-Recreating the container does not log you out. **Do not use `docker compose down -v`** (it deletes
-the volume).
+Recreating the container does not log you out. Back up the host data directory. **Do not delete that
+directory** (`rm -rf /dsh` really deletes the data).
 
-On-disk volume path: `/var/lib/docker/volumes/<project>_dsh-home/_data`.
+Upgrading from the old named volume: `./dshm service migrate-home`.
 
 ## Workspace permissions
 
-`./workspace` is a bind mount at `/workspace`, and **a bind mount shadows the image's ownership**.
+The workspace is a host directory bind-mounted at `/workspace` (default `/dsh/workspace`), and **a bind mount shadows the image's ownership**.
 The directory must therefore be writable by the container UID (1000 by default), or the agent fails:
 
 ```
 EACCES: permission denied, mkdir '/workspace/xxx'
 ```
 
-`./install.sh` and `./dshm up` check this against the container UID and fix it (as root or with
+`./install.sh` and `./dshm service up` check this against the container UID and fix it (as root or with
 passwordless `sudo`) before starting. With a bare `docker compose up -d` the container re-checks:
 if unwritable it does **not** exit (a non-zero exit under `restart: unless-stopped` becomes an
 endless restart loop) — it degrades to `$DSH_HOME/workspace`, keeps the UI reachable, and logs a
@@ -123,12 +126,12 @@ banner. `DSH_WORKSPACE_STRICT=1` restores fail-fast.
 Fix by hand:
 
 ```bash
-sudo chown -R 1000:1000 ./workspace && ./dshm up
+sudo chown -R 1000:1000 /dsh && ./dshm service up
 
 # Or use a directory you own (no sudo)
 mkdir -p ~/dsh-workspace
 echo 'DSH_WORKSPACE=~/dsh-workspace' >> .env
-./dshm up
+./dshm service up
 ```
 
 **Host UID is not 1000?** (macOS Docker Desktop, NAS) set in `.env`:
@@ -138,9 +141,8 @@ DSH_UID=1001          # id -u
 DSH_GID=1001          # id -g
 ```
 
-The container then runs as you, so bind-mount ownership matches. `./dshm up` also repairs the
-`dsh-home` volume ownership with a one-shot root container (idempotent). Re-run `./dshm up` after
-changing these.
+The container then runs as you, so bind-mount ownership matches. preflight checks and repairs the data dir and workspace ownership for the same UID. Re-run
+`./dshm service up` after changing these.
 
 ## Troubleshooting
 
@@ -154,7 +156,7 @@ See Workspace permissions.
 **Upgrading from an older version** → the container was renamed from `dsh` to `qxdho-dsh`:
 
 ```bash
-docker rm -f dsh && ./dshm up
+docker rm -f dsh && ./dshm service up
 ```
 
 ## Third-party components

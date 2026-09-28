@@ -62,7 +62,17 @@ ensure_password
 ensure_env DSH_AUTH_USER "登录用户名" "admin" 0 env_validate_username
 ensure_env PROXY_PORT "对外端口" "3080" 0 env_validate_port
 ensure_env DSH_BIND "监听地址（127.0.0.1=仅本机，0.0.0.0=局域网可访问）" "127.0.0.1" 0 env_validate_bind
-ensure_env DSH_WORKSPACE "工作区目录（挂到容器 /workspace）" "./workspace" 0 ""
+ensure_env DSH_WORKSPACE "工作区目录（宿主，挂到容器 /workspace）" "/dsh/workspace" 0 ""
+ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区路径" "/workspace" 0 ""
+ensure_env DSH_HOME_HOST "dsh 数据目录（宿主，bind 挂到容器）" "/dsh" 0 ""
+ensure_env DSH_HOME "容器内 dsh 数据目录" "/dsh" 0 ""
+
+# 数据目录换了、工作区还留在旧默认时，让工作区跟着走，避免一个在 /dsh 一个在别处
+_home_host="$(get_env DSH_HOME_HOST)"
+if [ -n "$_home_host" ] && [ "$_home_host" != "/dsh" ] && [ "$(get_env DSH_WORKSPACE)" = "/dsh/workspace" ]; then
+	set_env DSH_WORKSPACE "${_home_host}/workspace"
+	ok "DSH_WORKSPACE 跟随数据目录改为 ${_home_host}/workspace"
+fi
 
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────
 hdr "获取镜像"

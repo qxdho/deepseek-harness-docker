@@ -73,7 +73,7 @@ the need for per-domain `--trusted-host` configuration.
 
 ### 5.1 The `/workspace` bind-mount ownership trap
 
-`${DSH_WORKSPACE:-./workspace}:/workspace` is a bind mount, and **a bind mount shadows whatever the
+`${DSH_WORKSPACE:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}` is a bind mount, and **a bind mount shadows whatever the
 image set up underneath it**. The `chown -R node:node … /workspace` in the Dockerfile is therefore a
 no-op at runtime. Worse, when the host-side source directory does not exist, the Docker daemon creates
 it **as root** (Compose ignores `bind.create_host_path: false` —
@@ -120,18 +120,14 @@ container user — typically root (`sudo ./install.sh`, root VPS, 1Panel): `./wo
   (available in the image), would silently defeat `DSH_PERMISSION_MODE=workspace-write`: Landlock does not
   confine root. Same reason as §5.1.
 
-Non-default UIDs have a second consequence the workspace check cannot see: the `dsh-home` volume is seeded
-by Docker from the image directory, so it is owned by 1000. With no root inside the container nobody can fix
-it, and the agent cannot write its own config directory (sessions, credentials, login users).
-`check_home_volume()` repairs it from the host with a one-shot **disposable root container** — root in a
-throwaway container is not the same trade as root in the long-lived one.
+The data directory is a **host bind mount** (`DSH_HOME_HOST`, default `/dsh`, mounted at `DSH_HOME`,
+default `/dsh`), so its ownership comes from the host like the workspace. `check_dsh_home_dir()` applies the
+same container-UID rule and repairs it with `chown` (root or passwordless `sudo`) — no named volume and no
+disposable root container involved.
 
-The volume name cannot be guessed: Compose prefixes it with the project name (`<project>_dsh-home`), so the
-preflight reads the mounted name from the running container. The check targets the volume root, because the
-volume is mounted **at** `/home/node/.dsh`.
-
-A `DSH_HOME_VOLUME` override was deliberately **not** introduced: the name is fixed in `docker-compose.yml`,
-so a preflight-readable override would reintroduce the same mismatch.
+Container path and host path are both configurable (`DSH_HOME`, `DSH_HOME_HOST`), and so is the workspace
+(`DSH_WORKSPACE_CONTAINER`, `DSH_WORKSPACE`, default `DSH_HOME_HOST/workspace`). All are read from `.env`,
+so compose, the preflight and `dshm` cannot drift apart.
 
 ## 6. Verification
 

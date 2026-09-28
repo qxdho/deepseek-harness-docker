@@ -14,7 +14,7 @@ set -euo pipefail
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
-: "${DSH_HOME:=/home/node/.dsh}"
+: "${DSH_HOME:=/dsh}"
 : "${DSH_HOST:=127.0.0.1}"
 : "${DSH_PORT:=3079}"
 : "${PROXY_PORT:=3080}"
@@ -27,7 +27,7 @@ die() { log "ERROR: $*"; exit 1; }
 SEED=/opt/dsh-seed
 PROFILE="$DSH_HOME/profiles/web"
 WEB_LOG=/tmp/dsh-web.log
-WORKSPACE=/workspace
+WORKSPACE="${DSH_WORKSPACE_CONTAINER:-/workspace}"
 
 mkdir -p "$DSH_HOME/profiles"
 
@@ -67,7 +67,7 @@ done
 # 持久目录继续启动，让 UI 先能用，同时用醒目日志暴露宿主工作区不可用。
 # 需要旧的 fail-fast 行为时设 DSH_WORKSPACE_STRICT=1。
 WORKSPACE_STRICT="${DSH_WORKSPACE_STRICT:-0}"
-FALLBACK_WORKSPACE="${DSH_HOME}/workspace"
+FALLBACK_WORKSPACE="${DSH_HOME}/.workspace"
 
 workspace_ok=0
 mkdir -p "$WORKSPACE" 2>/dev/null || true

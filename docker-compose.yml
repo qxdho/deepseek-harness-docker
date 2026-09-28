@@ -14,7 +14,7 @@ services:
     # 容器内以哪个 uid/gid 运行。默认 1000:1000（镜像的 USER node）。
     # 宿主用户不是 1000 时（NAS、部分桌面发行版等）在 .env 里设 DSH_UID/DSH_GID
     # 为你的 uid/gid，这样 bind mount 的属主天然对得上，不用 chown 成 1000。
-    # 注意：scripts/preflight.sh 会按同一组值检查工作区与 dsh-home 卷的属主，
+    # 注意：scripts/preflight.sh 会按同一组值检查数据目录与工作区的属主，
     # 两边必须一致 —— 改这里的同时预检就已随之调整，无需额外操作。
     user: "${DSH_UID:-1000}:${DSH_GID:-1000}"
     # .env 里的变量都会传进容器，所以可以直接在 .env 里加
@@ -27,12 +27,9 @@ services:
     environment:
       DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}
       DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?请在 .env 中设置 DSH_AUTH_PASSWORD}
-      # HOME 指向持久卷而不是镜像里的 /home/node。两个原因：
-      #   1. 镜像里 /home/node 是 node(1000) 的 755 目录，DSH_UID 不是 1000 时
-      #      容器用户对它没有写权限，npm / pnpm / git 想往 $HOME 写缓存或配置就会失败。
-      #   2. 这个卷的属主由 preflight 按 DSH_UID 修正过，保证容器用户可写。
-      # DSH_HOME 本来就是绝对路径，不依赖 HOME，所以这样改不影响 dsh 自身。
-      HOME: ${DSH_HOME:-/home/node/.dsh}
+      # HOME 指向数据目录（DSH_HOME），别用镜像里的 /home/node：npm / pnpm / git
+      # 都会往 $HOME 写缓存或配置，而 /home/node 的属主不一定对得上容器用户。
+      HOME: ${DSH_HOME:-/dsh}
       # 容器内代理固定监听 3080，与上面 ports: 的容器侧一致。
       # 必须在这里钉死：`env_file: .env` 会把 .env 里的 PROXY_PORT（它表示**宿主
       # 端口**）也注入容器，覆盖镜像的 ENV PROXY_PORT=3080，于是代理会去监听
@@ -47,16 +44,15 @@ services:
       # 登录页显示的域名，例如 dsh.example.com；留空则显示回环地址
       DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:-}
     volumes:
-      # DSH_HOME（dsh 的数据根：设置/凭据/会话/插件）挂在这里。默认
-      # /home/node/.dsh；在 .env 里改 DSH_HOME 即可换到别的容器内路径
-      # （例如 /data/.dsh）。注意 DSH_HOME 就是根目录本身，不会再拼一层 .dsh。
-      - dsh-home:${DSH_HOME:-/home/node/.dsh}
-      - ${DSH_WORKSPACE:-./workspace}:/workspace
+      # dsh 数据根（DSH_HOME）：宿主目录 bind 到容器。
+      #   宿主：${DSH_HOME_HOST:-/dsh}    容器：${DSH_HOME:-/dsh}
+      # DSH_HOME 就是根目录本身，不会再拼一层 .dsh。
+      - ${DSH_HOME_HOST:-/dsh}:${DSH_HOME:-/dsh}
+      # 工作区：宿主默认放在数据目录下的 workspace/，容器内默认 /workspace。
+      - ${DSH_WORKSPACE:-/dsh/workspace}:${DSH_WORKSPACE_CONTAINER:-/workspace}
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     stop_grace_period: 20s
 
-volumes:
-  dsh-home:

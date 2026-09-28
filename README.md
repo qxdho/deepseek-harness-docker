@@ -21,7 +21,7 @@ cd deepseek-harness-docker
 打开 `http://<服务器IP>:3080/`，用 `admin` + 你的密码登录。
 
 登录后先在「设置 → 模型」填 DeepSeek API Key；或在 `.env` 里加 `DEEPSEEK_API_KEY=sk-...`
-后跑 `./dshm up`。
+后跑 `./dshm service up`。
 
 > 默认只绑 `127.0.0.1`。想用 IP 直接访问：`.env` 里 `DSH_BIND=0.0.0.0`，再跑 `./install.sh`。
 
@@ -43,14 +43,17 @@ cd deepseek-harness-docker
 
 ## 配置项
 
-改 `.env` 后跑 `./dshm up` 生效（`restart` 不重建容器，环境变量不会重读）。
+改 `.env` 后跑 `./dshm service up` 生效（`restart` 不重建容器，环境变量不会重读）。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号；≥14 位且含大小写/数字/符号。之后改密码用 `./dshm pw` |
+| `DSH_AUTH_PASSWORD` | 无（**必填**） | 首次启动建号；≥14 位且含大小写/数字/符号。之后改密码用 `./dshm auth password` |
 | `PROXY_PORT` | `3080` | 宿主机端口 |
 | `DSH_BIND` | `127.0.0.1` | `0.0.0.0` = 局域网可直连 |
-| `DSH_WORKSPACE` | `./workspace` | agent 工作目录，见「工作区权限」 |
+| `DSH_HOME_HOST` | `/dsh` | **宿主**数据目录（bind 源）。默认在根目录下，首次创建要 `sudo`；也可以写 `$HOME/dsh` |
+| `DSH_HOME` | `/dsh` | **容器内**数据目录（bind 目标）。就是根目录本身，不再拼 `.dsh` |
+| `DSH_WORKSPACE` | `/dsh/workspace` | **宿主**工作区目录，默认跟随 `DSH_HOME_HOST` |
+| `DSH_WORKSPACE_CONTAINER` | `/workspace` | **容器内**工作区路径 |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | 容器运行身份。宿主 uid 不是 1000 时改成 `id -u` / `id -g` |
 | `DSH_TOTP` | `optional` | `off` / `optional` / `required` |
 | `DSH_COOKIE_SECURE` | `0` | **HTTP 必须 0**；HTTPS 建议 `1` |
@@ -62,7 +65,7 @@ cd deepseek-harness-docker
 >
 > `AUTH_GATE_VERSION` 只在卷内没有 profile 时生效。要强制重播种：
 > ```bash
-> docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web && ./dshm restart
+> docker exec qxdho-dsh rm -rf /dsh/profiles/web && ./dshm service up
 > ```
 
 ## 常用命令
@@ -90,7 +93,7 @@ cd deepseek-harness-docker
 ./dshm self install        # 把 dshm 注册为系统命令（之后任意目录直接用 dshm）
 ```
 
-> 旧的扁平写法（`./dshm up`、`./dshm pw`、`./dshm user add …`）仍然可用，方便已有脚本。
+> 旧的扁平写法（`./dshm service up`、`./dshm auth password`、`./dshm user add …`）仍然可用，方便已有脚本。
 
 ## 管理面板
 
@@ -144,8 +147,8 @@ cd deepseek-harness-docker
 
 | 容器路径 | 类型 | 宿主机位置 |
 |---|---|---|
-| dsh `/home/node/.dsh` | 命名卷 `dsh-home` | `/var/lib/docker/volumes/<项目名>_dsh-home/_data` |
-| dsh `/workspace` | bind | `<项目目录>/workspace`（可用 `DSH_WORKSPACE` 改） |
+| dsh 数据目录（`DSH_HOME`，默认 `/dsh`） | bind | `DSH_HOME_HOST`（默认 `/dsh`） |
+| dsh 工作区（`DSH_WORKSPACE_CONTAINER`，默认 `/workspace`） | bind | `DSH_WORKSPACE`（默认 `DSH_HOME_HOST/workspace`） |
 
 面板跑在宿主机上，不占容器的挂载；它的配置在 `/etc/dsh-admin/config.json`
 （无 root 时 `~/.config/dsh-admin/config.json`），其中 `allow_exec` 控制命令台开关。
@@ -154,7 +157,7 @@ cd deepseek-harness-docker
 
 页面右下角有一个悬浮的「重启 DSH」按钮：**装/更新插件后点一下即可**，不用回命令行。
 
-- 等价于 `./dshm restart`：容器会重建，约十几秒，页面自动刷新回来。
+- 等价于 `./dshm service up`：容器会重建，约十几秒，页面自动刷新回来。
 - 鉴权复用登录插件：代理拿浏览器的 Cookie 去问 dsh 的 `/`，只有已登录（200）才允许；
   未登录 401。接口还要求自定义头 `X-DSH-Restart: 1`，跨站请求带不了它（防 CSRF）。
 - 依赖 compose 里的 `restart: unless-stopped`（本仓库默认）。若改成 `restart: "no"`，
@@ -168,21 +171,40 @@ cd deepseek-harness-docker
 
 ## 数据
 
-dsh 把所有用户数据放在**一个根目录**里（上游叫 `DSH_HOME`，默认 `~/.dsh`）。本项目默认:
+dsh 把所有用户数据放在**一个根目录**里（上游叫 `DSH_HOME`，默认 `~/.dsh`）。本项目默认
+把它 bind 挂到宿主，两边都可配置：
 
 ```
-容器内 /home/node/.dsh  ←  命名卷 dsh-home  ←  宿主 /var/lib/docker/volumes/<项目名>_dsh-home/_data
+宿主 /dsh（DSH_HOME_HOST）  ──bind──▶  容器 /dsh（DSH_HOME）
+宿主 /dsh/workspace        ──bind──▶  容器 /workspace
 ```
-
-`DSH_HOME` 就是**根目录本身**，不会再拼一层 `.dsh`（`DSH_HOME=/data` 的话数据直接摊在 `/data` 下）。
-想换容器内路径，在 `.env` 里改，然后 `./dshm service up`：
 
 ```bash
-DSH_HOME=/data/.dsh        # 数据出现在 /data/.dsh 下
+DSH_HOME_HOST=/dsh                    # 宿主数据目录（根目录下，首次要 sudo；也可 $HOME/dsh）
+DSH_HOME=/dsh                         # 容器内挂载点
+DSH_WORKSPACE=/dsh/workspace          # 宿主工作区（默认跟随数据目录）
+DSH_WORKSPACE_CONTAINER=/workspace    # 容器内工作区路径
 ```
 
-> 自定义路径时镜像里没有那个目录，命名卷首次使用会是 root 属主；预检会先用
-> `docker compose create` 把卷物化出来再修属主，所以照常 `./dshm service up` 即可。
+`DSH_HOME` 就是根目录本身，不会再拼一层 `.dsh`（写 `/data` 数据就摊在 `/data` 下）。
+改完必须 `./dshm service up`。宿主目录的属主必须是容器内 uid（默认 1000）——
+预检会检查并尝试修正。
+
+### 从旧命名卷迁移
+
+旧版本把数据放在命名卷 `dsh-home` 里。升级后如果起来像"全新安装"，用：
+
+```bash
+./dshm service migrate-home     # 把旧卷数据复制到 DSH_HOME_HOST（源卷只读，不动原数据）
+```
+
+确认没问题后再删旧卷（命令会提示）。手工方式：
+
+```bash
+docker run --rm --user 0:0 \
+  -v <项目名>_dsh-home:/from:ro -v /dsh:/to alpine:3.21 \
+  sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)'
+```
 
 ### DSH_HOME 里都有什么
 
@@ -199,33 +221,35 @@ DSH_HOME=/data/.dsh        # 数据出现在 /data/.dsh 下
 | `home/` | 给工具用的 HOME 占位目录 |
 | `workspace/` | 工作区降级目录（宿主 `/workspace` 不可写时才用） |
 
-**备份就备份整个 `dsh-home` 卷**：登录用户、会话、插件、凭据都在里面。
+**备份就备份整个数据目录**（`DSH_HOME_HOST`，默认 `/dsh`）：登录用户、会话、插件、凭据都在里面。
 
-重建容器不丢，不用重新登录。**不要用 `docker compose down -v`**（会删卷）。
+重建容器不丢数据；**也不要手滑删掉那个宿主目录**（`rm -rf /dsh` 会真的把数据删掉）。
 
 ## 工作区权限
 
-`./workspace` 以 bind mount 挂到 `/workspace`，**会遮蔽镜像里的属主**，所以该目录必须让
-容器内的 uid（默认 1000）能写。否则 agent 报：
+工作区是宿主机目录 bind 挂到容器（默认 `/dsh/workspace` → `/workspace`），**挂载会遮蔽镜像里的
+属主**，所以该目录必须让容器内的 uid（默认 1000）能写。否则 agent 报：
 
 ```
 EACCES: permission denied, mkdir '/workspace/xxx'
 ```
 
-`./install.sh` 与 `./dshm up` 会在启动前按容器 uid 检查并自动修正（root 或免密 sudo 时）；
-修正不了会报错并给出命令。直接 `docker compose up -d` 时容器自己也会查：**不可写不退出**，
-而是降级到 `$DSH_HOME/workspace` 继续启动（避免 `restart: unless-stopped` 造成无限重启），
-日志里打横幅。要恢复「不可写就退出」设 `DSH_WORKSPACE_STRICT=1`。
+`./install.sh` 与 `./dshm service up` 会在启动前按容器 uid 检查数据目录与工作区并自动修正
+（root 或免密 sudo 时）；修正不了会报错并给出命令。直接 `docker compose up -d` 时容器自己也会查：
+**不可写不退出**，而是降级到 `$DSH_HOME/.workspace` 继续启动（避免 `restart: unless-stopped`
+造成无限重启），日志里打横幅。要恢复「不可写就退出」设 `DSH_WORKSPACE_STRICT=1`。
 
 手工修复：
 
 ```bash
-sudo chown -R 1000:1000 ./workspace && ./dshm up
+sudo chown -R 1000:1000 /dsh && ./dshm service up
 
-# 或换成你自己的目录（不需要 sudo）
-mkdir -p ~/dsh-workspace
-echo 'DSH_WORKSPACE=~/dsh-workspace' >> .env
-./dshm up
+# 或换成你自己拥有的目录（不需要 sudo）
+mkdir -p ~/dsh-data
+# 编辑 .env：
+#   DSH_HOME_HOST=~/dsh-data
+#   DSH_WORKSPACE=~/dsh-data/workspace
+./dshm service up
 ```
 
 **宿主 uid 不是 1000**（macOS Docker Desktop、群晖等）：`.env` 里设
@@ -235,8 +259,7 @@ DSH_UID=1001          # id -u
 DSH_GID=1001          # id -g
 ```
 
-容器即以你的身份运行，bind mount 属主天然匹配。`./dshm up` 会用一次性 root 容器把
-`dsh-home` 卷的属主也改成同一 uid（幂等）。改这两个值后必须 `./dshm up`。
+容器即以你的身份运行，bind mount 属主天然匹配；预检会按同一 uid 检查并修正数据目录与工作区。
 
 ## 常见问题
 
@@ -249,7 +272,7 @@ DSH_GID=1001          # id -g
 旧镜像上强制重播种一次即可：
 
 ```bash
-docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web && ./dshm up
+docker exec qxdho-dsh rm -rf '/dsh/profiles/web && ./dshm service up
 ```
 
 **装了插件后崩了 / 代理刷 `ECONNREFUSED` / 日志含 `No space left on device`** → 磁盘被插件依赖
@@ -257,7 +280,7 @@ docker exec qxdho-dsh rm -rf /home/node/.dsh/profiles/web && ./dshm up
 
 ```bash
 ./dshm disk                                                   # 宿主 + 卷 + 最占空间的目录
-docker exec qxdho-dsh rm -rf /home/node/.dsh/.npm /tmp/npm-cache
+docker exec qxdho-dsh rm -rf '/dsh/.npm /tmp/npm-cache
 docker image prune -a && docker builder prune                 # 宿主上的镜像/构建缓存
 ```
 
@@ -269,7 +292,7 @@ docker image prune -a && docker builder prune                 # 宿主上的镜�
 **旧版本升级** → 容器名已从 `dsh` 改为 `qxdho-dsh`，先清理旧容器：
 
 ```bash
-docker rm -f dsh && ./dshm up
+docker rm -f dsh && ./dshm service up
 ```
 
 ## 第三方组件

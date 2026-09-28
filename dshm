@@ -27,7 +27,9 @@ cd "$PROJECT_DIR"
 CLI_NAME=dshm
 ENV_FILE=.env
 CONTAINER=qxdho-dsh
-dsh_home_in_container() { env_value DSH_HOME /home/node/.dsh; }
+dsh_home_in_container() { env_value DSH_HOME /dsh; }
+dsh_home_host() { env_value DSH_HOME_HOST /dsh; }
+workspace_in_container() { env_value DSH_WORKSPACE_CONTAINER /workspace; }
 cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" "$(dsh_home_in_container)"; }
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
@@ -236,6 +238,7 @@ ${B}服务${RST} — 管理 dsh 容器
   dshm service shell             进容器
   dshm service version           容器内 dsh 版本
   dshm service update [版本]      升级 dsh（重建镜像）
+  dshm service migrate-home      把旧命名卷 dsh-home 的数据迁到宿主数据目录
   dshm service url               一次性 launch URL（排障）
   dshm service disk              磁盘占用 / 清理命令
 EOF
@@ -542,6 +545,37 @@ version)
 	require_docker; require_running
 	hdr "容器内 dsh 版本"
 	docker exec "$CONTAINER" dsh --version
+	;;
+
+migrate-home | migrate)
+	# 旧版本把 DSH_HOME 放在命名卷 dsh-home 里；现在默认是宿主 bind 挂载。
+	# 升级后用它把老数据搬过来，避免"看起来像全新安装"。
+	require_docker
+	hdr "迁移旧命名卷数据到宿主数据目录"
+	dest="$(dsh_home_host)"
+	vol="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '(^|_)dsh-home$' | head -n1 || true)"
+	if [ -z "$vol" ]; then
+		ok "没找到旧的 dsh-home 命名卷，无需迁移"
+	elif [ -d "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+		die "$dest 里已有数据，为避免覆盖请先自行确认；手工迁移命令见 README「从命名卷迁移」"
+	else
+		if ! mkdir -p "$dest" 2>/dev/null; then
+			command -v sudo >/dev/null 2>&1 || die "无法创建 $dest"
+			sudo mkdir -p "$dest"
+		fi
+		info "从卷 ${vol} 复制到 ${dest}（只读挂载源卷，不动原数据）…"
+		docker run --rm --user 0:0 \
+			-v "${vol}:/from:ro" -v "${dest}:/to" alpine:3.21 \
+			sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)' || die "迁移失败"
+		cu="$(env_value DSH_UID 1000)"; cg="$(env_value DSH_GID 1000)"
+		if [ "$(id -u)" = "0" ]; then
+			chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+		elif command -v sudo >/dev/null 2>&1; then
+			sudo chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+		fi
+		ok "迁移完成：${vol} → ${dest}"
+		info "确认 dsh 正常后，可以删掉旧卷： docker volume rm ${vol}"
+	fi
 	;;
 
 install-self | link | install-cli)

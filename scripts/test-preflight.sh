@@ -33,10 +33,22 @@ have_sudo() { command -v sudo >/dev/null 2>&1; }
 # 而不是 export。不再 export DSH_UID，以便第 6c 节能验证「shell 环境不会意外生效」。
 write_env() {
 	local project="$1" ws="$2" uid="$3" gid="$4"
+	mkdir -p "${project}/dsh-home"
 	{
+		printf 'DSH_HOME_HOST=%s/dsh-home\n' "$project"
 		[ -n "$ws" ] && printf 'DSH_WORKSPACE=%s\n' "$ws"
 		printf 'DSH_UID=%s\nDSH_GID=%s\n' "$uid" "$gid"
 	} >"${project}/.env"
+}
+
+# 手工写 .env 的用例：确保数据目录也指向沙箱（否则默认 /dsh 需要 root）。
+# 没有 .env 的用例（缺 .env 的断言）直接跳过，不能把文件创建出来。
+envhome() {
+	local project="$1"
+	[ -f "${project}/.env" ] || return 0
+	grep -q '^DSH_HOME_HOST=' "${project}/.env" && return 0
+	mkdir -p "${project}/dsh-home"
+	printf 'DSH_HOME_HOST=%s/dsh-home\n' "$project" >>"${project}/.env"
 }
 
 TEST_UID="$(id -u)"
@@ -54,6 +66,7 @@ echo "== 1. 工作区存在且可写 =="
 project="$sandbox/ok"
 mkdir -p "$project/workspace"
 write_env "$project" ./workspace "$TEST_UID" "$TEST_GID"
+	envhome "$project"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "可写目录返回 0"
 else
@@ -66,20 +79,30 @@ else
 fi
 
 echo "== 2. 默认值：.env 未设 DSH_WORKSPACE =="
-project="$sandbox/default"
-mkdir -p "$project"
-write_env "$project" "" "$TEST_UID" "$TEST_GID"
-if check_workspace "$project" auto 0 >/dev/null 2>&1; then
-	ok "默认目录 ./workspace 自动创建并通过"
+# 默认工作区现在是 $DSH_HOME_HOST/workspace（绝对路径 /dsh/workspace），
+# 不再是项目目录下的 ./workspace。非 root 下 /dsh 建不出来，应报错并指明路径。
+if [ "$(id -u)" = "0" ]; then
+	echo "  SKIP root 下 /dsh 可被直接创建"
 else
-	bad "默认目录应自动创建并通过"
+	project="$sandbox/default"
+	mkdir -p "$project"
+	write_env "$project" "" "$TEST_UID" "$TEST_GID"
+	envhome "$project"
+	set +e
+	out="$(check_workspace "$project" never 0 2>&1)"
+	set -e
+	case "$out" in
+	*"/dsh/workspace"*) ok "未配置时回退到 /dsh/workspace" ;;
+	*) bad "默认工作区路径不对：$out" ;;
+	esac
 fi
-[ -d "$project/workspace" ] && ok "确认创建了 ./workspace" || bad "./workspace 没有被创建"
+
 
 echo "== 3. 绝对路径 + ~ 展开 =="
 project="$sandbox/abs"
 mkdir -p "$project"
 write_env "$project" "$sandbox/abs-target" "$TEST_UID" "$TEST_GID"
+	envhome "$project"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "绝对路径可用"
 else
@@ -99,6 +122,7 @@ mkdir -p "$project/workspace"
 chmod 000 "$project/workspace"
 write_env "$project" ./workspace "$TEST_UID" "$TEST_GID"
 set +e
+	envhome "$project"
 out="$(check_workspace "$project" never 0 2>&1)"
 rc=$?
 set -e
@@ -122,6 +146,7 @@ project="$sandbox/quoted"
 mkdir -p "$project"
 # 故意把值加上双引号，验证解析时会剥掉
 write_env "$project" "\"$sandbox/quoted-target\"" "$TEST_UID" "$TEST_GID"
+	envhome "$project"
 if check_workspace "$project" auto 0 >/dev/null 2>&1; then
 	ok "带引号的值可解析"
 else
@@ -138,6 +163,7 @@ echo "== 5. 缺少 .env =="
 project="$sandbox/noenv"
 mkdir -p "$project"
 set +e
+	envhome "$project"
 check_workspace "$project" never 0 >/dev/null 2>&1
 rc=$?
 set -e
@@ -156,6 +182,7 @@ else
 	if have_sudo && sudo -n true 2>/dev/null; then
 		sudo chown 0:0 "$project/workspace"
 		set +e
+	envhome "$project"
 		out="$(check_workspace "$project" auto 1 2>&1)"
 		rc=$?
 		set -e
@@ -175,6 +202,7 @@ else
 		# 无 sudo：无法伪造 root 属主，改用 000 权限验证同一条判定路径
 		chmod 000 "$project/workspace"
 		set +e
+	envhome "$project"
 		out="$(check_workspace "$project" never 0 2>&1)"
 		rc=$?
 		set -e
@@ -202,6 +230,7 @@ else
 	bad "前置条件失败：部署者本应可写"
 fi
 set +e
+	envhome "$project"
 out="$(check_workspace "$project" never 0 2>&1)"
 rc=$?
 set -e
@@ -236,89 +265,44 @@ else
 	bad "未配置时应回退到 1000，实际 $(container_uid "$project2/.env")"
 fi
 
-echo "== 6d. dsh-home 卷检查（仅 DSH_UID 非 1000 时涉入 docker）=="
-# 直接调 check_home_volume：这里要验的是卷检查自身。若走 check_workspace，
-# 工作区检查会先失败（uid 1001 写不进测试机属主的目录）而根本到不了卷检查。
-project="$sandbox/vol-default"
-mkdir -p "$project/workspace"
-write_env "$project" ./workspace 1000 1000
-if check_home_volume "$project" 0 >/dev/null 2>&1; then
-	ok "DSH_UID=1000 时直接返回 0（不触碰 docker）"
+echo "== 6d. 数据目录（DSH_HOME_HOST）检查 =="
+project="$sandbox/homecheck"
+mkdir -p "$project/data" "$project/ws"
+printf 'DSH_HOME_HOST=%s/data\nDSH_WORKSPACE=%s/ws\n' "$project" "$project" >"$project/.env"
+if check_dsh_home_dir "$project" auto 0 >/dev/null 2>&1; then
+	ok "可写的数据目录通过"
 else
-	bad "DSH_UID=1000 时不该失败"
+	bad "可写的数据目录应通过"
 fi
-project="$sandbox/vol-nodocker"
-mkdir -p "$project/workspace"
-write_env "$project" ./workspace 1001 1001
-if command -v docker >/dev/null 2>&1; then
-	echo "  SKIP 本机有 docker，无法验证「无 docker」分支"
+printf 'DSH_HOME_HOST=%s/data\nDSH_WORKSPACE=%s/ws\n' "$project" "$project" >"$project/.env"
+chmod 000 "$project/data"
+set +e
+out="$(check_dsh_home_dir "$project" never 0 2>&1)"
+rc=$?
+set -e
+chmod 755 "$project/data"
+[ "$rc" -ne 0 ] && ok "不可写的数据目录被拦下（rc=$rc）" || bad "不可写却通过"
+case "$out" in
+*DSH_HOME_HOST*) ok "报错指明了 .env 键名 DSH_HOME_HOST" ;;
+*) bad "报错未指明键名：$out" ;;
+esac
+
+echo "== 6e. 数据目录默认值 /dsh =="
+if [ "$(id -u)" = "0" ]; then
+	echo "  SKIP root 下 /dsh 可被直接创建"
 else
+	project="$sandbox/defaulthome"
+	mkdir -p "$project"
+	: >"$project/.env"
 	set +e
-	out="$(check_home_volume "$project" 0 2>&1)"
-	rc=$?
+	out="$(check_dsh_home_dir "$project" never 0 2>&1)"
 	set -e
-	[ "$rc" -eq 0 ] && ok "无 docker 时给提示但不阻断（rc=0）" || bad "不该阻断（rc=$rc）"
 	case "$out" in
-	*docker*) ok "提示里说明了缺少 docker" ;;
-	*) bad "提示不明确：[$out]" ;;
+	*"/dsh"*) ok "未配置时回退到默认 /dsh" ;;
+	*) bad "默认值不对：$out" ;;
 	esac
 fi
 
-echo "== 6e. 卷名与卷内路径必须与实际挂载一致 =="
-# 两个曾经出错的地方（会让整个 DSH_UID 修复静默失效）：
-#   1. 卷名不能写死 dsh-home —— Compose 会加项目名前缀（<项目名>_dsh-home），
-#      必须从运行中的容器读实际挂载名。
-#   2. 卷挂在 /home/node/.dsh，所以卷根目录就是 DSH_HOME；
-#      检查目标应是 /dsh-home，而不是 /dsh-home/.dsh。
-stubdir="$sandbox/stub-bin"
-mkdir -p "$stubdir"
-cat >"$stubdir/docker" <<'STUB'
-#!/usr/bin/env bash
-# 模拟：compose ps -q 返回一个容器 id；inspect 该容器时报告卷 <项目>_dsh-home
-case "$1 $2" in
-"compose ps") echo "deadbeefcafe" ;;
-"inspect deadbeefcafe") echo "myproj_dsh-home" ;;
-*) exit 0 ;;
-esac
-STUB
-chmod +x "$stubdir/docker"
-got="$(PATH="$stubdir:$PATH" dsh_home_volume_from_container)"
-[ "$got" = "myproj_dsh-home" ] && ok "卷名从容器实际挂载读取（${got}），不靠猜" \
-	|| bad "卷名解析错误：[$got]"
-
-# 卷内检查路径：必须是卷根 /dsh-home
-if grep -q '^	target="/dsh-home"$' scripts/preflight.sh; then
-	ok "卷内检查路径为卷根 /dsh-home（而非 /dsh-home/.dsh）"
-else
-	bad "卷内检查路径不对：$(grep -n 'target=' scripts/preflight.sh | head -2)"
-fi
-
-echo "== 6f. DSH_HOME 可配置，卷查找跟随它 =="
-proj="$sandbox/dshhome"
-mkdir -p "$proj"
-printf 'DSH_HOME=/data/.dsh\n' >"$proj/.env"
-got="$(dsh_home_destination "$proj/.env")"
-[ "$got" = "/data/.dsh" ] && ok "读取 .env 里的 DSH_HOME" || bad "DSH_HOME 解析错误：$got"
-printf 'DSH_HOME=/data/"; rm -rf x\n' >"$proj/.env"
-got="$(dsh_home_destination "$proj/.env")"
-[ "$got" = "/home/node/.dsh" ] && ok "非法路径回退默认" || bad "非法路径未回退：$got"
-
-stub2="$sandbox/stub2"
-mkdir -p "$stub2"
-cat >"$stub2/docker" <<'STUB'
-#!/usr/bin/env bash
-case "$1 $2" in
-"compose ps") echo deadbeefcafe ;;
-"inspect deadbeefcafe") echo "$4" ;;
-*) exit 0 ;;
-esac
-STUB
-chmod +x "$stub2/docker"
-got="$(PATH="$stub2:$PATH" dsh_home_volume_from_container /data/.dsh)"
-case "$got" in
-*"/data/.dsh"*) ok "卷查找按配置的挂载点匹配（而不是写死默认路径）" ;;
-*) bad "卷查找未使用配置路径：$got" ;;
-esac
 
 echo "== 7. 容器内 entrypoint 的工作区检查 =="
 # entrypoint.sh 会以自己所在目录为基准，所以拷到临时目录里单测它的检查逻辑。
@@ -330,16 +314,15 @@ else
 	stage="$sandbox/ep"
 	mkdir -p "$stage"
 	cp "$ENTRYPOINT" "$stage/entrypoint.sh"
-	# 把 /workspace 与镜像内的 SEED 换成可控值：entrypoint 里都是硬编码，
-	# sed 之后测试既不碰真的 /workspace，也不依赖 /opt/dsh-seed 是否存在。
-	sed -i "s#^WORKSPACE=/workspace#WORKSPACE=$sandbox/ep-ws#" "$stage/entrypoint.sh"
+	# 把镜像内的 SEED 换成可控值；容器内工作区路径用 DSH_WORKSPACE_CONTAINER
+	# 环境变量传给 entrypoint（它已支持配置，不再硬编码）。
 	sed -i "s#^SEED=/opt/dsh-seed#SEED=/nonexistent-seed#" "$stage/entrypoint.sh"
 	mkdir -p "$sandbox/ep-ws"
 	chmod 000 "$sandbox/ep-ws"
 
 	# 7a. 严格模式：不可写 → 退出（rc != 0）并给 chown 指引
 	set +e
-	out="$(DSH_WORKSPACE_STRICT=1 DSH_HOME="$sandbox/ep-home-a" bash "$stage/entrypoint.sh" 2>&1)"
+	out="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep-ws" DSH_WORKSPACE_STRICT=1 DSH_HOME="$sandbox/ep-home-a" bash "$stage/entrypoint.sh" 2>&1)"
 	rc=$?
 	set -e
 	if [ "$rc" -ne 0 ]; then
@@ -358,14 +341,14 @@ else
 
 	# 7b. 默认模式：不可写 → 不在这里退出，降级到容器内可写目录后继续
 	set +e
-	out="$(DSH_HOME="$sandbox/ep-home-b" bash "$stage/entrypoint.sh" 2>&1)"
+	out="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep-ws" DSH_HOME="$sandbox/ep-home-b" bash "$stage/entrypoint.sh" 2>&1)"
 	rc=$?
 	set -e
 	case "$out" in
 	*"工作区降级"*) ok "默认模式打印了降级横幅" ;;
 	*) bad "默认模式缺少降级横幅：$out" ;;
 	esac
-	[ -d "$sandbox/ep-home-b/workspace" ] && ok "降级目录已创建" || bad "降级目录未创建"
+	[ -d "$sandbox/ep-home-b/.workspace" ] && ok "降级目录已创建" || bad "降级目录未创建"
 	case "$out" in
 	*"预置 profile"*) ok "降级后继续走到播种阶段（因测试用 SEED 缺失而停）" ;;
 	*) bad "降级后未继续：$out" ;;
@@ -380,7 +363,7 @@ echo "== 8. entrypoint 会补齐持久卷 profile 里缺失的 peer 软链 =="
 stage="$sandbox/ep3"
 mkdir -p "$stage"
 cp "$ENTRYPOINT" "$stage/entrypoint.sh"
-sed -i "s#^WORKSPACE=/workspace#WORKSPACE=$sandbox/ep3-ws#" "$stage/entrypoint.sh"
+
 sed -i "s#^DSH_PKG=/usr/local/lib/node_modules/@deepseek-ai/dsh#DSH_PKG=$sandbox/ep3-pkg#" "$stage/entrypoint.sh"
 mkdir -p "$sandbox/ep3-ws"
 # 模拟当前镜像里的 dsh 安装
@@ -395,7 +378,7 @@ mkdir -p "$home/profiles/web/node_modules/dsh-auth-gate/lib"
 : >"$home/profiles/web/node_modules/dsh-auth-gate/lib/cli.js"
 
 set +e
-out="$(DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+out="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
 rc=$?
 set -e
 # entrypoint 会在「创建管理员」处因缺 DSH_AUTH_PASSWORD 退出，但 peer 修复应已完成
@@ -410,7 +393,7 @@ esac
 
 # 幂等：第二次启动不应再补齐
 set +e
-out2="$(DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+out2="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
 set -e
 case "$out2" in
 *"补齐 profile peer 依赖"*) bad "第二次启动仍在补齐（非幂等）" ;;
@@ -419,7 +402,7 @@ esac
 
 # 磁盘预检：把阈值抬到不可能满足，应给出明确提示（只告警、不退出）
 set +e
-out3="$(DSH_DISK_MIN_MB=99999999 DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+out3="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_DISK_MIN_MB=99999999 DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
 set -e
 case "$out3" in
 *"阈值"*) ok "磁盘余量不足时给出提示" ;;

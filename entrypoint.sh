@@ -29,7 +29,17 @@ PROFILE="$DSH_HOME/profiles/web"
 WEB_LOG=/tmp/dsh-web.log
 WORKSPACE="${DSH_WORKSPACE_CONTAINER:-/workspace}"
 
-mkdir -p "$DSH_HOME/profiles"
+# 数据目录通常也是 bind mount：宿主上由 dockerd 以 root 自动创建、或部署者用 root
+# 跑过的话，容器内的 uid 连 profiles 都建不出来。这里给一条能直接照做的诊断，
+# 而不是丢一句 `mkdir: Permission denied`（病因在宿主机属主，报错点却在容器里）。
+if ! mkdir -p "$DSH_HOME/profiles" 2>/dev/null; then
+  ws_owner="$(stat -c '%U:%G (%a)' "$DSH_HOME" 2>/dev/null || echo '未知')"
+  log "ERROR: 数据目录 ${DSH_HOME} 不可写（属主 ${ws_owner}，当前用户 $(id -un) $(id -u):$(id -g)）"
+  log "        它是 bind mount，属主由宿主机决定。在宿主机上二选一："
+  log "          A. sudo mkdir -p <DSH_HOME_HOST> && sudo chown -R $(id -u):$(id -g) <DSH_HOME_HOST>"
+  log "          B. 把 .env 的 DSH_HOME_HOST / DSH_WORKSPACE 换到你自己的目录，再 ./dshm service up"
+  exit 1
+fi
 
 # 插件安装的 npm 缓存落在 /tmp/npm-cache（见 Dockerfile），不写进持久卷；每次启动
 # 清掉，重启即可回收这部分空间，也避免缓存无限增长把磁盘写满。

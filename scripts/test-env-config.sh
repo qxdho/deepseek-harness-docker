@@ -138,24 +138,23 @@ INTERACTIVE=0 ensure_env DSH_WORKSPACE_CONTAINER "容器内工作区" "/workspac
 [ "$(get_env DSH_WORKSPACE_CONTAINER)" = "/workspace" ] && pass "相对路径被纠正为默认值" \
 	|| fail "相对路径未被纠正：$(get_env DSH_WORKSPACE_CONTAINER)"
 
-echo "== 16. 历史默认值对齐 =="
-# 换了数据目录、工作区还是旧默认 → 工作区跟随
-printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE_HOST=/dsh/workspace\n' >"$ENV_FILE"
-normalize_defaults >/dev/null
-[ "$(get_env DSH_WORKSPACE_HOST)" = "/data/workspace" ] && pass "工作区跟随数据目录" \
-	|| fail "未跟随：$(get_env DSH_WORKSPACE_HOST)"
-
-# 用户自己指定的工作区不动
-printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE_HOST=/root/my-ws\n' >"$ENV_FILE"
-normalize_defaults >/dev/null
-[ "$(get_env DSH_WORKSPACE_HOST)" = "/root/my-ws" ] && pass "自定义工作区不被改动" \
-	|| fail "被改成了：$(get_env DSH_WORKSPACE_HOST)"
-
-# 旧默认容器路径 → 当前默认（宿主目录不变，不搬数据）
+echo "== 16. 历史默认值对齐（工作区不跟随）=="
+# 容器内数据目录的旧默认 → 当前默认（宿主目录不变，不搬数据）
 printf 'DSH_HOME_HOST=/data\nDSH_HOME_CONTAINER=/home/node/.dsh\n' >"$ENV_FILE"
 normalize_defaults >/dev/null
 [ "$(get_env DSH_HOME_CONTAINER)" = "/dsh" ] && pass "旧容器路径改为 /dsh" || fail "未改：$(get_env DSH_HOME_CONTAINER)"
 [ "$(get_env DSH_HOME_HOST)" = "/data" ] && pass "宿主数据目录保持不动" || fail "宿主目录被改了"
+
+# 换了数据目录时工作区必须原样保留：它是独立配置的路径，不跟随
+printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE_HOST=/dsh/workspace\n' >"$ENV_FILE"
+normalize_defaults >/dev/null
+[ "$(get_env DSH_WORKSPACE_HOST)" = "/dsh/workspace" ] && pass "工作区不跟随数据目录" \
+	|| fail "工作区被改成了：$(get_env DSH_WORKSPACE_HOST)"
+
+printf 'DSH_HOME_HOST=/data\nDSH_WORKSPACE_HOST=/root/my-ws\n' >"$ENV_FILE"
+normalize_defaults >/dev/null
+[ "$(get_env DSH_WORKSPACE_HOST)" = "/root/my-ws" ] && pass "自定义工作区不被改动" \
+	|| fail "被改成了：$(get_env DSH_WORKSPACE_HOST)"
 
 # 已经是当前默认 → 不重复写入（文件内容保持原样，不产生无意义的变更日志）
 printf 'DSH_HOME_HOST=/dsh\nDSH_HOME_CONTAINER=/dsh\nDSH_WORKSPACE_HOST=/dsh/workspace\n' >"$ENV_FILE"

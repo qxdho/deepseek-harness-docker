@@ -150,7 +150,7 @@ cd deepseek-harness-docker
 | `DSH_HTTP_PORT` | `3080` | 宿主发布端口（容器内代理固定 3080，与它无关） |
 | `DSH_BIND` | `127.0.0.1` | 宿主监听地址；改为 `0.0.0.0` 后局域网可直连 |
 | `DSH_HOME_HOST` | `/dsh` | 宿主机数据目录。位于根目录，首次创建需要 sudo；也可设为其他目录，如 `/home/user/dsh`。必须为绝对路径 |
-| `DSH_WORKSPACE_HOST` | `/dsh/workspace` | 宿主机工作区目录，默认跟随数据目录。必须为绝对路径 |
+| `DSH_WORKSPACE_HOST` | `/dsh/workspace` | 宿主机工作区目录。与数据目录相互独立，须自行指定为绝对路径 |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | 容器运行身份。宿主 uid 非 1000 时改为 `id -u` / `id -g` |
 | `DSH_DISK_MIN_MB` | `256` | 启动时要求的最小磁盘余量（MB） |
 | `DSH_WORKSPACE_STRICT` | `0` | 置 `1` 后工作区不可写即退出（而非降级启动） |

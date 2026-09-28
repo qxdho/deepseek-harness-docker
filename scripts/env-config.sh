@@ -123,21 +123,15 @@ env_value() {
 
 # 把 .env 里的历史默认值对齐到当前默认值。install.sh 与 dshm service up 都会调用。
 #
-#   1) 数据目录换了、工作区还停在 /dsh/workspace → 工作区跟着数据目录走。
-#      compose 里工作区默认值写死为 /dsh/workspace，只能在这里对齐，否则只改
-#      DSH_HOME_HOST 会留下一个 /dsh/workspace —— 在宿主上多半是 root 建的、
-#      容器写不进去的目录。
-#   2) 容器内数据目录还是旧默认 /home/node/.dsh → 改成 /dsh。这里只改**容器内
-#      路径**（DSH_HOME_CONTAINER），宿主一侧的 DSH_HOME_HOST 不动，所以不会搬动
-#      任何数据，只是让挂载点与文档/默认值保持一致（旧值会让 dshm 里的路径对不上）。
+# 唯一的规则：容器内数据目录还是旧默认 /home/node/.dsh → 改成 /dsh。这里只改
+# **容器内路径**（DSH_HOME_CONTAINER），宿主一侧的 DSH_HOME_HOST 不动，所以不会
+# 搬动任何数据，只是让挂载点与默认值/文档一致（旧值会让 dshm 里的路径对不上）。
+#
+# 工作区**不跟随**数据目录：DSH_WORKSPACE_HOST 与 DSH_HOME_HOST 是两条独立的绝对
+# 路径，由使用者自己配。跟随曾经做过，但它无法区分「没写过」和「写成了默认值」，
+# 会把用户明确指定的 /dsh/workspace 改掉。
 normalize_defaults() {
-	local home_host ws home
-	home_host="$(env_value_new DSH_HOME_HOST /dsh)"
-	ws="$(env_value_new DSH_WORKSPACE_HOST /dsh/workspace)"
-	if [ "$home_host" != "/dsh" ] && [ "$ws" = "/dsh/workspace" ]; then
-		set_env DSH_WORKSPACE_HOST "${home_host}/workspace"
-		ok "DSH_WORKSPACE_HOST 跟随数据目录改为 ${home_host}/workspace"
-	fi
+	local home
 	home="$(env_value_new DSH_HOME_CONTAINER /dsh)"
 	if [ "$home" = "/home/node/.dsh" ]; then
 		set_env DSH_HOME_CONTAINER "/dsh"

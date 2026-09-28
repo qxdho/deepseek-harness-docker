@@ -166,7 +166,7 @@ automatically at start-up, keeping their values.
 | `DSH_HTTP_PORT` | `3080` | Host published port (the proxy listens on 3080 inside the container, unrelated) |
 | `DSH_BIND` | `127.0.0.1` | Host listen address; set to `0.0.0.0` for direct LAN access |
 | `DSH_HOME_HOST` | `/dsh` | Host data directory. Under the filesystem root, so first creation needs sudo; another directory such as `/home/user/dsh` also works. Must be an absolute path |
-| `DSH_WORKSPACE_HOST` | `/dsh/workspace` | Host workspace directory; follows the data directory by default. Must be an absolute path |
+| `DSH_WORKSPACE_HOST` | `/dsh/workspace` | Host workspace directory. Independent of the data directory; specify an absolute path |
 | `DSH_UID` / `DSH_GID` | `1000` / `1000` | Container identity. Set to `id -u` / `id -g` when the host UID differs |
 | `DSH_DISK_MIN_MB` | `256` | Minimum free disk space (MB) required at start-up |
 | `DSH_WORKSPACE_STRICT` | `0` | When `1`, exit instead of degrading if the workspace is not writable |

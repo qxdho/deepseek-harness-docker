@@ -49,7 +49,7 @@ ensure_env DSH_HOME_HOST "dsh 数据目录（宿主，bind 挂到容器）" "/ds
 ensure_env DSH_HOME_CONTAINER "容器内 dsh 数据目录" "/dsh" 0 env_validate_abspath
 ensure_env DSH_AUTH_TOTP "两步验证（off/optional/required）" "optional" 0 env_validate_totp
 
-# 数据目录换了、工作区还留在旧默认时，让工作区跟着走（与 dshm service up 同一实现）
+# 历史默认值对齐（只处理容器内数据目录的旧默认 /home/node/.dsh）
 normalize_defaults
 
 # ── 2. 拉镜像，失败则本地构建 ───────────────────────────────────────────────

@@ -8,10 +8,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PASS=0
-FAIL=0
-pass() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
-fail() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
+. "$(dirname "$0")/test-lib.sh"
 
 sandbox="$(mktemp -d)"
 trap 'rm -rf "$sandbox"' EXIT

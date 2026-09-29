@@ -10,11 +10,7 @@ NAME="dsh-smoke-$$"
 PORT="${SMOKE_PORT:-18080}"
 LOGIN_USER="admin"
 LOGIN_PASS='SmokePass-1234!'
-PASS=0
-FAIL=0
-
-ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
-bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
+. "$(dirname "$0")/test-lib.sh"
 
 jar="$(mktemp)"; page="$(mktemp)"
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -f "$jar" "$page"; }
@@ -130,5 +126,4 @@ if [ -x "$(dirname "$0")/smoke-plugin.sh" ]; then
 fi
 
 echo
-echo "PASS=$PASS FAIL=$FAIL"
-[ "$FAIL" = "0" ]
+run_tests

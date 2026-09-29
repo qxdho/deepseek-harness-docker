@@ -15,10 +15,7 @@ set -euo pipefail
 
 IMAGE="${1:-dsh-test:smoke}"
 NAME="dsh-plug-$$"
-PASS=0
-FAIL=0
-ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
-bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
+. "$(dirname "$0")/test-lib.sh"
 
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -131,5 +128,4 @@ else
 fi
 
 echo
-echo "PASS=$PASS FAIL=$FAIL"
-[ "$FAIL" = "0" ]
+run_tests

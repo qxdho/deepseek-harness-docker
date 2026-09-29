@@ -12,10 +12,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PREFLIGHT="$HERE/preflight.sh"
 ENTRYPOINT="$HERE/../entrypoint.sh"
 
-PASS=0
-FAIL=0
-ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
-bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
+. "$(dirname "$0")/test-lib.sh"
 have_sudo() { command -v sudo >/dev/null 2>&1; }
 
 [ -f "$PREFLIGHT" ] || { echo "缺少 $PREFLIGHT"; exit 1; }

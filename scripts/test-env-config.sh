@@ -218,6 +218,78 @@ case "$out" in
 esac
 case "$out" in *"DSH_AUTH_PASSWORD=已设置"*) pass "密码只报已设置" ;; *) fail "密码状态未显示" ;; esac
 
+echo "== 21. wait_container_healthy =="
+# install.sh 与 dshm 共用这一份实现，行为必须被测住。用假 docker 控制 inspect 的
+# 输出序列；interval=0 让用例瞬间跑完。
+stub="$(mktemp -d)"
+cat >"$stub/docker" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "inspect" ]; then
+	n=$(cat "$FAKE_SEQ_N" 2>/dev/null || echo 0)
+	line=$(sed -n "$((n + 1))p" "$FAKE_SEQ")
+	# 序列耗尽后**重复最后一行**，而不是回落到默认值：否则「连续 FAIL」这类用例
+	# 在耗尽后会变成 "false unknown"，走到「容器未运行」分支，测不到本意。
+	[ -n "$line" ] || line="$(tail -n1 "$FAKE_SEQ")"
+	[ -n "$line" ] || line="false unknown"
+	echo $((n + 1)) >"$FAKE_SEQ_N"
+	[ "$line" = "FAIL" ] && exit 1
+	printf '%s\n' "$line"
+	exit 0
+fi
+exit 0
+STUB
+chmod +x "$stub/docker"
+run_wait() { # <inspect 输出序列（每行一次）> [rounds]
+	local seq="$1" rounds="${2:-8}"
+	printf '%s\n' "$seq" >"$stub/seq"
+	: >"$stub/n"
+	PATH="$stub:$PATH" FAKE_SEQ="$stub/seq" FAKE_SEQ_N="$stub/n" \
+		wait_container_healthy fake-container "true" 0 "$rounds" 2>&1
+}
+
+# 调用点统一用这个包装：关掉 errexit 再取值，这样既能拿到真实返回码，又不会因为
+# 失败用例（本组用例专门断言失败路径）让整个测试脚本提前退出。
+call_wait() {
+	local out rc
+	set +e
+	out="$(run_wait "$@")"
+	rc=$?
+	set -e
+	WAIT_OUT="$out"
+	WAIT_RC="$rc"
+}
+
+call_wait 'true healthy'
+[ "$WAIT_RC" = "0" ] && pass "healthy → 返回 0" || fail "healthy 应返回 0（rc=$WAIT_RC）"
+
+call_wait 'true starting
+true starting
+true healthy'
+[ "$WAIT_RC" = "0" ] && pass "starting 后 healthy → 返回 0" || fail "应等到 healthy（rc=$WAIT_RC）"
+
+# 关键回归：inspect 瞬时失败不能立刻判死（install.sh 的旧实现正是这样）
+call_wait 'FAIL
+FAIL
+true healthy'
+[ "$WAIT_RC" = "0" ] && pass "inspect 瞬时失败后仍能等到 healthy" || fail "瞬时失败被误判（rc=$WAIT_RC）"
+
+call_wait 'FAIL' 8
+[ "$WAIT_RC" != "0" ] && pass "inspect 连续失败 → 放弃（rc=$WAIT_RC）" || fail "连续失败应放弃"
+case "$WAIT_OUT" in *"读不到容器状态"*) pass "连续失败给出提示" ;; *) fail "缺少提示：$WAIT_OUT" ;; esac
+
+call_wait 'false exited'
+[ "$WAIT_RC" != "0" ] && pass "容器未运行 → 立即放弃" || fail "容器未运行应放弃"
+case "$WAIT_OUT" in *"没有在运行"*) pass "提示容器未运行" ;; *) fail "缺少提示：$WAIT_OUT" ;; esac
+
+for st in dead restarting; do
+	call_wait "true $st"
+	[ "$WAIT_RC" != "0" ] && pass "$st → 立即放弃" || fail "$st 应放弃"
+done
+
+call_wait 'true unhealthy' 2
+[ "$WAIT_RC" != "0" ] && pass "unhealthy 等满轮数后才失败" || fail "unhealthy 应最终失败"
+rm -rf "$stub"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

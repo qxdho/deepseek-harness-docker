@@ -158,54 +158,11 @@ ask_new_password() {
 	done
 }
 
+# 等待容器健康。实现放在 scripts/env-config.sh，install.sh 共用同一份 —— 此前
+# 两处各写一遍、语义已经漂移（install.sh 那版在 docker inspect 首次失败时就退出，
+# 会把容器刚创建时的瞬时错误误判成启动失败）。
 wait_healthy() {
-	local status running out fails=0 elapsed=0 last=-10
-	for _ in $(seq 1 72); do
-		# inspect 失败（守护进程忙、容器刚被删）是瞬时错误，不能当成「异常状态」：
-		# 逐次失败就等下一轮，连续失败才放弃。
-		if ! out="$(docker inspect --format '{{.State.Running}} {{.State.Health.Status}}' "$CONTAINER" 2>/dev/null)"; then
-			fails=$((fails + 1))
-			if [ "$fails" -ge 6 ]; then
-				printf '    %s读不到容器状态（docker inspect 连续失败），不再等待%s\n' "$YEL" "$RST"
-				return 1
-			fi
-			sleep 5
-			elapsed=$((elapsed + 5))
-			continue
-		fi
-		fails=0
-		read -r running status <<<"$out"
-		running="${running:-unknown}"
-		status="${status:-unknown}"
-		[ "$status" = "healthy" ] && return 0
-
-		# 容器已经退出/在重启循环里，就没必要再空等下去 —— 直接把日志尾部打出来。
-		# 原来是闷头等满 6 分钟才报「未健康」，最气人的是还不说为什么。
-		# 注意 unknown 不在其中：健康检查还没出结果时它也会是 unknown。
-		if [ "$running" != "true" ]; then
-			printf '    %s容器没有在运行（running=%s health=%s），不再等待%s\n' "$YEL" "$running" "$status" "$RST"
-			docker logs --tail 40 "$CONTAINER" 2>&1 || true
-			return 1
-		fi
-		case "$status" in
-		dead | restarting | unhealthy)
-			printf '    %s容器状态异常（%s），不再等待%s\n' "$YEL" "$status" "$RST"
-			docker logs --tail 40 "$CONTAINER" 2>&1 || true
-			return 1
-			;;
-		esac
-
-		# 每 10 秒给一行进度，否则用户完全不知道在等什么。
-		if [ $((elapsed - last)) -ge 10 ]; then
-			printf '    %s等待就绪… %ss（%s）%s\n' "$DIM" "$elapsed" "$status" "$RST"
-			last="$elapsed"
-		fi
-		sleep 5
-		elapsed=$((elapsed + 5))
-	done
-	printf '    %s容器未在预期时间内健康（当前：%s）%s\n' "$YEL" "$status" "$RST"
-	docker logs --tail 40 "$CONTAINER" 2>&1 || true
-	return 1
+	wait_container_healthy "$CONTAINER" "docker logs --tail 40 $CONTAINER"
 }
 
 # 启动/重建前的统一准备：旧键改名 + 对齐默认值 + 目录属主预检。

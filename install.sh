@@ -84,47 +84,13 @@ docker compose up -d
 
 # ── 6. 等健康 ───────────────────────────────────────────────────────────────
 hdr "等待服务就绪"
-healthy=0
-elapsed=0
-last=-10
-for _ in $(seq 1 72); do
-	# 一次 inspect 同时取运行状态与健康状态，别为了两行信息调两次 docker。
-	# inspect 自身失败（守护进程忙、容器刚创建还没注册）不能当成「容器异常」：
-	# 那是一次瞬时错误，直接退出会把正常启动判成失败。
-	if ! insp="$(docker inspect \
-		--format '{{.State.Running}} {{.State.Health.Status}}' qxdho-dsh 2>/dev/null)"; then
-		printf '    暂时读不到容器状态（docker inspect 失败），继续等待…\n'
-		sleep 5
-		elapsed=$((elapsed + 5))
-		continue
-	fi
-	read -r running s <<<"$insp"
-	running="${running:-unknown}"
-	# 没配 healthcheck 时 Health 段为空，取值会得到空串
-	s="${s:-unknown}"
-	if [ "$s" = "healthy" ]; then
-		healthy=1
-		break
-	fi
-	# 容器已经退出/在重启循环里，再等下去没意义 —— 直接给日志。
-	if [ "$running" != "true" ] || [ "$s" = "unhealthy" ] || [ "$s" = "restarting" ]; then
-		printf '    容器状态异常（running=%s health=%s），下面是日志尾部：\n\n' "$running" "$s"
-		docker compose logs --tail 60 qxdho-dsh || true
-		exit 1
-	fi
-	if [ $((elapsed - last)) -ge 10 ]; then
-		printf '    等待就绪… %ss（%s）\n' "$elapsed" "$s"
-		last="$elapsed"
-	fi
-	sleep 5
-	elapsed=$((elapsed + 5))
-done
-if [ "$healthy" != "1" ]; then
-	printf '    未在预期时间内健康（当前：%s），下面是日志尾部：\n\n' "$s"
-	docker compose logs --tail 60 qxdho-dsh || true
-	exit 1
+# 实现在 scripts/env-config.sh，与 dshm 共用同一份。此前这里内联了一版，
+# docker inspect 首次失败就会 exit 1 —— 而容器刚创建时 daemon 还在注册、这一下
+# inspect 失败很常见，会把正常的慢启动直接报成失败。
+if ! wait_container_healthy qxdho-dsh "docker compose logs --tail 60 qxdho-dsh" 5 72; then
+	die "服务未在预期时间内健康；查看日志：./dshm service logs"
 fi
-ok "服务已健康（用时约 ${elapsed}s）"
+ok "服务已就绪"
 
 port="$(env_value_new DSH_HTTP_PORT 3080)"
 bind="$(get_env DSH_BIND)"; bind="${bind:-127.0.0.1}"

@@ -268,6 +268,9 @@ EOF
 check_workspace_dir() {
 	local project_dir="$1" allow_elevate="$2" auto_fix="$3"
 	check_host_dir "$project_dir" DSH_WORKSPACE_HOST "工作区目录" "/dsh/workspace" "$allow_elevate" "$auto_fix" || return 1
+	# 赋值必须紧跟调用：check_host_dir 在「目录可写」的正常路径上会提前 return 0，
+	# 之后再执行它的任何代码都不可能。此前把赋值放在 check_host_dir 末尾，导致这里
+	# 读到的是上一次调用留下的陈旧路径（成功路径上 DSH_WORKSPACE_DIR 会是空的初值）。
 	DSH_WORKSPACE_DIR="$CHECK_HOST_DIR_PATH"
 	return 0
 }

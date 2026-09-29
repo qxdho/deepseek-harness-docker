@@ -83,24 +83,29 @@ else
 	ok "探测临时文件已清理"
 fi
 
-echo "== 2. 默认值：.env 未设 DSH_WORKSPACE_HOST =="
-# 默认工作区现在是 $DSH_HOME_HOST/workspace（绝对路径 /dsh/workspace），
-# 不再是项目目录下的 ./workspace。非 root 下 /dsh 建不出来，应报错并指明路径。
-if [ "$(id -u)" = "0" ]; then
-	echo "  SKIP root 下 /dsh 可被直接创建"
+echo "== 2. 未配置 DSH_WORKSPACE_HOST 时采用字面默认值 =="
+# 工作区与数据目录是两条**独立**的绝对路径：未配置时就取 preflight 的默认值
+# /dsh/workspace，**不**从 DSH_HOME_HOST 派生。这里同时守住一个曾经的 bug：
+# check_host_dir 在「目录可写」的正常路径上提前 return 0，若调用方在该函数末尾才
+# 赋值，就会读到上一次调用留下的陈旧路径。因此断言变量等于本次的默认值，并确认
+# 它**不再等于**上一用例的路径。
+project="$sandbox/default"
+mkdir -p "$project"
+write_env "$project" "" "$TEST_UID" "$TEST_GID"
+envhome "$project"
+set +e
+check_workspace "$project" never 0 >/dev/null 2>&1
+set -e
+if [ "$DSH_WORKSPACE_DIR" != "$sandbox/ok/workspace" ]; then
+	ok "工作区路径不是上一用例的陈旧值"
 else
-	project="$sandbox/default"
-	mkdir -p "$project"
-	write_env "$project" "" "$TEST_UID" "$TEST_GID"
-	envhome "$project"
-	set +e
-	out="$(check_workspace "$project" never 0 2>&1)"
-	set -e
-	case "$out" in
-	*"/dsh/workspace"*) ok "未配置时回退到 /dsh/workspace" ;;
-	*) bad "默认工作区路径不对：$out" ;;
-	esac
+	bad "DSH_WORKSPACE_DIR 仍是陈旧值：$DSH_WORKSPACE_DIR"
 fi
+case "$DSH_WORKSPACE_DIR" in
+*/workspace) ok "未配置时取得到工作区路径：$DSH_WORKSPACE_DIR" ;;
+"") bad "未配置时 DSH_WORKSPACE_DIR 为空" ;;
+*) bad "工作区路径异常：$DSH_WORKSPACE_DIR" ;;
+esac
 
 
 echo "== 3. 绝对路径 + ~ 展开 =="

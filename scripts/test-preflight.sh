@@ -83,12 +83,13 @@ else
 	ok "探测临时文件已清理"
 fi
 
-echo "== 2. 未配置 DSH_WORKSPACE_HOST 时采用字面默认值 =="
-# 工作区与数据目录是两条**独立**的绝对路径：未配置时就取 preflight 的默认值
-# /dsh/workspace，**不**从 DSH_HOME_HOST 派生。这里同时守住一个曾经的 bug：
-# check_host_dir 在「目录可写」的正常路径上提前 return 0，若调用方在该函数末尾才
-# 赋值，就会读到上一次调用留下的陈旧路径。因此断言变量等于本次的默认值，并确认
-# 它**不再等于**上一用例的路径。
+echo "== 2. 工作区路径：默认值与「失败时也要给出正确路径」=="
+# 工作区与数据目录是两条**独立**的绝对路径：未配置时取 preflight 的默认值
+# /dsh/workspace，**不**从 DSH_HOME_HOST 派生。
+#
+# 这里守住一个曾经的 bug：check_host_dir 在「目录可写」的正常路径上会提前
+# return 0，调用方若在它之后（或只在成功路径上）才赋值，就会读到上一次调用留下的
+# 陈旧路径。这个 bug 只在**失败路径**上暴露，所以下面显式构造一条失败路径。
 project="$sandbox/default"
 mkdir -p "$project"
 write_env "$project" "" "$TEST_UID" "$TEST_GID"
@@ -106,6 +107,32 @@ case "$DSH_WORKSPACE_DIR" in
 "") bad "未配置时 DSH_WORKSPACE_DIR 为空" ;;
 *) bad "工作区路径异常：$DSH_WORKSPACE_DIR" ;;
 esac
+
+# 失败路径：把工作区指向一个不可写的父目录下，check_workspace 必然报错返回，
+# 此时 DSH_WORKSPACE_DIR 仍必须是**本次**解析出的路径。
+ro_parent="$sandbox/ro-parent"
+mkdir -p "$ro_parent"
+chmod 500 "$ro_parent"
+project="$sandbox/default-fail"
+mkdir -p "$project"
+write_env "$project" "$ro_parent/ws" "$TEST_UID" "$TEST_GID"
+envhome "$project"
+set +e
+check_workspace "$project" never 0 >/dev/null 2>&1
+fail_rc=$?
+set -e
+chmod 700 "$ro_parent"
+if [ "$fail_rc" -ne 0 ]; then
+	ok "不可写的工作区被拦下（rc=$fail_rc）"
+else
+	# root 下权限位无效，跳过
+	echo "  SKIP 当前用户可无视权限位（root？），失败路径未触发"
+fi
+if [ "$DSH_WORKSPACE_DIR" = "$ro_parent/ws" ]; then
+	ok "失败路径上工作区路径也是本次解析值"
+else
+	bad "失败路径上工作区路径陈旧：期望 $ro_parent/ws，实际 ${DSH_WORKSPACE_DIR:-（空）}"
+fi
 
 
 echo "== 3. 绝对路径 + ~ 展开 =="

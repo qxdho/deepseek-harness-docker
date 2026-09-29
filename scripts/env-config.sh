@@ -281,12 +281,24 @@ env_validate_totp() {
 #     再看，最终仍不健康则由调用方报错 —— 这样不会把慢启动误判为失败
 #   * 每约 10 秒打一行进度，并回显已等秒数
 #
-# 依赖调用方提供 ok/warn/die 的输出实现（本文件不做输出样式）。
+# 依赖默认值：调用方通常已定义 warn（本仓库的 install.sh 与 dshm 都定义了），但这里
+# 给出回退实现，避免调用方漏定义时提示整条消失 —— 曾经因为这个契约没写明，测试里
+# 没定义 warn，失败提示就静默丢了。
+#
+# 用显式全局变量而不是 `declare -F warn` 判断：本函数可能被放在命令替换（子 shell）
+# 里调用，那样定义的回退函数不会传播回父 shell，每次调用都要重判一次。
+WAIT_HEALTHY_WARN_READY=""
 wait_container_healthy() {
 	local name="$1" logcmd="${2:-}"
 	local interval="${3:-5}" rounds="${4:-72}"
 	local status running out fails=0 elapsed=0 last=-10
 	logcmd="${logcmd:-docker logs --tail 40 $name}"
+	if [ -z "$WAIT_HEALTHY_WARN_READY" ]; then
+		WAIT_HEALTHY_WARN_READY=1
+		if ! declare -F warn >/dev/null 2>&1; then
+			warn() { printf '    ! %s\n' "$*" >&2; }
+		fi
+	fi
 
 	for _ in $(seq 1 "$rounds"); do
 		if ! out="$(docker inspect --format '{{.State.Running}} {{.State.Health.Status}}' "$name" 2>/dev/null)"; then

@@ -9,7 +9,7 @@
 # HOME=$DSH_HOME，于是用户第一次装插件必然失败。
 #
 # 这个测试分两层：
-#   A. 离线（必须过）：镜像不带该记录；存量卷里的旧记录会被启动时清掉。
+#   A. 离线（必须过）：镜像不带该记录；启动后 profile 里也没有；且播种/重启正常。
 #   B. 联网（可选）：真的装一次插件，确认不再报 UNEXPECTED_STORE。
 set -euo pipefail
 
@@ -60,27 +60,31 @@ else
 	ok "镜像内的 profile 不带 .modules.yaml"
 fi
 
-echo "== A2. 存量卷里的旧记录会被启动时清掉 =="
-# 模拟旧镜像播种留下的坏状态：先起容器，塞入一份指错的记录，再重启。
+echo "== A2. 启动后 profile 里不应存在 store 记账；重启幂等 =="
+# 这条同时覆盖一个更严重的隐患：entrypoint 以 node 身份 `cp -a` 镜像里的 seed
+# 来播种 profile，若 seed 属主是 root（且含 600/700 文件），播种会直接失败、容器
+# 起不来 —— 数据目录为空的全新部署必然踩到。能否 healthy 本身就是断言。
 if start_container; then
-	ok "容器已就绪"
+	ok "容器已就绪（说明 seed 可被 node 读取并成功播种）"
 else
 	bad "容器未在预期时间内健康"
 	docker logs --tail 20 "$NAME" 2>&1 | sed 's/^/      /'
 fi
 
-# 用 docker cp 注入（以守护进程身份写，不依赖容器内用户的权限），
-# 内容模仿旧镜像烤进去的那份记录。
-tmpyaml="$(mktemp)"
-printf '  "storeDir": "/root/.local/share/pnpm/store/v11",\n' >"$tmpyaml"
-if docker cp "$tmpyaml" "$NAME:$PROFILE/node_modules/.modules.yaml" >/dev/null 2>&1; then
-	ok "已注入模拟的旧记账"
+if docker exec "$NAME" test -f "$PROFILE/node_modules/.modules.yaml"; then
+	bad "profile 里仍存在 .modules.yaml，运行期装插件会 store 失配"
 else
-	bad "无法注入模拟的旧记账"
+	ok "profile 里没有 store 记账"
 fi
-rm -f "$tmpyaml"
 
-# 重启让 entrypoint 再跑一遍清理
+# 清理逻辑不能顺手把插件本体删掉
+if docker exec "$NAME" test -f "$PROFILE/node_modules/dsh-auth-gate/package.json"; then
+	ok "插件本体仍在"
+else
+	bad "插件本体丢了"
+fi
+
+# 重启一次，确认清理是幂等的、容器仍能起来
 docker restart "$NAME" >/dev/null
 for i in $(seq 1 72); do
 	st="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
@@ -88,26 +92,13 @@ for i in $(seq 1 72); do
 	sleep 5
 done
 
-# 容器没起来时后面的 exec 只会刷一串 "is not running"，没有信息量
 if [ "$(docker inspect --format '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" != "true" ]; then
-	bad "容器重启后未能运行，跳过后续断言"
+	bad "容器重启后未能运行"
 	echo
 	echo "PASS=$PASS FAIL=$FAIL"
 	exit 1
 fi
-
-if docker exec "$NAME" test -f "$PROFILE/node_modules/.modules.yaml"; then
-	bad "旧记账未被清除，装插件仍会失配"
-else
-	ok "旧记账已被启动逻辑清除"
-fi
-
-# 清除记录不能顺手把插件本体删掉
-if docker exec "$NAME" test -f "$PROFILE/node_modules/dsh-auth-gate/package.json"; then
-	ok "插件本体仍在（清理不影响已装插件）"
-else
-	bad "清理把插件本体弄丢了"
-fi
+ok "重启后仍正常运行（清理逻辑幂等）"
 
 echo "== B. 真的装一次插件（需要网络；无网络时跳过）=="
 # 用已经装过的包做「幂等 add」：不需要新下载，但仍会让 pnpm 走一遍

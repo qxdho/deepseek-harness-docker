@@ -28,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.f.outputs.code }}
+      admin: ${{ steps.f.outputs.admin }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,28 +44,37 @@ jobs:
           else
             base="${{ github.event.before }}"
           fi
-          # 首次推送 / force push 时 before 可能是全 0，取不到 diff：保守地当作有代码改动
+          # 首次推送 / force push 时 before 可能是全 0，取不到 diff：保守地当作
+          # 有代码改动、且 admin 也可能变了，宁可不跳。
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             echo "取不到基线提交，按「有代码改动」处理"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "admin=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files="$(git diff --name-only "$base" HEAD)"
           echo "改动文件："; printf '%s\n' "$files" | sed 's/^/  /'
           # 只改这些就跳过镜像构建：Markdown、LICENSE、CI 配置本身、.gitignore/.dockerignore
           code=false
+          # 面板相关的两个测试（离线 + go 单测）合计约 20s，只在 admin/ 或本 workflow
+          # 改动时才跑 —— 它们只验证 admin 这个程序，与镜像内容无关。
+          admin=false
           while IFS= read -r p; do
             [ -n "$p" ] || continue
             case "$p" in
+            admin/* | .github/workflows/build.yml) admin=true ;;
+            esac
+            case "$p" in
             *.md | LICENSE | .github/* | .gitignore | .dockerignore) ;;
-            *) code=true; break ;;
+            *) code=true ;;
             esac
           done <<EOF
           $files
           EOF
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "需要构建镜像：$code"
+          echo "admin=$admin" >> "$GITHUB_OUTPUT"
+          echo "需要构建镜像：$code；需要跑面板测试：$admin"
 
   # 多架构构建并推送 GHCR（PR 不推送）。
   #
@@ -170,11 +180,13 @@ jobs:
           ./scripts/test-migrate-home.sh
 
       - name: 管理面板离线测试
+        if: needs.changes.outputs.admin == 'true'
         run: |
           chmod +x admin/test-admin.sh
           ./admin/test-admin.sh
 
       - name: 管理面板单元测试
+        if: needs.changes.outputs.admin == 'true'
         working-directory: admin
         run: |
           set -eux

@@ -29,6 +29,10 @@ PROFILE="$DSH_HOME/profiles/web"
 WEB_LOG=/tmp/dsh-web.log
 WORKSPACE="${DSH_WORKSPACE_CONTAINER:-/workspace}"
 
+# 宿主机上的数据目录路径：compose 的 env_file 会把 DSH_HOME_HOST 传进来。有了它，
+# 权限类报错就能直接给出可以复制粘贴的命令，而不是让人去猜占位符是哪。
+HOST_HINT="${DSH_HOME_HOST:-<DSH_HOME_HOST>}"
+
 # 数据目录通常也是 bind mount：宿主上由 dockerd 以 root 自动创建、或部署者用 root
 # 跑过的话，容器内的 uid 连 profiles 都建不出来。这里给一条能直接照做的诊断，
 # 而不是丢一句 `mkdir: Permission denied`（病因在宿主机属主，报错点却在容器里）。
@@ -36,7 +40,7 @@ if ! mkdir -p "$DSH_HOME/profiles" 2>/dev/null; then
   ws_owner="$(stat -c '%U:%G (%a)' "$DSH_HOME" 2>/dev/null || echo '未知')"
   log "ERROR: 数据目录 ${DSH_HOME} 不可写（属主 ${ws_owner}，当前用户 $(id -un) $(id -u):$(id -g)）"
   log "        它是 bind mount，属主由宿主机决定。在宿主机上二选一："
-  log "          A. sudo mkdir -p <DSH_HOME_HOST> && sudo chown -R $(id -u):$(id -g) <DSH_HOME_HOST>"
+  log "          A. sudo mkdir -p ${HOST_HINT} && sudo chown -R $(id -u):$(id -g) ${HOST_HINT}"
   log "          B. 把 .env 的 DSH_HOME_HOST / DSH_WORKSPACE_HOST 换到你自己的目录，再 ./dshm service up"
   exit 1
 fi
@@ -232,8 +236,8 @@ tighten() { # <文件> <说明>
   if [ ! -r "$1" ]; then
     log "ERROR: $2 当前用户（$(id -u):$(id -g)）读不了：$1"
     log "       属主不对。请在宿主机执行："
-    log "       sudo chown $(id -u):$(id -g) <DSH_HOME_HOST>${1#${DSH_HOME}}"
-    log "       sudo chmod 600 <DSH_HOME_HOST>${1#${DSH_HOME}}"
+    log "       sudo chown $(id -u):$(id -g) ${HOST_HINT}${1#${DSH_HOME}}"
+    log "       sudo chmod 600 ${HOST_HINT}${1#${DSH_HOME}}"
     exit 1
   fi
   mode="$(stat -c '%a' "$1" 2>/dev/null || echo '')"
@@ -245,7 +249,7 @@ tighten() { # <文件> <说明>
     log "已收紧 $2 权限：${1}（${mode} → $(stat -c '%a' "$1" 2>/dev/null || echo '?')）"
   else
     log "WARN: 无法收紧 $2 权限（${1} 当前 ${mode}），dsh 会拒绝启动；"
-    log "      请在宿主机执行： sudo chmod 600 <DSH_HOME_HOST>${1#${DSH_HOME}}"
+    log "      请在宿主机执行： sudo chmod 600 ${HOST_HINT}${1#${DSH_HOME}}"
   fi
 }
 tighten "$DSH_HOME/.credentials.yaml" "凭据文件"

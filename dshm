@@ -482,7 +482,10 @@ totp)
 
 update)
 	require_docker; require_env
-	migrate_legacy_keys
+	# 与 up 一样先做启动前准备：旧键改名、历史默认值对齐、旧卷迁移、目录属主与
+	# 私密文件权限预检。以前 update 只改名不做预检，于是「更新后容器仍在重启循环」
+	# 时，日志里那条 sudo chown 提示没人执行，文件权限就一直不对。
+	prepare_workspace
 	target=""; build=0
 	for a in "$@"; do
 		case "$a" in

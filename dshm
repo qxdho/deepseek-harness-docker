@@ -376,6 +376,63 @@ prepare_workspace() {
 	ok "工作区就绪：${DSH_WORKSPACE_DIR}"
 }
 
+# ── 镜像 tag（dsh 容器版本）────────────────────────────────────────────────
+#
+# 镜像 tag 形如 <dsh版本>-<日期>-<序号>：0.2.0-rc.2-2026.09.30-1
+#   * 带 dsh 版本 → 一眼看出镜像里是哪个 dsh
+#   * 带日期      → 看出是哪天的构建
+#   * 带序号      → 同一天多次构建互不覆盖，旧镜像仍可回退
+#
+# 为什么必须有序号：tag 一旦被同名覆盖，旧镜像就失去引用、可能被回收，回退就没了。
+# 这正是原先那个「纯 dsh 版本 tag」的坑，所以它已被移除。
+
+img_base() {
+	# 默认值写在这里（而不是顶层常量）：函数一定在变量赋值之后才被调用，
+	# 把默认值放在函数体内就不存在「常量定义没被执行」的风险。
+	printf '%s' "${DSH_IMAGE_BASE:-ghcr.io/qxdho/deepseek-harness-docker}"
+}
+
+# GHCR 的匿名 pull token（只读，列 tag 不需要登录）
+ghcr_token() {
+	local img="$1" host repo
+	host="${img%%/*}"
+	repo="${img#"$host"/}"
+	command -v curl >/dev/null 2>&1 || return 1
+	curl -fsSL --max-time 15 \
+		"https://${host}/token?scope=repository:${repo}:pull&service=${host}" 2>/dev/null |
+		awk -F'"' '{for(i=1;i<=NF;i++) if($i=="token"){print $(i+2); exit}}'
+}
+
+# 列出该镜像仓库的全部 tag（每行一个）。取不到返回非 0。
+# 响应形如 {"name":"...","tags":[...]}：直接按引号切会把 name 也切出来，
+# 所以先定位 "tags":[ 这一段再拆。
+img_tags() {
+	local img token host repo
+	img="$(img_base)"
+	token="$(ghcr_token "$img")" || return 1
+	[ -n "$token" ] || return 1
+	host="${img%%/*}"
+	repo="${img#"$host"/}"
+	curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
+		"https://${host}/v2/${repo}/tags/list" 2>/dev/null |
+		sed -n 's/.*"tags":\[\(.*\)\]}.*/\1/p' |
+		tr ',' '\n' | sed 's/^"//; s/"$//' | grep -v '^$'
+}
+
+# 当天该 dsh 版本的下一个序号：已有几个 <dsh>-<日期>-* 就 +1
+img_next_seq() {
+	local dsh="$1" day="$2" n
+	n="$(img_tags 2>/dev/null | grep -cE "^${dsh}-${day}-[0-9]+$" || true)"
+	[ -n "$n" ] || n=0
+	printf '%s' "$((n + 1))"
+}
+
+# 构造镜像 tag
+img_tag_for() {
+	local dsh="$1" day="${2:-$(date -u +%Y.%m.%d)}"
+	printf '%s-%s-%s' "$dsh" "$day" "$(img_next_seq "$dsh" "$day")"
+}
+
 # ── dsh 版本管理 ────────────────────────────────────────────────────────────
 # npm registry 上的可用版本。解析 JSON 优先用 jq，其次 node / python3 —— 部署机上不一定
 # 装了其中哪一个，所以按顺序回退；都没有就给出 npm 查询地址让用户自己看。
@@ -1066,9 +1123,37 @@ version-show)
 	;;
 
 version-list)
-	# 列出 npm 上可装的 dsh 版本，并标出当前镜像里跑的是哪个。
-	# 换版本要重建镜像（dsh 是构建期 npm install -g 装进去的），所以这里只负责
-	# 「看有哪些版本」，实际切换用 `dshm version update <版本>` 或面板。
+	# 列两类东西：能否装到某个 dsh 版本，取决于你能不能构建。
+	#   1. 已构建好的镜像 tag —— 可直接拉取（快）
+	#   2. npm 上可用的 dsh 版本 —— 需要本地构建（慢）
+	hdr "可安装的镜像（已构建）"
+	cur_img="$(env_value DSH_IMAGE "")"
+	if tags="$(img_tags 2>/dev/null)"; then
+		# 末尾的 || true 是必需的：grep 无匹配时退出码为 1，而 dshm 顶部开了
+		# set -euo pipefail —— 管道里这一步失败会让整条赋值失败，进而被 set -e 直接
+		# 终止脚本。表现是「只打印标题就退出，退出码 1，且不报任何错」，极难定位。
+		# 镜像仓库里还没有新格式 tag 时就会命中。
+		built="$(printf '%s\n' "$tags" | grep -E '^[0-9].*-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]+$' | sort -rV || true)"
+		if [ -n "$built" ]; then
+			n="$(printf '%s\n' "$built" | grep -c . || true)"
+			printf '%s\n' "$built" | head -20 | while read -r t; do
+				case "$cur_img" in
+				*":${t}") printf '    %s*%s %s  ← 当前配置\n' "$GRN" "$RST" "$t" ;;
+				*) printf '      %s\n' "$t" ;;
+				esac
+			done
+			[ "$n" -gt 20 ] && info "（共 ${n} 个，只显示最近 20 个）"
+			printf '\n'
+			info "装指定镜像（可回退）：./dshm version update --to <上面的 tag>"
+		else
+			info "镜像仓库里还没有形如 <dsh版本>-<日期>-<序号> 的构建。"
+		fi
+	else
+		warn "无法查询镜像 tag（网络或仓库权限问题）"
+	fi
+
+	printf '\n'
+	hdr "npm 上可装的 dsh 版本（需本地构建）"
 	show_dsh_versions "$@"
 	;;
 

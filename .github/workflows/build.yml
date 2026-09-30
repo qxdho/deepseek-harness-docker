@@ -184,6 +184,11 @@ jobs:
           chmod +x scripts/test-dshm-versions.sh
           ./scripts/test-dshm-versions.sh
 
+      - name: dshm 自身版本与 tag 测试
+        run: |
+          chmod +x scripts/test-dshm-self.sh
+          ./scripts/test-dshm-self.sh
+
       - name: 版本更新脚本测试
         run: |
           chmod +x scripts/update-versions.sh scripts/test-update-versions.sh

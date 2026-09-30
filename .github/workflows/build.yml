@@ -181,8 +181,11 @@ jobs:
           ./scripts/smoke-test.sh dsh-test:smoke
 
   # 打 tag 时发布宿主用的静态二进制，供 ./dshm admin install（宿主模式）下载
+  # 管理面板二进制。安装脚本从 releases/latest/download/... 拉取，所以**必须**在推
+  # main 时也发布 —— 只在打 tag 时发的话，没有 tag 的仓库永远没有可下载的产物，
+  # `dshm admin install` 就会一路回退到「本机 Go 构建」并最终失败。
   release-admin:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -200,11 +203,44 @@ jobs:
               go build -trimpath -ldflags='-s -w' -o "dsh-admin-linux-${arch}" .
             sha256sum "dsh-admin-linux-${arch}" > "dsh-admin-linux-${arch}.sha256"
           done
-      - uses: softprops/action-gh-release@v2
+      # tag 推送：每个版本一个 release（softprops 会按 tag 创建）
+      - name: 发布到该 tag 的 release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             admin/dsh-admin-linux-amd64
             admin/dsh-admin-linux-amd64.sha256
             admin/dsh-admin-linux-arm64
             admin/dsh-admin-linux-arm64.sha256
+      # main 推送：更新固定的 latest release。
+      # 不能用 softprops 直接对 latest 做（并发会 422），先用 gh release create 保证它
+      # 存在（已存在则忽略），再 --clobber 覆盖附件。一个步骤里循环重试，避免并发下
+      # 两个 run 同时创建时刷出红色失败。
+      - name: 更新 latest release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          tag=latest
+          for i in 1 2 3; do
+            gh release view "$tag" >/dev/null 2>&1 \
+              || gh release create "$tag" --title "latest（main 最新构建）" \
+                   --notes "由 main 分支自动更新，供安装脚本从 releases/latest 拉取。" \
+                   >/dev/null 2>&1 || true
+            if gh release upload "$tag" \
+                 admin/dsh-admin-linux-amd64 \
+                 admin/dsh-admin-linux-amd64.sha256 \
+                 admin/dsh-admin-linux-arm64 \
+                 admin/dsh-admin-linux-arm64.sha256 \
+                 --clobber; then
+              echo "已将面板二进制更新到 latest release"
+              exit 0
+            fi
+            echo "上传失败，第 $i 次重试…" >&2
+            sleep 5
+          done
+          echo "::error::多次重试后仍无法更新 latest release" >&2
+          exit 1
 

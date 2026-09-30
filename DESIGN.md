@@ -197,3 +197,44 @@ deletes `node_modules/.modules.yaml`, and `entrypoint.sh` deletes it from the vo
 deployments created by earlier images). pnpm then recomputes the store on the first plugin install and writes
 it back inside the `.env`-defined `DSH_HOME`. The installed plugin itself is untouched, so this does not
 reintroduce a network requirement for the first install.
+
+## 9. `dshm` 与 `dsh-admin` 的分工
+
+一句话：**`dshm` 是唯一的操作入口，`dsh-admin` 只是它的网页外壳。**
+
+### 为什么需要这条边界
+
+两者都能「改变系统状态」，如果不划清，同一件事就会有两份实现 —— 而两份实现迟早
+漂移，且**漂移的往往是错的那份**。这个项目已经真实发生过一次：
+
+面板原来直接调 Docker API 做 start/stop/restart。而 `dshm` 的 restart 用的是
+`docker compose up -d` 并跑启动前预检（重读 `.env`、修目录属主与权限、等健康）。
+`docker restart` 只是把进程重启一遍：
+
+* 改了 `.env`（例如 `DSH_UID`、`DSH_WORKSPACE_HOST`、端口）之后，在面板点「重启」
+  **看着成功、实际毫无变化**；
+* 目录属主/权限不对时也不会被预检拦下或自动修复。
+
+`dshm` 的源码里甚至专门写了一条注释否掉这种写法。**面板那个按钮正好就是被否掉的做法。**
+
+### 规则
+
+1. **会改变系统状态的操作，只能由 `dshm` 实现**，面板一律通过调用 `dshm` 来完成
+   （见 `admin/main.go` 的 `actionDshm` / `runDshm`）。因此面板与命令台共用同一把
+   串行锁，避免两个 `compose` 并发打架。
+2. **面板可以自己做的**：只读查询（状态、日志、磁盘占用），以及 `dshm` 没有对应
+   命令的维护动作（如清理 dangling 镜像）。
+3. **凭据刻意分开**：面板有自己的口令与会话密钥（`config.json`），dsh 有它自己的
+   用户体系（`.env` + `auth` 子命令）。两者受众不同 —— 面板能动 Docker socket，
+   权限约等于宿主机 root，**不应与普通 dsh 用户共用一套凭据**。
+
+### 状态归属
+
+| 状态 | 归属 | 谁读它 |
+|---|---|---|
+| `.env`（端口、路径、uid、dsh 版本、dsh 登录口令） | 项目目录 | `dshm` 写，面板不碰 |
+| 面板口令哈希、会话密钥 | `admin/config.json` | 仅面板 |
+| 数据目录内容（会话、插件、凭据） | bind mount | 容器内进程 |
+
+这条边界也让面板本身成为**可选的**：面板没装、没开、甚至坏了，服务照样能用
+`dshm` 管理。

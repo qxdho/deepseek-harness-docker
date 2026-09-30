@@ -127,14 +127,10 @@ func (d *Docker) Status(name string) (*ContainerStatus, error) {
 	return st, nil
 }
 
-func (d *Docker) Action(name, action string) error {
-	switch action {
-	case "start", "stop", "restart":
-	default:
-		return fmt.Errorf("不支持的动作：%s", action)
-	}
-	return d.decode(http.MethodPost, "/containers/"+url.PathEscape(name)+"/"+action+"?t=20", nil)
-}
+// 注意：这里曾经有 Action()，直接调 Docker API 的 start/stop/restart。
+// 它已被删除：那样会绕过 dshm 的启动前预检 —— 改了 .env 之后在面板点「重启」看着
+// 成功、实际毫无变化。启停现在统一走 dshm（见 main.go 的 actionDshm/handleAction）。
+// 面板只保留**只读**查询（Status/Logs/Disk）与 prune 这类 dshm 没有对应命令的维护操作。
 
 // ── 日志 ────────────────────────────────────────────────────────────────────
 

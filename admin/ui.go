@@ -193,13 +193,24 @@ const indexHTML = `<!doctype html>
       err(e.message);
     });
   }
+  // 启停类操作现在一律走 dshm（面板只是外壳），所以是分钟级：重启会重建容器并
+  // 等健康。这里给出「进行中」的状态，并把 dshm 的输出显示出来 —— 否则用户面对
+  // 一个卡住的按钮，不知道是在跑还是已经挂了。
   function act(path, label) {
     err('');
-    api(path, { post: true }).then(function () {
-      $('logs').textContent = '（' + label + ' 已下发，等待恢复…）';
-      setTimeout(refreshStatus, 1500);
-      setTimeout(refreshStatus, 6000);
-    }).catch(function (e) { err(label + ' 失败：' + e.message); });
+    $('logs').textContent = '（' + label + ' 进行中… 该操作由 dshm 执行，可能需要几分钟）';
+    ['btnStart', 'btnStop', 'btnRestart'].forEach(function (id) { $(id).disabled = true; });
+    api(path, { post: true }).then(function (r) {
+      $('logs').textContent = '（' + label + ' 完成）\n\n' + (r.output || '（无输出）');
+      $('logs').scrollTop = $('logs').scrollHeight;
+      refreshStatus(); refreshDisk();
+    }).catch(function (e) {
+      // 失败时把 dshm 的输出一并显示：里面通常就是真正的原因（预检提示、日志尾部）
+      err(label + ' 失败：' + e.message);
+      $('logs').textContent = e.message;
+    }).then(function () {
+      ['btnStart', 'btnStop', 'btnRestart'].forEach(function (id) { $(id).disabled = false; });
+    });
   }
   function refreshDisk() {
     api('/api/disk').then(function (d) {

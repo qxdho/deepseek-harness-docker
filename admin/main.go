@@ -394,18 +394,63 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// actionDshm 把面板的启停动作映射到等价的 dshm 子命令。
+//
+// 定位：**dshm 是唯一的操作入口，面板只是它的网页外壳**。面板不自己实现任何会改变
+// 系统状态的逻辑。
+//
+// 这里曾经直接调 Docker API 的 start/stop/restart，那是错的 —— dshm 的 restart 用
+// `compose up -d` 并跑启动前预检（改 .env 生效、属主/权限修复、等健康），而
+// `docker restart` 只是重启进程：**改了 .env 之后在面板点「重启」看着成功、实际
+// 毫无变化**。dshm 里甚至专门写了注释否掉这种做法。
+func actionDshm(action string) ([]string, bool) {
+	switch action {
+	case "start":
+		return []string{"service", "up"}, true
+	case "stop":
+		return []string{"service", "down"}, true
+	case "restart":
+		return []string{"service", "restart"}, true
+	default:
+		return nil, false
+	}
+}
+
 func (s *server) handleAction(w http.ResponseWriter, r *http.Request, action string) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "只支持 POST")
 		return
 	}
-	if err := s.docker.Action(s.cfg.Container, action); err != nil {
-		s.audit("%s 失败：%v", action, err)
-		writeErr(w, http.StatusBadGateway, err.Error())
+	argv, ok := actionDshm(action)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "未知操作："+action)
 		return
 	}
-	s.audit("%s 成功 ip=%s", action, s.clientIP(r))
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	if _, err := s.dshmPath(); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// 这些操作都可能是分钟级（重启会重建容器并等健康），超时给足。
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+
+	// 与命令台共用同一把锁：一个在跑 dshm 时另一个必须排队，
+	// 否则并发的 compose 会互相打架。
+	if !s.execMu.TryLock() {
+		writeErr(w, http.StatusConflict, "已有 dshm 命令正在执行，请等它结束")
+		return
+	}
+	defer s.execMu.Unlock()
+
+	exit, text := s.runDshm(ctx, argv)
+	s.audit("%s（dshm %s）exit=%d ip=%s", action, strings.Join(argv, " "), exit, s.clientIP(r))
+	if exit != 0 {
+		writeErr(w, http.StatusBadGateway,
+			fmt.Sprintf("dshm %s 失败（exit %d）：\n%s", strings.Join(argv, " "), exit, text))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "output": text})
 }
 
 func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {

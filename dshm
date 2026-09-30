@@ -638,6 +638,24 @@ status)
 	else
 		info "入口：http://127.0.0.1:$(env_value_new DSH_HTTP_PORT 3080)/（仅本机；对外请用反代或 SSH 隧道）"
 	fi
+
+	# 顺手看一眼上游有没有新版本 —— 这是「不知不觉就落后了」的解药：跑 status 就能
+	# 看到，不必记得主动去查。设 DSHM_SKIP_UPDATE_CHECK=1 可跳过（离线环境）。
+	# 查询失败当作「未知」处理，绝不让 status 因此失败或刷红。
+	if [ "${DSHM_SKIP_UPDATE_CHECK:-}" != "1" ]; then
+		cur_ver="$(current_dsh_version)"
+		latest_ver="$(dsh_latest_version 2>/dev/null || true)"
+		if [ -n "$cur_ver" ] && [ -n "$latest_ver" ]; then
+			if [ "$cur_ver" = "$latest_ver" ]; then
+				info "dsh 版本：${cur_ver}（已是最新）"
+			else
+				printf '    %sdsh 版本：%s → 有新版本 %s%s\n' "$YEL" "$cur_ver" "$latest_ver" "$RST"
+				info "升级：./dshm service update --latest"
+			fi
+		elif [ -n "$cur_ver" ]; then
+			info "dsh 版本：${cur_ver}（未能查询上游最新版）"
+		fi
+	fi
 	;;
 
 disk | df)

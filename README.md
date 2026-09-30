@@ -125,10 +125,21 @@ docker compose up -d     # 启动服务
 
 > [!IMPORTANT]
 > **`dsh` 在构建期由 npm 装入镜像**，所以换 dsh 版本需要**本地重建**，没有热切换。
-> 而 `Dockerfile` / `docker-compose.yml` / `.env.example` 里的 `DSH_VERSION` 是**发布时写死的**，
-> 因此直接 `--build` 只会构建出那个旧版本。
+> 这是这类封装项目的通行做法（1Panel 应用商店、同类社区项目都如此）：好处是**断网也能起**，
+> 而且版本组合有问题会在**构建期**就失败，不会等到起容器才发现。
 >
-> 用 **`--latest`** 才会先向 npm 查询最新版并写回 `.env` 再构建。
+> `Dockerfile` / `docker-compose.yml` / `.env.example` 里的 `DSH_VERSION` 是写死的具体版本，
+> 因此直接 `--build` 只会构建出那个版本。用 **`--latest`** 才会先向 npm 查最新版并写回 `.env`。
+
+### 不用惦记着查版本
+
+dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以「不知不觉就落后了」是常态。
+本项目用两处自动化解决：
+
+- **仓库自动跟上**：CI 每周查一次上游版本，有新版本就**开一个 PR**，你 review 后合并即可。
+  选 PR 而不是直接提交，是因为跨次版本可能有破坏性变更，需要人判断。
+- **随手能看到**：`./dshm service status` 会顺带告诉你当前版本、是否有新版、以及升级命令。
+  离线环境可设 `DSHM_SKIP_UPDATE_CHECK=1` 跳过这一步。
 
 ### 两个更新渠道，权威来源不同
 
@@ -155,7 +166,7 @@ docker compose up -d     # 启动服务
 ./dshm service up          # 启动，或应用 .env 的改动
 ./dshm service restart     # 重启
 ./dshm service down        # 停止（数据保留）
-./dshm service status      # 健康状态 / 端口 / 登录用户
+./dshm service status      # 健康状态 / 端口 / 登录用户（附带提示 dsh 是否有新版本）
 ./dshm service logs        # 查看日志
 ./dshm service shell       # 进入容器
 ./dshm service update      # 升级

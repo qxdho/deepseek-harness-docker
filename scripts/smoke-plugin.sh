@@ -40,10 +40,10 @@ start_container() {
 		-e DSH_AUTH_PASSWORD='SmokePass-1234!' \
 		"$IMAGE" >/dev/null
 	local i st
-	for i in $(seq 1 72); do
+	for i in $(seq 1 360); do
 		st="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
 		[ "$st" = "healthy" ] && return 0
-		sleep 5
+		sleep 1
 	done
 	return 1
 }
@@ -83,10 +83,10 @@ fi
 
 # 重启一次，确认清理是幂等的、容器仍能起来
 docker restart "$NAME" >/dev/null
-for i in $(seq 1 72); do
+for i in $(seq 1 360); do
 	st="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
 	[ "$st" = "healthy" ] && break
-	sleep 5
+	sleep 1
 done
 
 if [ "$(docker inspect --format '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" != "true" ]; then

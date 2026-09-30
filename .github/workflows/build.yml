@@ -21,9 +21,61 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # 多架构构建并推送 GHCR（PR 不推送）
+  # 先判断这次改动到底要不要构建镜像。纯文档 / 纯 CI 配置的改动跑完整套（多架构构建
+  # 加三个冒烟脚本）纯属浪费 —— 那是每次运行里最重的部分。注意：判断逻辑本身只依赖
+  # 路径，不依赖构建结果。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.f.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要拿父提交做 diff，浅克隆（默认 fetch-depth=1）拿不到
+          fetch-depth: 0
+      - id: f
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            base=""
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          # 首次推送 / force push 时 before 可能是全 0，取不到 diff：保守地当作有代码改动
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "取不到基线提交，按「有代码改动」处理"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$base" HEAD)"
+          echo "改动文件："; printf '%s\n' "$files" | sed 's/^/  /'
+          # 只改这些就跳过镜像构建：Markdown、LICENSE、CI 配置本身、.gitignore/.dockerignore
+          code=false
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            case "$p" in
+            *.md | LICENSE | .github/* | .gitignore | .dockerignore) ;;
+            *) code=true; break ;;
+            esac
+          done <<EOF
+          $files
+          EOF
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "需要构建镜像：$code"
+
+  # 多架构构建并推送 GHCR（PR 不推送）。
+  #
+  # 依赖 smoke：串行后总墙钟更短（不做两遍重复构建），而且不会把冒烟没过的镜像
+  # 推成 latest。`changes` 也必须列进 needs —— 引用了它的 output 就得声明依赖。
   build:
-    if: github.event_name != 'pull_request'
+    needs: [changes, smoke]
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.changes.outputs.code == 'true' &&
+      needs.smoke.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,6 +129,8 @@ jobs:
 
   # 单架构构建 + 真实起容器冒烟（PR 也跑）
   smoke:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -185,7 +239,13 @@ jobs:
   # main 时也发布 —— 只在打 tag 时发的话，没有 tag 的仓库永远没有可下载的产物，
   # `dshm admin install` 就会一路回退到「本机 Go 构建」并最终失败。
   release-admin:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    needs: changes
+    # 面板二进制只由 admin/ 决定，但「哪些文件变了」的判断在 changes 作业里，为简洁
+    # 复用同一个 code 输出：纯文档改动不重发（二进制与上一次代码推送时完全一致，
+    # 已在 latest release 里，跳过不影响安装）。打 tag 时无条件发，保证版本产物齐全。
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: write

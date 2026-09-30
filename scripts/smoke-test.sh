@@ -16,9 +16,12 @@ jar="$(mktemp)"; page="$(mktemp)"
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -f "$jar" "$page"; }
 trap cleanup EXIT
 
-if [ "$IMAGE" = "dsh-test:smoke" ]; then
+if [ "$IMAGE" = "dsh-test:smoke" ] && ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	# 仅在镜像不存在时构建。CI 会先用带 GHA 缓存的 buildx 构建好同一 tag 再调用本脚本；
+	# 这里若无条件再 `docker build` 一遍要白花约 70 秒（无缓存，逐层重建）。
 	echo "== 本地构建 $IMAGE =="
-	docker build -t "$IMAGE" .
+	# 构建上下文必须是项目根目录：调用方可能从别处执行本脚本。
+	(cd "$(dirname "$0")/.." && docker build -t "$IMAGE" .)
 fi
 
 echo "== 启动容器 =="
@@ -32,7 +35,7 @@ docker run -d --name "$NAME" \
 
 echo "== 等健康 =="
 status=starting
-for i in $(seq 1 72); do
+for i in $(seq 1 360); do
 	status="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
 	[ "$status" = "healthy" ] && break
 	if [ "$i" = "72" ]; then
@@ -40,7 +43,7 @@ for i in $(seq 1 72); do
 		echo "容器未 healthy（当前：$status）"
 		exit 1
 	fi
-	sleep 5
+	sleep 1
 done
 ok "容器 healthy"
 

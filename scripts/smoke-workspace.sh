@@ -27,7 +27,7 @@ trap cleanup EXIT
 wait_exit() {
 	# 等容器进入 exited（最多 ~30s），打印退出码
 	local i
-	for i in $(seq 1 30); do
+	for i in $(seq 1 150); do
 		if ! docker inspect --format '{{.State.Running}}' "$NAME" 2>/dev/null | grep -q true; then
 			docker inspect --format '{{.State.ExitCode}}' "$NAME"
 			return 0
@@ -128,14 +128,14 @@ docker run -d --name "$NAME" \
 	"$IMAGE" >/dev/null
 
 status=starting
-for i in $(seq 1 72); do
+for i in $(seq 1 360); do
 	status="$(docker inspect --format '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo unknown)"
 	[ "$status" = "healthy" ] && break
 	if [ "$i" = "72" ]; then
 		docker logs "$NAME" 2>&1 | tail -30 || true
 		bad "容器未 healthy（当前：$status）"
 	fi
-	sleep 5
+	sleep 1
 done
 [ "$status" = "healthy" ] && ok "可写工作区下容器 healthy"
 

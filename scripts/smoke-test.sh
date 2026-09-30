@@ -50,11 +50,30 @@ ok "容器 healthy"
 BASE="http://127.0.0.1:${PORT}"
 
 echo "== 未登录行为 =="
-code="$(curl -s -H 'Accept: text/html' -o /dev/null -w '%{http_code}' "$BASE/")"
-[ "$code" = "302" ] && ok "GET / -> 302" || bad "GET / 期望 302，实际 $code"
+# 自 dsh-auth-gate 0.16.0 起，未登录访问 `/` 的行为**按请求类型区分**（上游 README：
+# 「会话的访客会被引导到登录页；API 和脚本请求直接返回 401」）。判定依据是
+# Sec-Fetch-* 系列头 —— 浏览器导航会带 sec-fetch-mode: navigate。
+#
+# 所以这里必须模拟**真实浏览器导航**（带这些头）才应该看到 302。此前测试只发
+# `Accept: text/html`，被新版判成脚本请求、拿 401，一度被误认为是升级回归 ——
+# 实际是测试没跟上上游的这条契约。两个分支都测，把这个契约钉住。
+BROWSER_HEADERS=(
+	-H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+	-H 'Sec-Fetch-Mode: navigate'
+	-H 'Sec-Fetch-Dest: document'
+	-H 'Sec-Fetch-Site: none'
+	-H 'Upgrade-Insecure-Requests: 1'
+)
 
-loc="$(curl -s -H 'Accept: text/html' -D - -o /dev/null "$BASE/" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')"
+code="$(curl -s "${BROWSER_HEADERS[@]}" -o /dev/null -w '%{http_code}' "$BASE/")"
+[ "$code" = "302" ] && ok "浏览器导航未登录 GET / -> 302" || bad "浏览器导航 GET / 期望 302，实际 $code"
+
+loc="$(curl -s "${BROWSER_HEADERS[@]}" -D - -o /dev/null "$BASE/" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')"
 case "$loc" in *"/auth/login"*) ok "未登录跳转登录页（$loc）" ;; *) bad "未跳转登录页：$loc" ;; esac
+
+# 非浏览器请求（脚本/API）应直接 401，而不是给一个 302 —— 否则脚本会跟着跳到 HTML
+code="$(curl -s -H 'Accept: text/html' -o /dev/null -w '%{http_code}' "$BASE/")"
+[ "$code" = "401" ] && ok "非导航请求未登录 GET / -> 401（脚本友好）" || bad "非导航 GET / 期望 401，实际 $code"
 
 code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/login")"
 [ "$code" = "200" ] && ok "登录页返回 200" || bad "登录页期望 200，实际 $code"

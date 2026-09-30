@@ -71,6 +71,37 @@ const indexHTML = `<!doctype html>
 
     <div class="card">
       <div class="row" style="align-items:center">
+        <strong>dsh 版本</strong>
+        <button id="btnDshVer" style="margin-left:auto">查询版本</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="kv"><div class="k">当前版本</div><div class="v" id="dshCurrent">-</div></div>
+        <div class="kv"><div class="k">最新版本</div><div class="v" id="dshLatest">-</div></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <select id="dshVersionSelect" style="flex:1;min-width:220px" disabled>
+          <option>（点「查询版本」加载）</option>
+        </select>
+        <button class="primary" id="btnDshUpdate" disabled>切换并重建</button>
+        <button id="btnDshUpdateLatest" disabled>切到最新版</button>
+      </div>
+      <div class="muted" style="margin-top:8px;font-size:12px">
+        版本列表来自 npm（dsh 的权威发布渠道），与 GitHub 仓库是否同步无关。
+        <b>切换需要重建镜像</b>（dsh 在构建期装入），通常要几分钟；期间请勿关闭本页。
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <span class="muted" style="font-size:12px">管理面板自身版本：<span id="panelVer">-</span></span>
+        <button id="btnSelfUpdate" style="margin-left:auto">更新面板自身</button>
+      </div>
+      <div class="muted" style="font-size:12px">
+        面板是宿主上的独立二进制，从 GitHub Releases 更新（与 dsh 的 npm 渠道无关）。
+        更新后<b>需要重启面板</b>才生效。
+      </div>
+      <pre id="dshOut" style="margin-top:12px">（操作输出会显示在这里）</pre>
+    </div>
+
+    <div class="card">
+      <div class="row" style="align-items:center">
         <strong>磁盘占用</strong>
         <button id="btnDisk" style="margin-left:auto">刷新</button>
         <button class="danger" id="btnPrune">清理缓存</button>
@@ -219,12 +250,85 @@ const indexHTML = `<!doctype html>
     }).then(function () { $('btnRun').disabled = false; });
   }
 
+  // ── dsh 版本管理 ─────────────────────────────────────────────────────────
+  // 版本列表来自后端直查 npm（权威渠道），不依赖 GitHub 仓库状态。
+  var dshLoaded = false;
+  function refreshDshVersions() {
+    $('dshOut').textContent = '查询中…';
+    $('btnDshVer').disabled = true;
+    api('/api/dsh/versions').then(function (d) {
+      dshLoaded = true;
+      $('dshCurrent').textContent = d.current || '（未运行或无法探测）';
+      $('dshLatest').textContent = d.latest || '-';
+      $('panelVer').textContent = d.panel || 'dev';
+      var sel = $('dshVersionSelect');
+      sel.innerHTML = '';
+      // 倒序：最新版排在最前面，省得在一长串里找
+      (d.versions || []).slice().reverse().forEach(function (v) {
+        var o = document.createElement('option');
+        o.value = v;
+        o.textContent = v + (v === d.latest ? '（最新）' : '') + (v === d.current ? '  ← 当前' : '');
+        if (v === d.latest) { o.selected = true; }
+        sel.appendChild(o);
+      });
+      sel.disabled = false;
+      $('btnDshUpdate').disabled = false;
+      $('btnDshUpdateLatest').disabled = (d.current === d.latest);
+      var tags = Object.keys(d.distTags || {}).map(function (k) {
+        return k + '=' + d.distTags[k];
+      }).join('  ');
+      $('dshOut').textContent = '共 ' + d.total + ' 个版本；发布标签：' + (tags || '（无）');
+    }).catch(function (e) {
+      $('dshOut').textContent = '查询失败：' + e.message;
+    }).then(function () { $('btnDshVer').disabled = false; });
+  }
+
+  // 切换版本会重建镜像（实测数分钟），期间后端是串行执行的，所以这里要把按钮锁住，
+  // 免得用户重复点。成功后刷新状态与日志，让用户看到新容器。
+  function dshUpdate(version, label) {
+    if (!confirm('将把 dsh 切换到 ' + (label || version) + ' 并重建镜像。\n' +
+                 '这会重装 dsh 并现场编译原生依赖，通常需要几分钟，期间面板不可用。\n\n继续？')) {
+      return;
+    }
+    $('dshOut').textContent = '正在切换到 ' + (label || version) + ' 并重建镜像…（几分钟，请勿关闭页面）';
+    $('btnDshUpdate').disabled = true;
+    $('btnDshUpdateLatest').disabled = true;
+    $('btnDshVer').disabled = true;
+    api('/api/dsh/update', { post: true, body: { version: version } }).then(function (r) {
+      $('dshOut').textContent = (r.exit === 0 ? '✓ 完成\n\n' : '[exit ' + r.exit + ']\n\n') + (r.output || '（无输出）');
+      $('dshOut').scrollTop = $('dshOut').scrollHeight;
+      refreshStatus(); refreshLogs(); refreshDshVersions();
+    }).catch(function (e) {
+      $('dshOut').textContent = '失败：' + e.message;
+      $('btnDshUpdate').disabled = false;
+      $('btnDshUpdateLatest').disabled = false;
+      $('btnDshVer').disabled = false;
+    });
+  }
+
+  // 面板自身更新。面板是宿主机上的独立二进制，从 GitHub Releases 拉取。
+  // 后端只做「下载 → 校验 sha256 → 原子替换」，不自动重启（重启方式依赖部署方式）。
+  function selfUpdate() {
+    if (!confirm('将从 GitHub Releases 下载最新面板二进制并替换当前文件。\n' +
+                 '替换后需要重启面板才生效。\n\n继续？')) {
+      return;
+    }
+    $('dshOut').textContent = '正在下载并校验…';
+    $('btnSelfUpdate').disabled = true;
+    api('/api/self/update', { post: true }).then(function (r) {
+      $('dshOut').textContent = (r.ok ? '✓ ' : '') + (r.message || '完成') +
+        (r.backup ? '\n\n旧二进制已备份到：' + r.backup : '');
+    }).catch(function (e) {
+      $('dshOut').textContent = '失败：' + e.message;
+    }).then(function () { $('btnSelfUpdate').disabled = false; });
+  }
+
   function login() {
     err('');
     api('/api/login', { post: true, body: { password: $('pw').value } }).then(function () {
       $('pw').value = '';
       show(true);
-      refreshStatus(); refreshDisk(); refreshLogs();
+      refreshStatus(); refreshDisk(); refreshLogs(); refreshDshVersions();
     }).catch(function (e) { err(e.message); });
   }
 
@@ -239,6 +343,15 @@ const indexHTML = `<!doctype html>
   $('btnRun').addEventListener('click', runCmd);
   $('cmdLine').addEventListener('keydown', function (e) { if (e.key === 'Enter') { runCmd(); } });
   $('btnDisk').addEventListener('click', refreshDisk);
+  $('btnDshVer').addEventListener('click', refreshDshVersions);
+  $('btnDshUpdate').addEventListener('click', function () {
+    dshUpdate($('dshVersionSelect').value, $('dshVersionSelect').value);
+  });
+  $('btnDshUpdateLatest').addEventListener('click', function () {
+    // 传空版本 → 后端走 service update --latest（向 npm 查最新版）
+    dshUpdate('', 'npm 上的最新版');
+  });
+  $('btnSelfUpdate').addEventListener('click', selfUpdate);
   $('btnPrune').addEventListener('click', function () {
     if (!confirm('清理 dangling 镜像与构建缓存？不会动数据卷。')) { return; }
     api('/api/prune', { post: true }).then(function (r) {

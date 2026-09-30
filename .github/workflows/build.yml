@@ -275,9 +275,18 @@ jobs:
         working-directory: admin
         run: |
           set -eux
+          # 把版本号注入二进制，供 `dsh-admin -version` 与面板「自身版本」显示使用。
+          # tag 推送时用 tag 名，main 推送时用短 SHA —— 两者都能追溯到具体提交。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VER="${GITHUB_REF_NAME}"
+          else
+            VER="main-$(git rev-parse --short HEAD)"
+          fi
+          echo "注入版本：$VER"
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              go build -trimpath -ldflags='-s -w' -o "dsh-admin-linux-${arch}" .
+              go build -trimpath -ldflags="-s -w -X main.adminVersion=${VER}" \
+              -o "dsh-admin-linux-${arch}" .
             sha256sum "dsh-admin-linux-${arch}" > "dsh-admin-linux-${arch}.sha256"
           done
       # tag 推送：每个版本一个 release（softprops 会按 tag 创建）

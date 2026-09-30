@@ -38,6 +38,7 @@ type DshVersions struct {
 	Total    int               `json:"total"`    // 版本总数
 	DistTags map[string]string `json:"distTags"` // 各发布标签，如 latest/next/alpha
 	Versions []string          `json:"versions"` // 全部版本，按 semver 升序
+	Panel    string            `json:"panel"`    // 管理面板自身的版本（-ldflags 注入）
 }
 
 // npmDoc 只解出我们需要的两个字段。用 json.RawMessage 接 dist-tags，
@@ -242,7 +243,7 @@ func (s *server) handleDshVersions(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	out := DshVersions{Versions: []string{}, DistTags: map[string]string{}}
+	out := DshVersions{Versions: []string{}, DistTags: map[string]string{}, Panel: adminVersion}
 
 	// 当前版本探测失败不算错：容器可能正停着，面板仍应能列出可选版本。
 	if cur, err := s.currentContainerVersion(ctx); err == nil {

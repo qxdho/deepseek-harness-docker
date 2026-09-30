@@ -318,6 +318,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDshVersions(w, r)
 	case "/api/dsh/update":
 		s.handleDshUpdate(w, r)
+	case "/api/self/update":
+		s.handleSelfUpdate(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "未知接口")
 	}
@@ -590,8 +592,14 @@ func main() {
 		container  = flag.String("container", "", "要管理的容器名，覆盖配置")
 		hashMode   = flag.Bool("hash", false, "从 stdin 读密码并输出哈希")
 		genSecret  = flag.Bool("gen-secret", false, "生成会话密钥并退出")
+		showVer    = flag.Bool("version", false, "打印面板版本并退出")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println(adminVersion)
+		return
+	}
 
 	if *genSecret {
 		b := make([]byte, 32)

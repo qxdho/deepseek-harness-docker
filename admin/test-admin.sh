@@ -75,9 +75,35 @@ curl -s "$base/" | grep -q 'DSH 管理面板' && pass "首页含面板标题" ||
 [ "$(code -b "$tmp/jar" -X POST "$base/api/restart")" = "403" ] \
 	&& pass "已登录但缺 X-DSH-Admin 头 → 403（CSRF 防线）" || fail "CSRF 校验未生效"
 
+# 启停必须交给 dshm，而不是面板自己调 Docker。
+#
+# 以前这里断言「无 docker socket → 502（说明确实走到 Docker 调用）」。但那条契约
+# 本身就是坏的：面板直连 Docker 会绕过 dshm 的启动前预检，改了 .env 之后点「重启」
+# 看着成功、实际毫无变化（见 DESIGN.md 第 9 节）。现在面板一律调 dshm，于是：
+#   * socket 指向不存在也无所谓 —— 面板根本不碰它
+#   * 断言换成「假 dshm 真的收到了 service restart」以及「dshm 失败时面板不装成功」
+out="$(curl -s -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' "$base/api/restart")"
+case "$out" in
+*"ARGS:service restart"*) pass "重启已委托给 dshm（拿到 service restart）" ;;
+*) fail "重启没有走 dshm：$out" ;;
+esac
+
+# dshm 失败时面板必须报错，不能假装成功
+cat >"$proj/dshm" <<'STUB'
+#!/usr/bin/env bash
+echo "dshm 失败了" >&2
+exit 1
+STUB
+chmod +x "$proj/dshm"
 c="$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' "$base/api/restart")"
-[ "$c" = "502" ] && pass "鉴权通过、无 docker socket → 502（说明确实走到 Docker 调用）" \
-	|| fail "预期 502，实际 $c"
+[ "$c" = "502" ] && pass "dshm 退出码非 0 → 502（不假装成功）" || fail "dshm 失败时应 502，实际 $c"
+
+# 还原可用桩：后面的命令台用例还要用它
+cat >"$proj/dshm" <<'STUB'
+#!/usr/bin/env bash
+echo "ARGS:$*"
+STUB
+chmod +x "$proj/dshm"
 
 # ── 命令台 ──────────────────────────────────────────────────────────────────
 [ "$(code -b "$tmp/jar" "$base/api/commands")" = "200" ] \

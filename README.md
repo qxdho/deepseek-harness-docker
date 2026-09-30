@@ -347,6 +347,24 @@ server {
 </details>
 
 <details>
+<summary><b>日志含 <code>credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)</code>，容器反复重启？</b></summary>
+
+<br/>
+
+凭据文件权限过宽（属主之外的人也能读到），dsh 会直接拒绝启动。这类文件通常来自旧命名卷，
+或在宿主机上被执行过 `chmod -R 777` —— **不要对数据目录做 `chmod -R 777`**。
+
+`./dshm service up` 的预检会在启动前把它收紧为 `600`；新版镜像的 entrypoint 每次启动也会
+再检查一次。手工修复：
+
+```bash
+sudo chmod 600 /dsh/.credentials.yaml /dsh/settings.yaml /dsh/auth/users.yaml
+./dshm service up
+```
+
+</details>
+
+<details>
 <summary><b>容器反复重启、页面打不开？</b></summary>
 
 <br/>

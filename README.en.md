@@ -373,6 +373,25 @@ Check the logs: `./dshm service logs`. The first start takes a dozen seconds or 
 </details>
 
 <details>
+<summary><b>The log contains <code>credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)</code> and the container keeps restarting.</b></summary>
+
+<br/>
+
+The credentials file is too permissive (readable by users other than its owner) and dsh refuses to
+start. Such files usually come from the old named volume, or from a `chmod -R 777` run on the host —
+**never `chmod -R 777` the data directory**.
+
+The pre-flight in `./dshm service up` tightens it to `600` before starting, and the entrypoint of the
+current image re-checks it on every start. Manual repair:
+
+```bash
+sudo chmod 600 /dsh/.credentials.yaml /dsh/settings.yaml /dsh/auth/users.yaml
+./dshm service up
+```
+
+</details>
+
+<details>
 <summary><b>The container keeps restarting and the page never opens.</b></summary>
 
 <br/>

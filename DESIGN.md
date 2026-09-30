@@ -129,11 +129,33 @@ Container path and host path are both configurable (`DSH_HOME_CONTAINER`, `DSH_H
 (`DSH_WORKSPACE_CONTAINER`, `DSH_WORKSPACE_HOST`, default `DSH_HOME_HOST/workspace`). All are read from `.env`,
 so compose, the preflight and `dshm` cannot drift apart.
 
+### 5.3 Private files must stay owner-only
+
+`dsh-credentials-local` refuses to load a credentials document whose mode has any group or other bit set
+(`mode & 0o077 != 0`), and a failure there is fatal: the required `credentials` service never activates, the
+web profile aborts, and `restart: unless-stopped` turns it into a restart loop. Files that arrived from the old
+named volume, or from a host-side `chmod -R 777`, hit exactly that:
+
+```
+credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)
+```
+
+Two layers therefore tighten `.credentials.yaml`, `settings.yaml` and `auth/users.yaml` to `600` (idempotent,
+content untouched):
+
+- **host pre-flight** (`fix_private_file_modes()` in `scripts/preflight.sh`), which runs before the container
+  starts and fixes the file where the deployer can already `chmod` it;
+- **the entrypoint**, which re-checks on every start so a file that becomes world-readable later is repaired
+  without a manual step.
+
+Only these known files are touched — a blanket `chmod -R` would rewrite the agent's own workspace permissions,
+which are the deployer's business.
+
 ## 6. Verification
 
 | Layer | What it covers | Needs Docker |
 |---|---|---|
-| `scripts/test-preflight.sh` | workspace ownership checks (paths, quoting, non-writable, deployer-vs-container UID, `DSH_UID` resolution), `dsh-home` volume name resolution, both entrypoint workspace paths | no |
+| `scripts/test-preflight.sh` | workspace ownership checks (paths, quoting, non-writable, deployer-vs-container UID, `DSH_UID` resolution), `dsh-home` volume name resolution, private-file mode repair (host and entrypoint), both entrypoint workspace paths | no |
 | `proxy/test-inject.js` | HTML injection point (including the `<header>` / `<headless-…>` false positive), `X-Forwarded-For` recomputation, header legality | no |
 | `scripts/smoke-test.sh` | real container: health, unauthenticated redirect, login round-trip, session persistence, injection, unauthenticated `/api` rejection | yes |
 | `scripts/smoke-workspace.sh` | real container: unwritable workspace degrades (and exits under `DSH_WORKSPACE_STRICT=1`), writable workspace accepts writes | yes |

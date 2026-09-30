@@ -218,6 +218,32 @@ else
   log "检测到已有用户文件，跳过创建（改密码：在宿主机执行 ./dshm auth password）"
 fi
 
+# ── 3b. 私密文件权限自检 ────────────────────────────────────────────────────
+# dsh 的 credentials 插件要求 .credentials.yaml「不能被 owner 以外的人读到」
+# （源码里的判定是 mode & 0o077 == 0），否则直接拒绝启动：
+#     credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)
+# 这种文件多半是从旧命名卷搬过来的，或者在宿主上被 chmod -R 777 过。容器里再遇上
+# 就只能重启循环，所以每次启动前统一收紧一次（幂等，只改权限不动内容）。
+tighten() { # <文件> <说明>
+  [ -e "$1" ] || return 0
+  local mode
+  mode="$(stat -c '%a' "$1" 2>/dev/null || echo '')"
+  [ -n "$mode" ] || return 0
+  # 末两位是 00 就说明没有 group/other 权限位（600/400/700/100… 都算合规），
+  # 与 dsh 的判定 mode & 0o077 == 0 一致；其余（640、777、1777…）一律收紧。
+  [ "${mode: -2}" = "00" ] && return 0
+  if chmod 600 "$1" 2>/dev/null; then
+    log "已收紧 $2 权限：${1}（${mode} → $(stat -c '%a' "$1" 2>/dev/null || echo '?')）"
+  else
+    log "WARN: 无法收紧 $2 权限（${1} 当前 ${mode}），dsh 会拒绝启动；"
+    log "      请在宿主机执行： sudo chmod 600 <DSH_HOME_HOST>${1#${DSH_HOME}}"
+  fi
+}
+tighten "$DSH_HOME/.credentials.yaml" "凭据文件"
+tighten "$DSH_HOME/settings.yaml" "设置文件"
+tighten "$DSH_HOME/auth/users.yaml" "登录用户文件"
+chmod 700 "$DSH_HOME/auth" 2>/dev/null || true
+
 # ── 4. 启动 dsh（仅回环）────────────────────────────────────────────────────
 : >"$WEB_LOG"
 log "启动 dsh: dsh --profile web --host $DSH_HOST --port $DSH_PORT --no-open"

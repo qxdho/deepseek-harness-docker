@@ -509,6 +509,78 @@ case "$out2" in
 *) ok "第二次启动跳过补齐（幂等）" ;;
 esac
 
+echo "== 8b. entrypoint 收紧过宽的私密文件权限 =="
+# credentials 插件要求 .credentials.yaml 不能有 group/other 权限位，否则拒绝启动：
+#   credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)
+# 这种文件常来自旧命名卷，或在宿主上被 chmod -R 777 过。
+mkdir -p "$home/auth"
+printf 'users: []\n' >"$home/auth/users.yaml" # 跳过「创建管理员」，让流程走到权限自检
+echo 'token: x' >"$home/.credentials.yaml"
+chmod 777 "$home/.credentials.yaml"
+echo 'ui: {}' >"$home/settings.yaml"
+chmod 640 "$home/settings.yaml"
+set +e
+out4="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+set -e
+[ "$(stat -c '%a' "$home/.credentials.yaml")" = "600" ] \
+	&& ok "777 的 .credentials.yaml 被收紧为 600" \
+	|| bad "凭据文件未收紧：$(stat -c '%a' "$home/.credentials.yaml")"
+[ "$(stat -c '%a' "$home/settings.yaml")" = "600" ] \
+	&& ok "640 的 settings.yaml 被收紧为 600" \
+	|| bad "设置文件未收紧：$(stat -c '%a' "$home/settings.yaml")"
+case "$out4" in
+*"已收紧"*) ok "日志说明了权限收紧" ;;
+*) bad "日志未提权限收紧：$out4" ;;
+esac
+
+# 幂等：已经是 600 的不再改，也不应再打印收紧日志
+set +e
+out5="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+set -e
+case "$out5" in
+*"已收紧"*) bad "第二次启动仍在收紧（非幂等）" ;;
+*) ok "第二次启动跳过收紧（幂等）" ;;
+esac
+[ "$(stat -c '%a' "$home/.credentials.yaml")" = "600" ] && ok "权限保持 600" || bad "权限被再次改动"
+
+# 宿主侧预检：同一组文件在宿主上也必须被收紧（cover 用户在宿主机修复的场景）
+echo "== 8c. 宿主预检收紧私密文件权限 =="
+pre="$sandbox/preperm"
+mkdir -p "$pre/data/auth"
+printf 'DSH_HOME_HOST=%s/data\nDSH_WORKSPACE_HOST=%s/data/workspace\nDSH_UID=%s\nDSH_GID=%s\n' \
+	"$pre" "$pre" "$TEST_UID" "$TEST_GID" >"$pre/.env"
+mkdir -p "$pre/data/workspace"
+echo 'token: x' >"$pre/data/.credentials.yaml"
+chmod 777 "$pre/data/.credentials.yaml"
+printf 'users: []\n' >"$pre/data/auth/users.yaml"
+chmod 755 "$pre/data/auth/users.yaml"
+echo 'keep' >"$pre/data/notes.txt"
+chmod 644 "$pre/data/notes.txt"
+set +e
+out6="$(check_workspace "$pre" auto 1 2>&1)"
+set -e
+[ "$(stat -c '%a' "$pre/data/.credentials.yaml")" = "600" ] \
+	&& ok "宿主上 777 的凭据文件被收紧为 600" \
+	|| bad "宿主凭据文件未收紧：$(stat -c '%a' "$pre/data/.credentials.yaml")"
+[ "$(stat -c '%a' "$pre/data/auth/users.yaml")" = "600" ] \
+	&& ok "宿主上 755 的用户文件被收紧为 600" \
+	|| bad "宿主用户文件未收紧：$(stat -c '%a' "$pre/data/auth/users.yaml")"
+[ "$(stat -c '%a' "$pre/data/notes.txt")" = "644" ] \
+	&& ok "无关文件不被改动" \
+	|| bad "无关文件被改了：$(stat -c '%a' "$pre/data/notes.txt")"
+case "$out6" in
+*"权限过宽"*) ok "预检说明了权限收紧" ;;
+*) bad "预检未提权限问题：$out6" ;;
+esac
+# 已经是 600 → 不应再报权限问题
+set +e
+out7="$(check_workspace "$pre" auto 1 2>&1)"
+set -e
+case "$out7" in
+*"权限过宽"*) bad "已收紧的文件仍被报警" ;;
+*) ok "已合规的文件不再报警" ;;
+esac
+
 # 磁盘预检：把阈值抬到不可能满足，应给出明确提示（只告警、不退出）
 set +e
 out3="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_DISK_MIN_MB=99999999 DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"

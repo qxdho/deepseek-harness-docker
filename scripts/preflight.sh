@@ -282,6 +282,38 @@ check_dsh_home_dir() {
 	local project_dir="$1" allow_elevate="$2" auto_fix="$3"
 	check_host_dir "$project_dir" DSH_HOME_HOST "dsh 数据目录" "/dsh" "$allow_elevate" "$auto_fix"
 }
+# 私密文件权限：dsh 的 credentials 插件要求 .credentials.yaml 没有 group/other
+# 权限位（源码判定 mode & 0o077 == 0），否则直接拒绝启动并让容器进入重启循环：
+#   credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)
+# 这类文件常来自旧命名卷，或在宿主上被 chmod -R 777 过。容器里也有一道同样的自检，
+# 这里提前在宿主上修掉，用户就能正常启动而不是对着 dsh 的报错猜。
+fix_private_file_modes() {
+	local project_dir="$1" home f mode fixed=0
+	home="$(env_file_value "$project_dir/.env" DSH_HOME_HOST)"
+	[ -n "$home" ] || home="$project_dir"
+	case "$home" in /*) ;; *) home="$project_dir/${home#./}" ;; esac
+	[ -d "$home" ] || return 0
+	for f in "$home/.credentials.yaml" "$home/settings.yaml" "$home/auth/users.yaml"; do
+		[ -f "$f" ] || continue
+		mode="$(stat -c '%a' "$f" 2>/dev/null || echo '')"
+		[ -n "$mode" ] || continue
+		[ "${mode: -2}" = "00" ] && continue
+		# 先直接改（部署者通常就是文件属主）；不行再试免密 sudo，绝不停在密码提示上
+		if chmod 600 "$f" 2>/dev/null; then
+			fixed=1
+		elif command -v sudo >/dev/null 2>&1 && sudo -n chmod 600 "$f" 2>/dev/null; then
+			fixed=1
+		fi
+		if [ "$fixed" = "1" ]; then
+			printf '    %s 权限过宽（%s），已改为 600\n' "$f" "$mode"
+		else
+			printf '%s\n' "    警告：$f 权限过宽（$mode），dsh 会拒绝启动。请执行： sudo chmod 600 $f" >&2
+		fi
+		fixed=0
+	done
+	return 0
+}
+
 # 启动前总检查。返回 0 = 可以启动，1 = 有问题（已打印指引），2 = 缺 .env
 check_workspace() {
 	local project_dir="$1" allow_elevate="${2:-auto}" auto_fix="${3:-1}"
@@ -295,6 +327,8 @@ check_workspace() {
 	# 数据目录（DSH_HOME_CONTAINER 的宿主侧）与工作区都是 bind mount，属主不对容器就写不进。
 	check_dsh_home_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
 	check_workspace_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
+	# auto_fix=0（排障模式）只报告不修改
+	[ "$auto_fix" = "0" ] || fix_private_file_modes "$project_dir"
 
 	return 0
 }

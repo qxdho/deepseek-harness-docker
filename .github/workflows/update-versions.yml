@@ -1,0 +1,92 @@
+name: update-versions
+
+# 跟踪 dsh 的上游版本，有新版本时开 PR 更新仓库里钉住的版本。
+#
+# 为什么需要：dsh 目前每几天发一个版本（实测 4 天 4 个：0.1.7-rc.1 → 0.2.0-rc.2），
+# 而 Dockerfile / docker-compose.yml / .env.example 里的 DSH_VERSION 是写死的。没人
+# 改，仓库构建出来的镜像（包括 CI 推到 GHCR 的 latest）就永远是旧版。
+#
+# 为什么开 PR 而不是直接提交到 main：
+#   * dsh 还是预发布版，跨次版本（如 0.1.x → 0.2.x）可能有破坏性变更，需要人工判断
+#   * 也方便在 PR 里补一句上游 release notes
+on:
+  schedule:
+    # 每周一 03:17 UTC。错开整点，避免和别的高峰任务抢 runner。
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      force_pr:
+        description: 即使没有变化也开 PR（仅用于调试）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # jq 用于解析 npm registry 响应（脚本也支持 node/python3 回退，但 runner 上
+      # 直接给 jq 最省事）
+      - name: 安装 jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: 查询并写回版本
+        id: upd
+        run: |
+          set -euo pipefail
+          chmod +x scripts/update-versions.sh
+          ./scripts/update-versions.sh | tee /tmp/upd.log
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "没有需要更新的版本"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat
+          fi
+
+      - name: 汇总变化
+        id: sum
+        if: steps.upd.outputs.changed == 'true' || inputs.force_pr
+        run: |
+          set -eu
+          {
+            echo "body<<__EOF__"
+            echo "自动跟踪上游 npm 版本，更新仓库里钉住的版本。"
+            echo
+            echo '```'
+            cat /tmp/upd.log
+            echo '```'
+            echo
+            echo "文件差异："
+            echo
+            echo '```diff'
+            git --no-pager diff || true
+            echo '```'
+            echo
+            echo "> 跨次版本（如 0.1.x → 0.2.x）可能有破坏性变更。"
+            echo "> 合并前建议先看上游 release notes：https://github.com/deepseek-ai/deepseek-harness/releases"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+          # 用当前钉住的 dsh 版本号作为分支名后缀，便于区分不同批次
+          ver="$(awk -F= '/^ARG DSH_VERSION=/{print $2}' Dockerfile)"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: 创建或更新 PR
+        if: steps.upd.outputs.changed == 'true' || inputs.force_pr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/update-dsh-versions
+          delete-branch: true
+          title: "chore: 跟踪上游版本（dsh ${{ steps.sum.outputs.version }}）"
+          body: ${{ steps.sum.outputs.body }}
+          commit-message: |
+            chore: 跟踪上游 npm 版本
+
+            由 .github/workflows/update-versions.yml 自动生成。
+          labels: dependencies

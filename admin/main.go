@@ -314,6 +314,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCommands(w, r)
 	case "/api/exec":
 		s.handleExec(w, r)
+	case "/api/dsh/versions":
+		s.handleDshVersions(w, r)
+	case "/api/dsh/update":
+		s.handleDshUpdate(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "未知接口")
 	}
@@ -447,6 +451,55 @@ func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// dshmPath 返回项目目录里的 dshm 脚本绝对路径，并确认它确实是个可执行文件。
+func (s *server) dshmPath() (string, error) {
+	if s.cfg.ProjectDir == "" {
+		return "", errors.New("面板未配置项目目录 project_dir")
+	}
+	p := filepath.Join(s.cfg.ProjectDir, "dshm")
+	st, err := os.Stat(p)
+	if err != nil || st.IsDir() {
+		return "", fmt.Errorf("项目目录里找不到 dshm：%s", p)
+	}
+	return p, nil
+}
+
+// runDshm 执行一条 dshm 命令，返回退出码与合并输出。
+//
+// 调用方必须已经持有 s.execMu（或者确认不需要串行化）。把这段单独抽出来是因为
+// 「跑 dshm」现在有两个入口：命令台，以及版本管理。两边都要同一套超时、环境变量
+// 与输出截断策略，抄一份迟早会漂移。
+func (s *server) runDshm(ctx context.Context, argv []string) (int, string) {
+	dshm, err := s.dshmPath()
+	if err != nil {
+		return -1, err.Error()
+	}
+	cmd := exec.CommandContext(ctx, dshm, argv...)
+	cmd.Dir = s.cfg.ProjectDir
+	env := os.Environ()
+	if s.cfg.ComposeProject != "" {
+		env = append(env, "COMPOSE_PROJECT_NAME="+s.cfg.ComposeProject)
+	}
+	cmd.Env = env
+	out := &capWriter{limit: 256 * 1024}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	runErr := cmd.Run()
+
+	exit := 0
+	text := out.String()
+	if runErr != nil {
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
+			exit = ee.ExitCode()
+		} else {
+			exit = -1
+			text += "\n" + runErr.Error()
+		}
+	}
+	return exit, text
+}
+
 func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "只支持 POST")
@@ -456,13 +509,8 @@ func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "面板未开启命令台（重新运行 dshm admin install 可开启）")
 		return
 	}
-	if s.cfg.ProjectDir == "" {
-		writeErr(w, http.StatusBadRequest, "面板未配置项目目录 project_dir")
-		return
-	}
-	dshm := filepath.Join(s.cfg.ProjectDir, "dshm")
-	if st, err := os.Stat(dshm); err != nil || st.IsDir() {
-		writeErr(w, http.StatusBadRequest, "项目目录里找不到 dshm："+dshm)
+	if _, err := s.dshmPath(); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -494,29 +542,7 @@ func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.execMu.Unlock()
 
-	cmd := exec.CommandContext(ctx, dshm, argv...)
-	cmd.Dir = s.cfg.ProjectDir
-	env := os.Environ()
-	if s.cfg.ComposeProject != "" {
-		env = append(env, "COMPOSE_PROJECT_NAME="+s.cfg.ComposeProject)
-	}
-	cmd.Env = env
-	out := &capWriter{limit: 256 * 1024}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	runErr := cmd.Run()
-
-	exit := 0
-	text := out.String()
-	if runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			exit = ee.ExitCode()
-		} else {
-			exit = -1
-			text += "\n" + runErr.Error()
-		}
-	}
+	exit, text := s.runDshm(ctx, argv)
 	s.audit("exec %q exit=%d ip=%s", strings.Join(argv, " "), exit, s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"exit":   exit,

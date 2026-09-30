@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -250,4 +252,65 @@ func (d *Docker) Prune() (int64, error) {
 	}
 	reclaimed += bc.SpaceReclaimed
 	return reclaimed, nil
+}
+
+// ── 在容器内执行命令 ────────────────────────────────────────────────────────
+
+// execInContainer 在容器里跑一条命令并返回合并后的输出。
+//
+// 走 Docker 的 exec API：先 /exec/create 建会话，再 /exec/{id}/start 执行。
+// start 的响应是 Docker 的多路复用流（stdout/stderr 各带 8 字节头），
+// 复用 demuxLogs 解析。
+func (d *Docker) execInContainer(ctx context.Context, name string, argv []string) (string, error) {
+	createBody, err := json.Marshal(map[string]any{
+		"AttachStdout": true,
+		"AttachStderr": true,
+		"Cmd":          argv,
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://docker/containers/"+url.PathEscape(name)+"/exec", bytes.NewReader(createBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := d.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("连接 Docker socket 失败（%s）：%w", d.socket, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("docker exec create: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&created); err != nil {
+		return "", fmt.Errorf("解析 exec create 响应失败：%w", err)
+	}
+	if created.ID == "" {
+		return "", errors.New("docker 没有返回 exec id")
+	}
+
+	startBody, _ := json.Marshal(map[string]any{"Detach": false, "Tty": false})
+	sreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://docker/exec/"+url.PathEscape(created.ID)+"/start", bytes.NewReader(startBody))
+	if err != nil {
+		return "", err
+	}
+	sreq.Header.Set("Content-Type", "application/json")
+	sresp, err := d.http.Do(sreq)
+	if err != nil {
+		return "", fmt.Errorf("执行容器内命令失败：%w", err)
+	}
+	defer sresp.Body.Close()
+	if sresp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(sresp.Body, 4096))
+		return "", fmt.Errorf("docker exec start: %s: %s", sresp.Status, strings.TrimSpace(string(b)))
+	}
+	// 容器内命令输出可能很大，但仍然要有上限
+	return demuxLogs(io.LimitReader(sresp.Body, 1<<20)), nil
 }

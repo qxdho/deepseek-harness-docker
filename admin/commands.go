@@ -97,7 +97,7 @@ var legacyAlias = map[string][]string{
 	"status": {"service", "status"}, "logs": {"service", "logs"}, "version": {"service", "version"},
 	"update": {"service", "update"}, "url": {"service", "url"}, "disk": {"service", "disk"},
 	"versions": {"service", "versions"},
-	"pw": {"auth", "password"}, "passwd": {"auth", "password"}, "password": {"auth", "password"},
+	"pw":       {"auth", "password"}, "passwd": {"auth", "password"}, "password": {"auth", "password"},
 	"user": {"auth", "user"}, "totp": {"auth", "totp"},
 	"install-self": {"self", "install"}, "link": {"self", "install"}, "install-cli": {"self", "install"},
 	"uninstall-self": {"self", "uninstall"}, "unlink": {"self", "uninstall"},

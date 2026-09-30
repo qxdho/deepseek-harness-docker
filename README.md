@@ -195,6 +195,70 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 
 原有的扁平写法（`./dshm up`、`./dshm pw`、`./dshm user add ...`）仍然可用，但不再写入文档。
 
+### dsh 版本管理：完整做法
+
+**先建立正确的心智模型**：这个项目里有**两个层次**的「版本」，它们的更新方式完全不同，
+混起来就会觉得「明明升级了却没变」。
+
+| 层次 | 是什么 | 怎么更新 | 存在哪 |
+|---|---|---|---|
+| **镜像里的 dsh** | 构建期由 npm 装进镜像的 dsh 本体 | `dshm service update` | 镜像层（**重建容器不会丢**） |
+| **profile 里的插件** | 数据目录中的插件（登录、市场等） | `dshm auth` / 容器内 `dsh plugin` / 插件市场 | 数据目录（持久） |
+
+**注意**：如果你用插件（例如 `dsh-plugin-console`）在容器内就地升级 dsh 本身，
+那次升级只改容器里的文件 —— **容器一重建就回到镜像里的版本**。要长期保持某个 dsh
+版本，必须通过镜像（也就是下面的命令）。
+
+#### 1. 查：现在是什么版本、有没有新版
+
+```bash
+./dshm service status      # 当前版本 + 是否有新版（会主动提示）
+./dshm service version     # 只问容器内的 dsh 版本
+./dshm service versions     # 列出 npm 上所有可装版本，标出「当前」与「最新」
+```
+
+`service status` 的输出长这样：
+
+```
+dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
+升级：./dshm service update --latest
+```
+
+离线环境可设 `DSHM_SKIP_UPDATE_CHECK=1` 跳过这一步。
+
+#### 2. 升：三种方式，按场景选
+
+```bash
+./dshm service update             # 拉 GHCR 上 CI 构建好的镜像（最快，推荐日常用）
+./dshm service update --latest    # 向 npm 查最新版 → 写回 .env → 本地构建（最慢）
+./dshm service update 0.2.0-rc.2 --build   # 指定版本本地构建
+```
+
+| 你想要 | 用哪个 | 耗时 |
+|---|---|---|
+| 跟上最新（且仓库 CI 已构建） | `update` | 快（拉镜像） |
+| 确保拿到 npm 最新版 | `update --latest` | 慢（本地构建） |
+| 装某个特定版本 | `update <版本> --build` | 慢（本地构建） |
+
+**为什么换版本要重建镜像**：dsh 是在**构建期**由 npm 装进镜像的，这是本项目（以及
+1Panel 应用商店、同类项目）的通行做法 —— 好处是**断网也能起**，而且版本组合有问题
+会在**构建期**就失败，不会等到起容器才发现。
+
+#### 3. 回退：装回旧版本
+
+```bash
+./dshm service versions              # 先看有哪些版本可选
+./dshm service update 0.1.7-rc.2 --build
+```
+
+数据目录不受影响（会话、插件、凭据都在 bind mount 里），所以回退不会丢数据。
+
+#### 4. 仓库自己别落后
+
+`DSH_VERSION` 写在 `Dockerfile` / `docker-compose.yml` / `.env.example` 三处。
+CI 每周查一次上游，有新版本就**开一个 PR**，你 review 后合并即可（见
+`.github/workflows/update-versions.yml`）。所以正常情况你不需要手工改这三个文件。
+
 ## 管理面板
 
 管理面板不是容器，而是运行在宿主机上的一个程序，默认安装于 `/dsh-manager`：

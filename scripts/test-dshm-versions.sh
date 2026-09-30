@@ -13,9 +13,19 @@ root="$(cd "$here/.." && pwd)"
 
 # 把 dshm 里被测的几个函数抽出来（用 awk 按函数名取到闭合大括号）
 fnfile="$(mktemp)"
-for fn in dsh_npm_json dsh_versions_sorted dsh_dist_tags dsh_latest_version; do
+for fn in dsh_npm_json dsh_versions_sorted dsh_dist_tags dsh_latest_version \
+	current_dsh_version show_dsh_versions; do
 	awk "/^${fn}\\(\\)/,/^}/" "$root/dshm" >>"$fnfile"
 done
+# show_dsh_versions 依赖这些（测试环境下给最小实现）
+CONTAINER=qxdho-dsh
+GRN=; RST=; YEL=; B=; DIM=
+hdr() { :; }
+info() { :; }
+ok() { :; }
+warn() { :; }
+die() { printf 'DIE %s\n' "$*" >&2; exit 1; }
+env_value_new() { printf '%s' "0.1.7-rc.2"; }
 # shellcheck source=/dev/null
 . "$fnfile"
 
@@ -93,6 +103,33 @@ if got="$(PATH="/nonexistent" dsh_npm_json 2>/dev/null)"; then
 	fail "没有 curl 时 dsh_npm_json 应失败，实际返回 '${got}'"
 else
 	pass "没有 curl 时 dsh_npm_json 明确失败"
+fi
+
+# --json 输出必须是合法 JSON（面板直接解析它；格式一坏面板就整块不可用）
+fake_json "$SAMPLE"
+jsonout="$(PATH="$stub:$PATH" show_dsh_versions --json 2>/dev/null || true)"
+case "$jsonout" in
+"{"/"*\"current\":\"0.1.7-rc.2\""*) : ;;  # 占位，下面用 node 精确校验
+esac
+if command -v node >/dev/null 2>&1; then
+	if printf '%s' "$jsonout" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(j.latest!=="0.2.0-rc.2")throw new Error("latest");if(j.versions.length!==4)throw new Error("n");if(j.current!=="0.1.7-rc.2")throw new Error("cur")})' 2>/dev/null; then
+		pass "--json 输出是合法 JSON 且字段正确"
+	else
+		fail "--json 输出不是合法 JSON 或字段不对：$jsonout"
+	fi
+else
+	skip "没有 node，跳过 --json 校验"
+fi
+
+# 版本号里带引号/反斜杠时也必须转义（不能让面板的 JSON 解析崩掉）
+fake_json '{"dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{},"we\"ird\\x":{}}}'
+jsonout="$(PATH="$stub:$PATH" show_dsh_versions --json 2>/dev/null || true)"
+if command -v node >/dev/null 2>&1; then
+	if printf '%s' "$jsonout" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{JSON.parse(s)})' 2>/dev/null; then
+		pass "版本号含引号/反斜杠时 JSON 仍合法（转义生效）"
+	else
+		fail "转义失效，JSON 解析失败：$jsonout"
+	fi
 fi
 
 rm -f "$fnfile"

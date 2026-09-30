@@ -371,6 +371,33 @@ show_dsh_versions() {
 	latest="$(printf '%s\n' "$all" | tail -1)"
 	total="$(printf '%s\n' "$all" | wc -l | tr -d ' ')"
 
+	# --json：给管理面板（以及任何脚本）用的机器可读输出。走这里而不是让调用方去
+	# 解析中文表格 —— 那种解析一改格式就坏。
+	# 手写 JSON（不引入 jq 依赖），所以必须转义字符串：版本号理论上来自 registry，
+	# 仍然按不可信数据转义，避免一个带引号的版本号把面板的 JSON 解析带崩。
+	case "${1:-}" in
+	--json)
+		local esc esc_latest esc_tags
+		esc="$(printf '%s' "$cur" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+		# latest 也必须转义：它同样来自 registry，不能直接进 printf 的格式串
+		esc_latest="$(printf '%s' "$latest" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+		esc_tags="$(printf '%s' "$tags" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+		printf '{"current":"%s","latest":"%s","total":%s,"distTags":"%s","versions":[' \
+			"$esc" "$esc_latest" "$total" "$esc_tags"
+		local first=1 v
+		while IFS= read -r v; do
+			[ -n "$v" ] || continue
+			[ "$first" = "1" ] || printf ','
+			first=0
+			printf '"%s"' "$(printf '%s' "$v" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+		done <<EOF
+$all
+EOF
+		printf ']}\n'
+		return 0
+		;;
+	esac
+
 	hdr "dsh 可用版本"
 	# 列表可能很长（本仓库实测 29 个），默认只显示最近 10 个，--all 看全部。
 	shown="${DSH_VERSIONS_SHOWN:-10}"

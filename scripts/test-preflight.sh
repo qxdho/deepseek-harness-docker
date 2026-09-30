@@ -543,8 +543,27 @@ case "$out5" in
 esac
 [ "$(stat -c '%a' "$home/.credentials.yaml")" = "600" ] && ok "权限保持 600" || bad "权限被再次改动"
 
+# 属主不对时容器内改不了（不是 root），必须直接给出宿主机命令并退出，
+# 而不是放 dsh 去抛一堆 EACCES
+chmod 000 "$home/.credentials.yaml"
+set +e
+out_unreadable="$(DSH_WORKSPACE_CONTAINER="$sandbox/ep3-ws" DSH_HOME="$home" bash "$stage/entrypoint.sh" 2>&1)"
+rc_unreadable=$?
+set -e
+[ "$rc_unreadable" -ne 0 ] && ok "读不了的私密文件 → 直接退出（rc=$rc_unreadable）" \
+	|| bad "读不了却继续启动"
+case "$out_unreadable" in
+*"读不了"*) ok "说明是属主/可读性问题" ;;
+*) bad "缺少可读性诊断：$out_unreadable" ;;
+esac
+case "$out_unreadable" in
+*"sudo chown"*) ok "给出了宿主机上的 chown 命令" ;;
+*) bad "缺少 chown 指引" ;;
+esac
+chmod 600 "$home/.credentials.yaml"
+
 # 宿主侧预检：同一组文件在宿主上也必须被收紧（cover 用户在宿主机修复的场景）
-echo "== 8c. 宿主预检收紧私密文件权限 =="
+echo "== 8c. 宿主预检收紧私密文件权限与属主 =="
 pre="$sandbox/preperm"
 mkdir -p "$pre/data/auth"
 printf 'DSH_HOME_HOST=%s/data\nDSH_WORKSPACE_HOST=%s/data/workspace\nDSH_UID=%s\nDSH_GID=%s\n' \
@@ -569,7 +588,7 @@ set -e
 	&& ok "无关文件不被改动" \
 	|| bad "无关文件被改了：$(stat -c '%a' "$pre/data/notes.txt")"
 case "$out6" in
-*"权限过宽"*) ok "预检说明了权限收紧" ;;
+*"权限 777 → 600"*) ok "预检说明了权限收紧" ;;
 *) bad "预检未提权限问题：$out6" ;;
 esac
 # 已经是 600 → 不应再报权限问题
@@ -580,6 +599,32 @@ case "$out7" in
 *"权限过宽"*) bad "已收紧的文件仍被报警" ;;
 *) ok "已合规的文件不再报警" ;;
 esac
+
+# 属主不对（root:root）也要修回容器 uid —— 需要有免密 sudo 才能构造这个场景
+if have_sudo && sudo -n true 2>/dev/null; then
+	sudo chown 0:0 "$pre/data/.credentials.yaml"
+	sudo chown 0:0 "$pre/data/notes.txt"
+	set +e
+	out8="$(check_workspace "$pre" auto 1 2>&1)"
+	set -e
+	[ "$(stat -c '%u:%g' "$pre/data/.credentials.yaml")" = "$TEST_UID:$TEST_GID" ] \
+		&& ok "root 属主的凭据文件被改回容器 uid" \
+		|| bad "属主未修：$(stat -c '%u:%g' "$pre/data/.credentials.yaml")"
+	case "$out8" in
+	*"属主 0:0 →"*) ok "预检说明了属主修正" ;;
+	*) bad "预检未提属主：$out8" ;;
+	esac
+	# 其它顶层条目属主不对时只提示，不擅自递归 chown
+	case "$out8" in
+	*"不属于容器 uid"*) ok "提示了数据目录里其它属主不对的条目" ;;
+	*) bad "未提示其它属主问题：$out8" ;;
+	esac
+	[ "$(stat -c '%u' "$pre/data/notes.txt")" = "0" ] \
+		&& ok "无关文件不被 chown（只提示不动它）" \
+		|| bad "无关文件被改了：$(stat -c '%u' "$pre/data/notes.txt")"
+else
+	echo "  SKIP 无免密 sudo，跳过属主修复用例"
+fi
 
 # 磁盘预检：把阈值抬到不可能满足，应给出明确提示（只告警、不退出）
 set +e

@@ -347,17 +347,21 @@ server {
 </details>
 
 <details>
-<summary><b>日志含 <code>credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)</code>，容器反复重启？</b></summary>
+<summary><b>日志含 <code>credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)</code> 或 <code>EACCES: permission denied, open '/dsh/.credentials.yaml'</code>，容器反复重启？</b></summary>
 
 <br/>
 
-凭据文件权限过宽（属主之外的人也能读到），dsh 会直接拒绝启动。这类文件通常来自旧命名卷，
-或在宿主机上被执行过 `chmod -R 777` —— **不要对数据目录做 `chmod -R 777`**。
+dsh 要求凭据文件**只有属主能读写**：权限过宽（`777`、`640`）会被拒绝加载，
+而收紧成 `600` 之后若属主仍是 `root`，容器里的 uid 1000 同样读不了（`EACCES`）。
+两种情况都来自这个文件本身的权限/属主，通常源自旧命名卷，或在宿主机上被执行过
+`chmod -R 777` / `chown` —— **不要对数据目录做 `chmod -R 777`**。
 
-`./dshm service up` 的预检会在启动前把它收紧为 `600`；新版镜像的 entrypoint 每次启动也会
-再检查一次。手工修复：
+`./dshm service up` 的预检会在启动前改属主并收紧权限；新版镜像的 entrypoint 每次启动
+也会再检查一次，读不了时直接打印宿主机上的修复命令。手工修复（`DSH_UID`/`DSH_GID`
+取自 `.env`，默认 1000）：
 
 ```bash
+sudo chown -R 1000:1000 /dsh                                          # 属主统一到容器 uid
 sudo chmod 600 /dsh/.credentials.yaml /dsh/settings.yaml /dsh/auth/users.yaml
 ./dshm service up
 ```

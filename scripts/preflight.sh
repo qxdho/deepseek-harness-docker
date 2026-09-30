@@ -282,35 +282,58 @@ check_dsh_home_dir() {
 	local project_dir="$1" allow_elevate="$2" auto_fix="$3"
 	check_host_dir "$project_dir" DSH_HOME_HOST "dsh 数据目录" "/dsh" "$allow_elevate" "$auto_fix"
 }
-# 私密文件权限：dsh 的 credentials 插件要求 .credentials.yaml 没有 group/other
-# 权限位（源码判定 mode & 0o077 == 0），否则直接拒绝启动并让容器进入重启循环：
+# 私密文件：dsh 的 credentials 插件要求 .credentials.yaml 没有 group/other 权限位
+# （源码判定 mode & 0o077 == 0），否则拒绝启动并让容器进入重启循环：
 #   credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)
-# 这类文件常来自旧命名卷，或在宿主上被 chmod -R 777 过。容器里也有一道同样的自检，
-# 这里提前在宿主上修掉，用户就能正常启动而不是对着 dsh 的报错猜。
-fix_private_file_modes() {
-	local project_dir="$1" home f mode fixed=0
-	home="$(env_file_value "$project_dir/.env" DSH_HOME_HOST)"
+# 反过来，收紧成 600 之后如果属主还是 root，容器里的 uid 1000 同样读不了：
+#   EACCES: permission denied, open '/dsh/.credentials.yaml'
+# 两种都必须处理，所以这里既改属主（到容器 uid）又改权限（到 600）。
+# 这类文件常来自旧命名卷，或在宿主上被 chmod -R 777 / chown 过。
+sudo_or_run() {
+	"$@" 2>/dev/null && return 0
+	command -v sudo >/dev/null 2>&1 && sudo -n "$@" 2>/dev/null
+}
+
+fix_private_files() {
+	local project_dir="$1" home f mode owner cu cg
+	local env_file="$project_dir/.env"
+	home="$(env_file_value "$env_file" DSH_HOME_HOST)"
 	[ -n "$home" ] || home="$project_dir"
 	case "$home" in /*) ;; *) home="$project_dir/${home#./}" ;; esac
 	[ -d "$home" ] || return 0
+	cu="$(container_uid "$env_file")"
+	cg="$(container_gid "$env_file")"
+
 	for f in "$home/.credentials.yaml" "$home/settings.yaml" "$home/auth/users.yaml"; do
 		[ -f "$f" ] || continue
+		owner="$(stat -c '%u:%g' "$f" 2>/dev/null || echo '')"
 		mode="$(stat -c '%a' "$f" 2>/dev/null || echo '')"
-		[ -n "$mode" ] || continue
-		[ "${mode: -2}" = "00" ] && continue
-		# 先直接改（部署者通常就是文件属主）；不行再试免密 sudo，绝不停在密码提示上
-		if chmod 600 "$f" 2>/dev/null; then
-			fixed=1
-		elif command -v sudo >/dev/null 2>&1 && sudo -n chmod 600 "$f" 2>/dev/null; then
-			fixed=1
+		# 属主：容器以 uid ${cu} 运行，0600 的文件不是它的话必然 EACCES
+		if [ -n "$owner" ] && [ "$owner" != "${cu}:${cg}" ]; then
+			if sudo_or_run chown "${cu}:${cg}" "$f"; then
+				printf '    %s 属主 %s → %s\n' "$f" "$owner" "${cu}:${cg}"
+			else
+				printf '%s\n' "    警告：$f 属主是 $owner，容器内 uid ${cu} 读不了它。请执行： sudo chown ${cu}:${cg} $f" >&2
+			fi
 		fi
-		if [ "$fixed" = "1" ]; then
-			printf '    %s 权限过宽（%s），已改为 600\n' "$f" "$mode"
-		else
-			printf '%s\n' "    警告：$f 权限过宽（$mode），dsh 会拒绝启动。请执行： sudo chmod 600 $f" >&2
+		# 权限：不能有任何 group/other 位
+		if [ -n "$mode" ] && [ "${mode: -2}" != "00" ]; then
+			if sudo_or_run chmod 600 "$f"; then
+				printf '    %s 权限 %s → 600\n' "$f" "$mode"
+			else
+				printf '%s\n' "    警告：$f 权限过宽（$mode），dsh 会拒绝启动。请执行： sudo chmod 600 $f" >&2
+			fi
 		fi
-		fixed=0
 	done
+
+	# 顶层还有别的条目属主不对时，dsh 读写同样会失败；这里只提示，不擅自整目录 chown
+	local foreign
+	foreign="$(find "$home" -maxdepth 1 -mindepth 1 ! -user "$cu" 2>/dev/null | head -5)"
+	if [ -n "$foreign" ]; then
+		printf '    警告：数据目录里还有不属于容器 uid %s 的条目，容器可能读写失败：\n' "$cu"
+		printf '%s\n' "$foreign" | sed 's/^/      /'
+		printf '    修复： sudo chown -R %s:%s %s\n' "$cu" "$cg" "$home"
+	fi
 	return 0
 }
 
@@ -328,7 +351,7 @@ check_workspace() {
 	check_dsh_home_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
 	check_workspace_dir "$project_dir" "$allow_elevate" "$auto_fix" || return 1
 	# auto_fix=0（排障模式）只报告不修改
-	[ "$auto_fix" = "0" ] || fix_private_file_modes "$project_dir"
+	[ "$auto_fix" = "0" ] || fix_private_files "$project_dir"
 
 	return 0
 }

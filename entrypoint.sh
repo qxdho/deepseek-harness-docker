@@ -227,6 +227,15 @@ fi
 tighten() { # <文件> <说明>
   [ -e "$1" ] || return 0
   local mode
+  # 容器内不是 root，改不了别人的文件：先确认自己读得了，再谈收紧。
+  # 读不了就直接给出宿主机上的修复命令后退出 —— 继续下去只会让 dsh 抛一堆 EACCES。
+  if [ ! -r "$1" ]; then
+    log "ERROR: $2 当前用户（$(id -u):$(id -g)）读不了：$1"
+    log "       属主不对。请在宿主机执行："
+    log "       sudo chown $(id -u):$(id -g) <DSH_HOME_HOST>${1#${DSH_HOME}}"
+    log "       sudo chmod 600 <DSH_HOME_HOST>${1#${DSH_HOME}}"
+    exit 1
+  fi
   mode="$(stat -c '%a' "$1" 2>/dev/null || echo '')"
   [ -n "$mode" ] || return 0
   # 末两位是 00 就说明没有 group/other 权限位（600/400/700/100… 都算合规），

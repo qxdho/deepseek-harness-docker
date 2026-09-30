@@ -373,18 +373,22 @@ Check the logs: `./dshm service logs`. The first start takes a dozen seconds or 
 </details>
 
 <details>
-<summary><b>The log contains <code>credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)</code> and the container keeps restarting.</b></summary>
+<summary><b>The log contains <code>credentials-local: /dsh/.credentials.yaml is readable beyond its owner (mode 777)</code> or <code>EACCES: permission denied, open '/dsh/.credentials.yaml'</code>, and the container keeps restarting.</b></summary>
 
 <br/>
 
-The credentials file is too permissive (readable by users other than its owner) and dsh refuses to
-start. Such files usually come from the old named volume, or from a `chmod -R 777` run on the host —
-**never `chmod -R 777` the data directory**.
+dsh requires the credentials file to be **owner-only**: a permissive mode (`777`, `640`) is refused,
+and after tightening to `600` a file still owned by `root` is unreadable for uid 1000 inside the
+container (`EACCES`). Both come down to that file's mode/owner — usually inherited from the old named
+volume, or from a `chmod -R 777` / `chown` run on the host — **never `chmod -R 777` the data
+directory**.
 
-The pre-flight in `./dshm service up` tightens it to `600` before starting, and the entrypoint of the
-current image re-checks it on every start. Manual repair:
+The pre-flight in `./dshm service up` fixes owner and mode before starting, and the entrypoint of the
+current image re-checks on every start, printing the exact host-side command when it cannot read the
+file. Manual repair (`DSH_UID`/`DSH_GID` come from `.env`, default 1000):
 
 ```bash
+sudo chown -R 1000:1000 /dsh                                          # owner = container uid
 sudo chmod 600 /dsh/.credentials.yaml /dsh/settings.yaml /dsh/auth/users.yaml
 ./dshm service up
 ```

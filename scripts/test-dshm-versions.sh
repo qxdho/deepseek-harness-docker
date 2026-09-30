@@ -134,4 +134,61 @@ fi
 
 rm -f "$fnfile"
 rm -rf "$stub"
+echo "== service version 显示四个版本 =="
+# 把 dshm 里 version 命令的实现整段抽出来跑（stub 掉 docker/env/npm），验证它确实把
+# 四个「版本」都列出来，并在不一致时告警。
+vfile="$(mktemp)"
+awk '/^version\)/,/^\t;;/' "$root/dshm" | sed '1d;$d' >"$vfile"
+
+run_version() {
+	P_PINNED="$1" P_RUNNING="$2" P_LATEST="$3" P_UP="${4:-1}" bash -c '
+set -euo pipefail
+YEL=""; RST=""
+hdr() { :; }; info() { printf "INFO:%s\n" "$*"; }; warn() { printf "WARN:%s\n" "$*"; }
+require_docker() { :; }
+CONTAINER=c
+env_value_new() { printf "%s" "$P_PINNED"; }
+env_value() { printf "IMG"; }
+dsh_latest_version() { printf "%s" "$P_LATEST"; }
+docker() { case "$1" in inspect) [ "$P_UP" = 1 ] && return 0 || return 1 ;; exec) printf "%s\n" "$P_RUNNING" ;; esac; }
+Dockerfile=/nonexistent
+. "$VFILE"
+' 2>&1 || true
+}
+export VFILE="$vfile"
+
+out="$(run_version 0.2.0-rc.2 0.2.0-rc.2 0.2.0-rc.2)"
+for label in "配置里钉的版本" "镜像" "容器内实际运行" "npm 最新"; do
+	case "$out" in
+	*"$label"*) pass "列出了「$label」" ;;
+	*) fail "缺少「$label」：$out" ;;
+	esac
+done
+case "$out" in
+*WARN*) fail "四者一致时不该告警：$out" ;;
+*) pass "四者一致时不告警" ;;
+esac
+
+# 配置改了但没应用 → 必须告警（这是最常见的困惑来源）
+out="$(run_version 0.2.0-rc.2 0.1.7-rc.2 0.2.0-rc.2)"
+case "$out" in
+*"不一致"*) pass "钉的版本与运行的不一致时告警" ;;
+*) fail "版本不一致时未告警：$out" ;;
+esac
+
+# 有新版本 → 给出升级命令
+out="$(run_version 0.1.7-rc.2 0.1.7-rc.2 0.9.9)"
+case "$out" in
+*"service update"*) pass "有新版本时给出升级命令" ;;
+*) fail "未给出升级命令：$out" ;;
+esac
+
+# 容器没起 + 离线 → 优雅降级，不报错
+out="$(run_version 0.2.0-rc.2 "" "")"
+case "$out" in
+*"未运行"*) pass "容器未运行时显示「未运行」" ;;
+*) fail "容器未运行时的输出异常：$out" ;;
+esac
+rm -f "$vfile"
+
 run_tests

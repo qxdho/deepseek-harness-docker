@@ -441,11 +441,11 @@ ${B}服务${RST} — 管理 dsh 容器
   dshm service up [--build]      启动 / 应用 .env 改动
   dshm service down              停止（数据保留）
   dshm service restart           重启（重读 .env 并重建）
-  dshm service status            健康 / 端口 / 登录用户
+  dshm service status            健康 / 端口 / 登录用户（并提示 dsh 是否有新版本）
   dshm service logs              日志
   dshm service shell             进容器
-  dshm service version           容器内 dsh 版本
-  dshm service versions          列出 npm 上可装的 dsh 版本（标出当前版本与最新版本）
+  dshm service version           看全四个版本：配置里钉的 / 镜像 / 容器内实际运行 / npm 最新
+  dshm service versions [--all]  列出 npm 上可装的 dsh 版本（--all 显示全部）
   dshm service update [版本] [--build] [--latest]
                                  升级：默认拉预构建镜像（快）
                                  --build  本地构建（改了仓库代码，或要指定 dsh 版本）
@@ -834,9 +834,44 @@ update)
 	;;
 
 version)
-	require_docker; require_running
-	hdr "容器内 dsh 版本"
-	docker exec "$CONTAINER" dsh --version
+	# 一次看全四个「版本」—— 用户问「我是什么版本」时，其实想知道这几件事，而它们
+	# 可能互不相同：
+	#   1. .env 里钉的（下次构建/拉取会得到什么）
+	#   2. DSH_IMAGE 标签（拉的哪个镜像）
+	#   3. 容器内实际运行（真在跑什么）
+	#   4. npm 最新（可以要什么）
+	# 只报其中一个是以前的做法，容易让人误判「我升级了但没变」。
+	hdr "dsh 版本"
+	require_docker
+
+	pinned="$(env_value_new DSH_VERSION "")"
+	[ -n "$pinned" ] || pinned="$(awk -F= '/^ARG DSH_VERSION=/{print $2}' Dockerfile 2>/dev/null | head -1)"
+	img="$(env_value DSH_IMAGE "")"
+
+	running=""
+	if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+		running="$(docker exec "$CONTAINER" dsh --version 2>/dev/null || true)"
+	fi
+
+	latest="$(dsh_latest_version 2>/dev/null || true)"
+
+	# 注意：printf 的 %-Ns 按**字节**算宽度，中文标签用它反而对不齐；而「中文占 2 列」
+	# 又让手工数空格很脆弱。这里把标签和其后的空格都写死，四行按**显示宽度 16 列**对齐
+	# （配置里钉的版本：=16、容器内实际运行：=16、镜像：+10 空格=16、npm 最新：+6 空格=16）。
+	printf '    %s %s\n' "配置里钉的版本：" "${pinned:-未知}"
+	[ -n "$img" ] && printf '    %s %s\n' "镜像：          " "$img"
+	printf '    %s %s\n' "容器内实际运行：" "${running:-（容器未运行）}"
+	printf '    %s %s\n' "npm 最新：      " "${latest:-（查询失败）}"
+
+	# 只在与「实际运行」不一致时告警 —— 配置改了但没应用是最常见的困惑来源
+	if [ -n "$running" ] && [ -n "$pinned" ] && [ "$running" != "$pinned" ]; then
+		warn "容器内运行的版本与配置里钉的不一致"
+		info "应用配置：./dshm service up"
+	fi
+	if [ -n "$latest" ] && [ -n "$running" ] && [ "$running" != "$latest" ]; then
+		printf '\n'
+		info "升级到最新：./dshm service update --latest"
+	fi
 	;;
 
 versions)

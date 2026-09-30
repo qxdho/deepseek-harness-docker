@@ -93,7 +93,7 @@ would silently disable the sandbox this project advertises. The tempting "just a
 The chosen approach, matching the rootless-container consensus
 ([hindsight #2010](https://github.com/vectorize-io/hindsight/pull/2010)):
 
-1. **Host side** — `scripts/preflight.sh` runs from `install.sh` and `dshm up` *before* `compose up`.
+1. **Host side** — `scripts/preflight.sh` runs from `install.sh` and `dshm service up` *before* `compose up`.
    Creating the directory while the user still owns it is the whole fix. If it already exists with the
    wrong owner, it chowns via `sudo` when available and otherwise prints the exact command.
 2. **Container side** — `entrypoint.sh` probes writability of `/workspace` early (before dsh starts). If it

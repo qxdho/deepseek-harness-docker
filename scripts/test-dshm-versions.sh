@@ -134,11 +134,11 @@ fi
 
 rm -f "$fnfile"
 rm -rf "$stub"
-echo "== service version 显示四个版本 =="
+echo "== dshm version（四个版本显示）=="
 # 把 dshm 里 version 命令的实现整段抽出来跑（stub 掉 docker/env/npm），验证它确实把
 # 四个「版本」都列出来，并在不一致时告警。
 vfile="$(mktemp)"
-awk '/^version\)/,/^\t;;/' "$root/dshm" | sed '1d;$d' >"$vfile"
+awk '/^version-show\)/,/^\t;;/' "$root/dshm" | sed '1d;$d' >"$vfile"
 
 run_version() {
 	P_PINNED="$1" P_RUNNING="$2" P_LATEST="$3" P_UP="${4:-1}" bash -c '
@@ -179,7 +179,7 @@ esac
 # 有新版本 → 给出升级命令
 out="$(run_version 0.1.7-rc.2 0.1.7-rc.2 0.9.9)"
 case "$out" in
-*"service update"*) pass "有新版本时给出升级命令" ;;
+*"version update"*) pass "有新版本时给出升级命令" ;;
 *) fail "未给出升级命令：$out" ;;
 esac
 

@@ -68,9 +68,9 @@ migrate_legacy_home() {
 
 	if [ -n "$(containers_using_volume "$vol")" ] && ! stop_own_containers_using_volume "$vol"; then
 		if [ "$mode" = "explicit" ]; then
-			die "请先停止上述容器，再执行 ./dshm service migrate-home"
+			die "请先停止上述容器，再执行 ./dshm migrate"
 		fi
-		warn "已跳过自动迁移；确认这些容器可以停掉后执行 ./dshm service migrate-home"
+		warn "已跳过自动迁移；确认这些容器可以停掉后执行 ./dshm migrate"
 		return 3
 	fi
 
@@ -96,7 +96,7 @@ migrate_legacy_home() {
 		-v "${vol}:/from:ro" -v "${dest}:/to" alpine:3.21 \
 		sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)'; then
 		[ "$mode" = "explicit" ] && die "迁移失败（源卷 ${vol}）；原数据未改动，可重试"
-		warn "迁移失败（源卷 ${vol}）；原数据未改动，可重试 ./dshm service migrate-home"
+		warn "迁移失败（源卷 ${vol}）；原数据未改动，可重试 ./dshm migrate"
 		return 3
 	fi
 

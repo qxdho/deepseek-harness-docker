@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # dshm — DSH 部署管理命令（在项目目录里运行：./dshm <命令>）
 #
-# 命令按分组组织；旧的扁平写法（dshm up / dshm pw …）继续可用。
+# 只保留一套写法：dshm <分组> <子命令>。旧的扁平写法已移除（会提示新写法）。
 # 完整说明见 `dshm help`。
 #
-#   dshm service up|down|restart|status|logs|shell|version|update|url|disk
+#   dshm service up|down|restart|status|logs|shell|url
+#   dshm version show|list|update
 #   dshm auth    password|user|totp
 #   dshm admin   install|uninstall|url|password|status|logs
-#   dshm self    install|uninstall
+#   dshm dshm    install|uninstall|update
 set -euo pipefail
 
-# `./dshm install-self` 会把自己软链到 PATH 里，之后可能以符号链接身份被调用。
+# `dshm dshm install` 会把自己软链到 PATH 里，之后可能以符号链接身份被调用。
 # 所以先解析出脚本的真实路径再 cd —— 否则 `dirname "$0"` 会落在符号链接所在的
 # 目录（如 /usr/local/bin），后面所有相对路径都会找错地方。
 SELF="$0"
@@ -148,7 +149,7 @@ self_update() {
 		case "$a" in
 		--force | -f) force=1 ;;
 		--allow-stale) allow_stale=1 ;;
-		*) die "未知参数：$a（用法：./dshm self update [--force] [--allow-stale]）" ;;
+		*) die "未知参数：$a（用法：./dshm dshm update [--force] [--allow-stale]）" ;;
 		esac
 	done
 
@@ -175,7 +176,7 @@ self_update() {
 				info "建议先 git pull；若继续，self update 会拉取远端最新版"
 				if [ "$allow_stale" != "1" ]; then
 					die "已停下以免覆盖你的本地改动。
-      确认要继续（用远端覆盖本地 dshm）：./dshm self update --allow-stale"
+      确认要继续（用远端覆盖本地 dshm）：./dshm dshm update --allow-stale"
 				fi
 			fi
 		fi
@@ -190,7 +191,7 @@ self_update() {
 		rm -f "$tmp"
 		die "下载失败：$url
       检查网络，或确认分支名（默认 main）；也可用 DSHM_RAW_BASE 指向镜像：
-        DSHM_RAW_BASE=https://你的镜像/dshm ./dshm self update"
+        DSHM_RAW_BASE=https://你的镜像/dshm ./dshm dshm update"
 	fi
 
 	# 语法自检：宁可继续用旧版本，也不能换成跑不起来的脚本
@@ -201,7 +202,7 @@ self_update() {
 
 	# 内容自检：确认下到的确实是本项目脚本，而不是错误页 / 代理返回的 HTML。
 	# 只看一个稳定特征串（命令列表里一定有 self），缺失就拒绝。
-	if ! grep -q 'dshm self' "$tmp"; then
+	if ! grep -q 'dshm dshm' "$tmp"; then
 		rm -f "$tmp"
 		die "下载到的内容不像 dshm（缺少预期特征），已放弃替换。检查 DSHM_RAW_BASE 是否指向正确文件"
 	fi
@@ -426,8 +427,8 @@ EOF
 	if [ -n "$cur" ] && [ "$cur" != "$latest" ]; then
 		warn "有新版本可用：$cur → $latest"
 		info "切换版本需要重建镜像（dsh 在构建期装入）："
-		printf '\n      ./dshm service update %s\n\n' "$latest"
-		info "或指定任意版本： ./dshm service update <版本>"
+		printf '\n      ./dshm version update %s\n\n' "$latest"
+		info "或指定任意版本： ./dshm version update <版本>"
 	else
 		ok "已经是最新版本"
 	fi
@@ -437,24 +438,31 @@ EOF
 help_service() {
 	cat <<EOF
 
-${B}服务${RST} — 管理 dsh 容器
+${B}服务${RST} — 容器生命周期与运维
   dshm service up [--build]      启动 / 应用 .env 改动
   dshm service down              停止（数据保留）
   dshm service restart           重启（重读 .env 并重建）
   dshm service status            健康 / 端口 / 登录用户（并提示 dsh 是否有新版本）
   dshm service logs              日志
   dshm service shell             进容器
-  dshm service version           看全四个版本：配置里钉的 / 镜像 / 容器内实际运行 / npm 最新
-  dshm service versions [--all]  列出 npm 上可装的 dsh 版本（--all 显示全部）
-  dshm service update [版本] [--build] [--latest]
-                                 升级：默认拉预构建镜像（快）
-                                 --build  本地构建（改了仓库代码，或要指定 dsh 版本）
-                                 --latest 构建前向 npm 查最新 dsh 版本并 pin 进 .env
-                                          （不加就永远是 Dockerfile 里写死的旧版本）
-  dshm service migrate-home      把旧命名卷 dsh-home 的数据迁到宿主数据目录
-                                 （install.sh / service up 已自动执行，通常无需手工调用）
   dshm service url               一次性 launch URL（排障）
-  dshm service disk              磁盘占用 / 清理命令
+EOF
+}
+
+help_version() {
+	cat <<EOF
+
+${B}版本${RST} — dsh 版本查询与升级
+  dshm version                   看全四个版本：配置里钉的 / 镜像 / 容器内实际运行 / npm 最新
+  dshm version list [--all]      列出 npm 上可装的版本（--all 显示全部）
+  dshm version update [版本] [--build] [--latest]
+                                 升级：默认拉预构建镜像（快）
+                                 --build  本地构建（改了仓库代码，或要指定版本）
+                                 --latest 构建前向 npm 查最新版并 pin 进 .env
+                                 （不加就永远是 Dockerfile 里写死的那个版本）
+
+  ${DIM}dsh 在构建期装入镜像，所以换版本要重建镜像、没有热切换；
+  但这样断网也能起，且版本组合有问题会在构建期就失败。${RST}
 EOF
 }
 
@@ -466,18 +474,18 @@ ${B}登录${RST} — 密码与账号
   dshm auth user list            列出登录用户
   dshm auth user add 名字        新建用户 [--admin]
   dshm auth user disable 名字    禁用用户
-  dshm auth totp enable [用户]    开启两步验证
+  dshm auth totp enable [用户]   开启两步验证
   dshm auth totp disable [用户]
 EOF
 }
 
-help_self() {
+help_dshm() {
 	cat <<EOF
 
-${B}自身${RST}
-  dshm self install             把 dshm 注册为系统命令（之后任意目录可直接 dshm …）
-  dshm self uninstall           移除系统命令
-  dshm self update [--force]    从 GitHub 拉取最新的 dshm 覆盖自身（无需 git）
+${B}dshm${RST} — 管理 dshm 自身
+  dshm dshm install             把 dshm 注册为系统命令（之后任意目录可直接 dshm …）
+  dshm dshm uninstall           移除系统命令
+  dshm dshm update [--force]    从 GitHub 拉取最新的 dshm 覆盖自身（无需 git）
                                 git 工作区里会先检查本地是否落后，落后则停下提醒
                                 （--force 重新下载，--allow-stale 允许覆盖落后的本地）
 EOF
@@ -485,10 +493,11 @@ EOF
 
 show_help() {
 	case "${1:-}" in
-	service | svc) help_service; return ;;
-	auth | login) help_auth; return ;;
-	self | cli) help_self; return ;;
-	admin | panel)
+	service) help_service; return ;;
+	version) help_version; return ;;
+	auth) help_auth; return ;;
+	dshm) help_dshm; return ;;
+	admin)
 		# shellcheck source=scripts/admin.sh
 		. ./scripts/admin.sh
 		admin_help
@@ -501,21 +510,19 @@ ${B}dshm${RST} — DSH 部署管理命令（在当前目录运行）
 
 用法：${B}dshm <分组> <子命令> [参数]${RST}
 EOF
-	help_service
-	help_auth
 	cat <<EOF
 
-${B}面板${RST}
-  dshm admin install            安装管理面板（宿主机进程）
-  dshm admin url|password|status|logs|uninstall
-  dshm admin help               面板详细说明
-EOF
-	help_self
-	cat <<EOF
+${B}service${RST}   容器生命周期与运维       ${DIM}dshm service help${RST}
+${B}version${RST}   dsh 版本查询与升级        ${DIM}dshm version help${RST}
+${B}auth${RST}      登录密码与账号           ${DIM}dshm auth help${RST}
+${B}admin${RST}     管理面板（宿主机进程）   ${DIM}dshm admin help${RST}
+${B}dshm${RST}      管理 dshm 自身           ${DIM}dshm dshm help${RST}
 
-${DIM}旧写法（up / down / restart / status / logs / pw / user / totp / disk / url /
-install-self …）仍然可用。分组帮助：dshm service|auth|admin|self help
-改运行配置：编辑 .env 后执行 dshm service up${RST}
+${B}disk${RST}       宿主机与容器磁盘占用 / 清理命令
+${B}migrate${RST}    把旧命名卷 dsh-home 的数据迁到宿主数据目录
+                （install.sh 与 service up 已自动执行，通常无需手工调用）
+
+${DIM}改运行配置：编辑 .env 后执行 dshm service up${RST}
 
 EOF
 }
@@ -523,54 +530,139 @@ EOF
 cmd="${1:-help}"
 shift || true
 
-# ── 命令归一化 ──────────────────────────────────────────────────────────────
-# 对外主推分组写法 `dshm <分组> <子命令>`，同时把旧的扁平写法
-# （dshm up / dshm pw / dshm user add …）继续映射到同一批内部命令，
-# 这样已有脚本、文档、肌肉记忆都不会断。分组只做一次翻译，真正的实现仍在
-# 下面那个 case 里，避免逻辑分裂成两份。
-case "$cmd" in
-svc | service)
-	sub="${1:-help}"
-	shift || true
-	if [ "$sub" = "help" ] || [ "$sub" = "-h" ] || [ "$sub" = "--help" ]; then
-		cmd=help
-		set -- service
-	else
-		cmd="$sub"
+# 旧扁平写法 → 新分组写法的提示表。
+#
+# 旧写法已全部移除（只保留一套写法，否则帮助会变长、新用户不知道该学哪个），但直接
+# 报「未知命令」对老用户太不友好 —— 他们只会看到自己用惯的命令突然不工作了。
+# 这里给出确切的替代写法。
+LEGACY_CMD_MAP="
+up=service up
+down=service down
+restart=service restart
+status=service status
+logs=service logs
+shell=service shell
+url=service url
+update=version update
+version=version show
+versions=version list
+disk=disk
+pw=auth password
+passwd=auth password
+password=auth password
+user=auth user
+totp=auth totp
+migrate-home=migrate
+migrate=migrate
+install-self=dshm install
+uninstall-self=dshm uninstall
+update-self=dshm update
+self=dshm
+cli=dshm
+svc=service
+login=auth
+panel=admin
+link=dshm install
+unlink=dshm uninstall
+install-cli=dshm install
+df=disk
+"
+
+unknown_cmd() {
+	local old="$1" hit
+	# 精确匹配（一行一个 key=value），避免前缀误判
+	hit="$(printf '%s\n' "$LEGACY_CMD_MAP" | awk -F= -v k="$old" '$1==k{print $2; exit}')"
+	if [ -n "$hit" ]; then
+		die "命令 '${old}' 已改为分组写法：${B}dshm ${hit}${RST}
+
+  旧写法已全部移除，只保留一套写法。运行 dshm help 看完整命令表。"
 	fi
+	case "$old" in
+	svc | login | cli | panel)
+		die "分组名 '${old}' 是旧简称，已移除。请用完整名：service / auth / dshm / admin"
+		;;
+	esac
+	die "未知命令：${old}（运行 dshm help 查看帮助）"
+}
+
+# ── 命令分发 ────────────────────────────────────────────────────────────────
+#
+# 只保留一套写法：`dshm <分组> <子命令>`。旧的扁平写法（dshm up / dshm pw …）与
+# 分组简称（svc / login / cli / panel）**已全部移除** —— 同时维护两套写法会让帮助
+# 变长、新用户不知道该学哪个。旧写法会命中下面的 unknown_cmd，给出新写法提示。
+#
+# 版本管理独立成 `version` 分组（show / list / update）：它有三个命令和一整套
+# 「四个版本」的语义，塞在 service 里会让那个分组变成杂物袋；而且原来的
+# `version` 与 `versions` 只差一个字母、语义却不同，最容易看错。
+#
+# `dshm dshm` 用来管理 dshm 自身（install / uninstall / update），对齐
+# 「npm install npm」「pip install --upgrade pip」这类工具的惯例。
+#
+# 裸分组名（`dshm service`、`dshm version` …）等同该分组的 help。必须放在分组 case
+# **之前**：那个 case 会把 cmd 重新赋成内部命令名，之后再判"是否裸分组名"就太晚了。
+case "$cmd" in
+service | version | auth | dshm)
+	[ $# -eq 0 ] && set -- help
 	;;
-login | auth)
+esac
+
+case "$cmd" in
+service)
 	sub="${1:-help}"
 	shift || true
 	case "$sub" in
-	password | passwd | pw) cmd=pw ;;
-	user) cmd=user ;;
-	totp) cmd=totp ;;
-	help | -h | --help | "") cmd=help; set -- auth ;;
-	*) die "未知子命令：auth $sub（运行 dshm help）" ;;
+	help | -h | --help) cmd=help; set -- service ;;
+	up | down | restart | status | logs | shell | url) cmd="service-$sub" ;;
+	*) die "未知子命令：service $sub（支持 up / down / restart / status / logs / shell / url；运行 dshm service help）" ;;
 	esac
 	;;
-cli | self)
+version)
 	sub="${1:-help}"
 	shift || true
 	case "$sub" in
-	install) cmd=install-self ;;
-	uninstall) cmd=uninstall-self ;;
-	update | upgrade) cmd=update-self ;;
-	help | -h | --help | "") cmd=help; set -- self ;;
-	*) die "未知子命令：self $sub（运行 dshm help）" ;;
+	help | -h | --help | "") cmd=help; set -- version ;;
+	show) cmd=version-show ;;
+	list) cmd=version-list ;;
+	update) cmd=version-update ;;
+	*) die "未知子命令：version $sub（支持 show / list / update；运行 dshm version help）" ;;
 	esac
 	;;
-panel | admin)
+auth)
+	sub="${1:-help}"
+	shift || true
+	case "$sub" in
+	help | -h | --help) cmd=help; set -- auth ;;
+	password) cmd=auth-password ;;
+	user | totp) cmd="auth-$sub" ;;
+	*) die "未知子命令：auth $sub（支持 password / user / totp；运行 dshm auth help）" ;;
+	esac
+	;;
+dshm)
+	sub="${1:-help}"
+	shift || true
+	case "$sub" in
+	help | -h | --help) cmd=help; set -- dshm ;;
+	install) cmd=dshm-install ;;
+	uninstall) cmd=dshm-uninstall ;;
+	update) cmd=dshm-update ;;
+	*) die "未知子命令：dshm $sub（支持 install / uninstall / update；运行 dshm dshm help）" ;;
+	esac
+	;;
+admin)
+	# 面板命令多且实现独立，交给 scripts/admin.sh 自己分发
 	# shellcheck source=scripts/admin.sh
 	. ./scripts/admin.sh
 	admin_dispatch "$@"
 	exit $?
 	;;
+disk | migrate | help | -h | --help | "") ;;
+*)
+	unknown_cmd "$cmd"
+	;;
 esac
 
 case "$cmd" in
-up)
+service-up)
 	require_docker; require_env
 	if [ "${1:-}" = "--build" ]; then
 		hdr "本地构建镜像"
@@ -598,14 +690,14 @@ up)
 	fi
 	;;
 
-down)
+service-down)
 	require_docker
 	hdr "停止服务（数据保留）"
 	docker compose down
 	ok "已停止"
 	;;
 
-restart)
+service-restart)
 	require_docker
 	hdr "重启服务（会重新读取 .env）"
 	# 用 `up -d` 而不是 `docker compose restart`：后者只是把现有容器里的进程重启，
@@ -619,12 +711,12 @@ restart)
 	ok "已重启并健康"
 	;;
 
-logs)
+service-logs)
 	require_docker
 	docker compose logs -f --tail 100
 	;;
 
-status)
+service-status)
 	require_docker
 	hdr "服务状态"
 	state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
@@ -650,7 +742,7 @@ status)
 				info "dsh 版本：${cur_ver}（已是最新）"
 			else
 				printf '    %sdsh 版本：%s → 有新版本 %s%s\n' "$YEL" "$cur_ver" "$latest_ver" "$RST"
-				info "升级：./dshm service update --latest"
+				info "升级：./dshm version update --latest"
 			fi
 		elif [ -n "$cur_ver" ]; then
 			info "dsh 版本：${cur_ver}（未能查询上游最新版）"
@@ -658,7 +750,7 @@ status)
 	fi
 	;;
 
-disk | df)
+disk)
 	require_docker
 	hdr "磁盘占用"
 	info "宿主："
@@ -679,19 +771,19 @@ disk | df)
 	info "  docker image prune -a && docker builder prune"
 	;;
 
-url)
+service-url)
 	require_docker; require_running
 	hdr "一次性 launch URL（排障用）"
 	docker exec "$CONTAINER" cat "$(dsh_home_in_container)/web-launch-url.txt" 2>/dev/null || info "（暂无）"
 	;;
 
-shell)
+service-shell)
 	require_docker; require_running
 	hdr "进入容器（输入 exit 退出）"
 	docker exec -it "$CONTAINER" bash
 	;;
 
-pw | passwd | password)
+auth-password)
 	require_docker; require_running
 	user="${1:-$(env_value DSH_AUTH_USER admin)}"
 	hdr "修改登录密码"
@@ -709,7 +801,7 @@ pw | passwd | password)
 	fi
 	;;
 
-user)
+auth-user)
 	require_docker; require_running
 	sub="${1:-list}"; shift || true
 	case "$sub" in
@@ -747,7 +839,7 @@ user)
 	esac
 	;;
 
-totp)
+auth-totp)
 	require_docker; require_running
 	action="${1:-}"; shift || true
 	case "$action" in enable | disable) ;; *) die "用法：./dshm auth totp <enable|disable> [用户名]" ;; esac
@@ -756,7 +848,7 @@ totp)
 	docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" node "$(cli_in_container)" user totp "$action" "$user"
 	;;
 
-update)
+version-update)
 	require_docker; require_env
 	# 与 up 一样先做启动前准备：旧键改名、历史默认值对齐、旧卷迁移、目录属主与
 	# 私密文件权限预检。以前 update 只改名不做预检，于是「更新后容器仍在重启循环」
@@ -767,8 +859,8 @@ update)
 		case "$a" in
 		--build) build=1 ;;
 		--latest) want_latest=1 ;;
-		-*) die "未知参数：$a（用法：./dshm service update [版本] [--build] [--latest]）" ;;
-		*) [ -z "$target" ] || die "只接受一个版本参数（用法：./dshm service update [版本]）"; target="$a" ;;
+		-*) die "未知参数：$a（用法：./dshm version update [版本] [--build] [--latest]）" ;;
+		*) [ -z "$target" ] || die "只接受一个版本参数（用法：./dshm version update [版本]）"; target="$a" ;;
 		esac
 	done
 
@@ -792,7 +884,7 @@ update)
 		if [ "$want_latest" = "1" ]; then
 			hdr "查询 npm 上的最新 dsh 版本"
 			target="$(dsh_latest_version)" || die "无法从 npm 查询最新版本（需要网络，以及 jq/node/python3 之一）
-      也可直接指定版本： ./dshm service update <版本> --build"
+      也可直接指定版本： ./dshm version update <版本> --build"
 			tag="$target"
 			ok "最新版本：$target"
 		fi
@@ -806,7 +898,7 @@ update)
 			printf '        Dockerfile 默认 %s，.env 当前 %s\n' \
 				"$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile 2>/dev/null | head -1)" \
 				"$(env_value_new DSH_VERSION 未设置)"
-			info "要装 npm 上的最新版： ./dshm service update --latest"
+			info "要装 npm 上的最新版： ./dshm version update --latest"
 		fi
 		hdr "本地构建镜像（--build）"
 		docker compose build
@@ -833,7 +925,7 @@ update)
 	fi
 	;;
 
-version)
+version-show)
 	# 一次看全四个「版本」—— 用户问「我是什么版本」时，其实想知道这几件事，而它们
 	# 可能互不相同：
 	#   1. .env 里钉的（下次构建/拉取会得到什么）
@@ -870,18 +962,18 @@ version)
 	fi
 	if [ -n "$latest" ] && [ -n "$running" ] && [ "$running" != "$latest" ]; then
 		printf '\n'
-		info "升级到最新：./dshm service update --latest"
+		info "升级到最新：./dshm version update --latest"
 	fi
 	;;
 
-versions)
+version-list)
 	# 列出 npm 上可装的 dsh 版本，并标出当前镜像里跑的是哪个。
 	# 换版本要重建镜像（dsh 是构建期 npm install -g 装进去的），所以这里只负责
-	# 「看有哪些版本」，实际切换用 `dshm service update <版本>` 或面板。
+	# 「看有哪些版本」，实际切换用 `dshm version update <版本>` 或面板。
 	show_dsh_versions "$@"
 	;;
 
-migrate-home | migrate)
+migrate)
 	# 旧版本把 DSH_HOME 放在命名卷 dsh-home 里；现在默认是宿主 bind 挂载。
 	# 实现放在 scripts/migrate-home.sh（install.sh 与 dshm service up 会自动调用），
 	# 这里保留显式入口，供自动迁移跳过时手工收尾。
@@ -896,15 +988,15 @@ migrate-home | migrate)
 	esac
 	;;
 
-install-self | link | install-cli)
+dshm-install)
 	install_self
 	;;
 
-uninstall-self | unlink)
+dshm-uninstall)
 	uninstall_self
 	;;
 
-update-self)
+dshm-update)
 	self_update "$@"
 	;;
 

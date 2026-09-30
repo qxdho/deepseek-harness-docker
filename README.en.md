@@ -121,11 +121,11 @@ docker compose up -d     # start the service
 ### Upgrading
 
 ```bash
-./dshm service update --latest      # recommended: resolve npm latest and build locally
-./dshm service update               # pull the new image from GHCR (no local rebuild)
-./dshm service update --build       # local rebuild (when you changed repo code)
-./dshm service update 0.2.0-rc.2 --build   # build a specific dsh version
-./dshm service versions             # list every installable version on npm
+./dshm version update --latest      # recommended: resolve npm latest and build locally
+./dshm version update               # pull the new image from GHCR (no local rebuild)
+./dshm version update --build       # local rebuild (when you changed repo code)
+./dshm version update 0.2.0-rc.2 --build   # build a specific dsh version
+./dshm version list             # list every installable version on npm
 ```
 
 Images are built by CI and pushed to GHCR; a local rebuild is slow and yields nothing newer. Use
@@ -160,19 +160,19 @@ This trips people up, so keep them apart:
 
 | What | Source of truth | Command |
 |---|---|---|
-| **dsh itself** | **npm registry** | `./dshm service update --latest` |
-| **the `dshm` script** | **the GitHub repository** | `./dshm self update` |
+| **dsh itself** | **npm registry** | `./dshm version update --latest` |
+| **the `dshm` script** | **the GitHub repository** | `./dshm dshm update` |
 
 - **dsh is published to npm**, not GitHub. `service versions` / `--latest` query npm directly, so
   **even if the GitHub repository is behind, the dsh versions you see are current**.
-- **`dshm` is a script that ships with the repository.** `./dshm self update` pulls it from GitHub,
+- **`dshm` is a script that ships with the repository.** `./dshm dshm update` pulls it from GitHub,
   which suits deployments that never kept a git checkout. Inside a git working tree it first checks
   whether your checkout is behind `main`: if so it **stops** and tells you to `git pull` instead of
   silently overwriting your local changes (`--allow-stale` forces it, `--force` re-downloads).
 
 ## Management CLI
 
-`dshm` is grouped by purpose; run `dshm help` for the full list. `./dshm self install` registers it as
+`dshm` is grouped by purpose; run `dshm help` for the full list. `./dshm dshm install` registers it as
 a system command so you can call `dshm` from any directory.
 
 ```bash
@@ -183,32 +183,45 @@ a system command so you can call `dshm` from any directory.
 ./dshm service status      # health / port / login user (and whether dsh has an update)
 ./dshm service logs        # logs
 ./dshm service shell       # shell into the container
-./dshm service update      # upgrade
-./dshm service disk        # disk usage and cleanup commands
+
+# dsh versions
+./dshm version             # all four versions (config / image / running / npm latest)
+./dshm version list        # every installable version on npm
+./dshm version update      # upgrade
 
 # login and accounts
 ./dshm auth password       # change the login password
 ./dshm auth user add bob   # add a user
 ./dshm auth totp enable    # enable two-factor auth
 
-# admin panel / self
+# disk / migration
+./dshm disk                # disk usage and cleanup commands
+./dshm migrate             # migrate an old named volume
+
+# admin panel / dshm itself
 ./dshm admin install       # install the admin panel
-./dshm self install        # register dshm as a system command
+./dshm dshm install        # register dshm as a system command
 ```
 
 | Group | Subcommand | Description |
 |---|---|---|
 | `service` | `up` / `down` / `restart` | Start, stop, restart (`up` and `restart` both re-read `.env`) |
-| `service` | `status` / `logs` / `disk` | Status, logs, disk usage and cleanup commands |
-| `service` | `update` / `version` / `shell` | Upgrade, show the dsh version inside the container, open a shell |
-| `service` | `versions` | List every installable dsh version on npm (marking current and latest) |
-| `service` | `url` / `migrate-home` | One-time launch URL (troubleshooting), migrate an old named volume |
+| `service` | `status` / `logs` / `shell` / `url` | Status, logs, shell, one-time launch URL (troubleshooting) |
+| `version` | `show` (default) / `list` / `update` | Show four versions, list npm versions, upgrade |
 | `auth` | `password` / `user` / `totp` | Password, user management, two-factor auth |
 | `admin` | `install` / `uninstall` / `url` / `password` / `status` / `logs` | Host-side admin panel |
-| `self` | `install` / `uninstall` / `update` | Register as a system command, or pull the newest dshm from GitHub |
+| `dshm` | `install` / `uninstall` / `update` | Manage dshm itself (mirrors `npm install npm`) |
+| (top level) | `disk` / `migrate` / `help` | Disk usage, data migration, help |
 
-The older flat forms (`./dshm up`, `./dshm pw`, `./dshm user add ...`) still work but are no longer
-documented.
+> [!NOTE]
+> **There is one spelling.** The older flat forms (`./dshm up`, `./dshm pw`, …) and the group
+> shorthands (`svc` / `login` / `cli` / `panel`) have **all been removed** — keeping two spellings
+> makes the help longer and leaves newcomers unsure which to learn. Using one prints the new form:
+>
+> ```
+> $ ./dshm up
+> 错误：命令 'up' 已改为分组写法：dshm service up
+> ```
 
 ### dsh version management: the complete picture
 
@@ -218,7 +231,7 @@ changed" happens.
 
 | Layer | What it is | How to update | Where it lives |
 |---|---|---|---|
-| **dsh in the image** | the dsh runtime npm-installed at build time | `dshm service update` | image layer (**survives container rebuilds**) |
+| **dsh in the image** | the dsh runtime npm-installed at build time | `dshm version update` | image layer (**survives container rebuilds**) |
 | **Plugins in the profile** | plugins in the data directory (login, marketplace, …) | `dshm auth` / in-container `dsh plugin` / plugin market | data directory (persistent) |
 
 **Note**: if you upgrade dsh itself in place from inside the container (e.g. via the
@@ -230,15 +243,15 @@ through the image, i.e. the commands below.
 
 ```bash
 ./dshm service status      # current version + whether an update exists (reports proactively)
-./dshm service version     # just the dsh version inside the container
-./dshm service versions    # every installable version on npm, marking "current" and "latest"
+./dshm version show     # just the dsh version inside the container
+./dshm version list    # every installable version on npm, marking "current" and "latest"
 ```
 
 `service status` prints something like:
 
 ```
 dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
-升级：./dshm service update --latest
+升级：./dshm version update --latest
 ```
 
 Set `DSHM_SKIP_UPDATE_CHECK=1` to skip that check (offline deployments).
@@ -246,9 +259,9 @@ Set `DSHM_SKIP_UPDATE_CHECK=1` to skip that check (offline deployments).
 #### 2. Upgrade: three ways, pick by situation
 
 ```bash
-./dshm service update             # pull the CI-built image from GHCR (fastest; the usual choice)
-./dshm service update --latest    # resolve npm latest → write .env → build locally (slowest)
-./dshm service update 0.2.0-rc.2 --build   # build a specific version locally
+./dshm version update             # pull the CI-built image from GHCR (fastest; the usual choice)
+./dshm version update --latest    # resolve npm latest → write .env → build locally (slowest)
+./dshm version update 0.2.0-rc.2 --build   # build a specific version locally
 ```
 
 **Why changing versions requires a rebuild**: dsh is npm-installed into the image **at build
@@ -259,8 +272,8 @@ version combination fails **at build time** instead of after the container start
 #### 3. Roll back: install an older version
 
 ```bash
-./dshm service versions              # see what's available
-./dshm service update 0.1.7-rc.2 --build
+./dshm version list              # see what's available
+./dshm version update 0.1.7-rc.2 --build
 ```
 
 Your data directory is untouched (sessions, plugins and credentials live in the bind mount), so
@@ -343,7 +356,7 @@ preserved.
 
 **Build time** (rebuild required after changing): `DSH_VERSION`, `DSH_AUTH_GATE_VERSION`,
 `DSH_DEV_TOOLS`. `DSH_IMAGE` selects which image to pull or build and is written on demand by
-`./dshm service update`. Other settings are documented in `.env.example`.
+`./dshm version update`. Other settings are documented in `.env.example`.
 
 > [!NOTE]
 > dsh's own variables (`DSH_HOME`, `DSH_HOST`, `DSH_PORT`, `DSH_PERMISSION_MODE`,
@@ -446,7 +459,7 @@ Automatic migration runs only when an old named volume exists **and** `DSH_HOME_
 source volume is mounted read-only and **is not deleted** afterwards, so you can always roll back. If
 containers still hold the old volume, only those whose name or image belongs to this project are
 stopped; if another container holds it, migration is skipped with a notice. Otherwise run
-`./dshm service migrate-home` manually — it refuses to run when the target directory is not empty, to
+`./dshm migrate` manually — it refuses to run when the target directory is not empty, to
 avoid overwriting data.
 
 ## HTTPS and reverse proxy
@@ -583,7 +596,7 @@ The same applies to the panel: `DSH_ADMIN_DIR=$HOME/dsh-manager`. Run `./dshm se
 <br/>
 
 ```bash
-./dshm service disk        # show usage and print cleanup commands
+./dshm disk        # show usage and print cleanup commands
 ```
 
 The container also requires at least `DSH_DISK_MIN_MB` (default 256MB) free on the data directory and

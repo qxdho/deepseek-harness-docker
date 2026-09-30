@@ -118,9 +118,9 @@ case "$out" in
 *"ARGS:service status"*) pass "命令台按白名单执行 dshm（参数原样传递）" ;;
 *) fail "命令台输出异常：$out" ;;
 esac
-out="$(exec_line 'dshm service update 0.1.8')"
+out="$(exec_line 'dshm version update 0.1.8')"
 case "$out" in
-*"ARGS:service update 0.1.8"*) pass "带 dshm 前缀与参数也能执行" ;;
+*"ARGS:version update 0.1.8"*) pass "带 dshm 前缀与参数也能执行" ;;
 *) fail "带前缀执行异常：$out" ;;
 esac
 [ "$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \

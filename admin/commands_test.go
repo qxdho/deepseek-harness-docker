@@ -34,14 +34,14 @@ func TestTokenize(t *testing.T) {
 func TestValidateCommandAllows(t *testing.T) {
 	ok := [][]string{
 		{"service", "status"},
-		{"status"},                     // 旧扁平写法
 		{"dshm", "service", "restart"}, // 带 dshm 前缀
 		{"./dshm", "service", "logs"},
-		{"svc", "disk"}, // 分组别名
-		{"service", "update", "0.1.8"},
+		{"version", "show"},
+		{"version", "list"},
+		{"version", "update", "0.1.8"},
 		{"auth", "user", "disable", "bob"},
-		{"user", "list"}, // 旧写法 → auth user list
-		{"self", "install"},
+		{"dshm", "install"},
+		{"disk"},
 		{"help"},
 	}
 	for _, in := range ok {
@@ -62,27 +62,26 @@ func TestValidateCommandRejects(t *testing.T) {
 		{"service", "shell"},           // 交互命令
 		{"auth", "password"},           // 交互命令
 		{"auth", "user", "add", "bob"}, // 交互命令
+		// 旧的扁平写法与分组简称已全部移除，必须被拒（面板不替用户翻译）
+		{"status"},
+		{"up"},
+		{"pw"},
+		{"user", "list"},
+		{"self", "install"},
+		{"versions"},
+		{"svc", "up"},
+		{"login", "password"},
+		{"cli", "update"},
+		{"panel", "status"},
+		// 已迁到 version 分组的老路径
+		{"service", "version"},
+		{"service", "versions"},
+		{"service", "update"},
+		{"service", "disk"},
 	}
 	for _, in := range bad {
 		if _, err := validateCommand(in); err == nil {
 			t.Errorf("validateCommand(%v) 本应被拒，却通过了", in)
-		}
-	}
-}
-
-func TestValidateNormalizesLegacy(t *testing.T) {
-	got, err := validateCommand([]string{"pw"})
-	if err == nil {
-		t.Fatalf("auth password 是交互命令，应被拒；返回 %v", got)
-	}
-	got, err = validateCommand([]string{"user", "disable", "bob"})
-	if err != nil {
-		t.Fatalf("user disable 应通过：%v", err)
-	}
-	want := []string{"auth", "user", "disable", "bob"}
-	for i := range want {
-		if i >= len(got) || got[i] != want[i] {
-			t.Fatalf("归一化结果 %v，期望 %v", got, want)
 		}
 	}
 }

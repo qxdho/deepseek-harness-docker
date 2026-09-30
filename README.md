@@ -113,11 +113,11 @@ docker compose up -d     # 启动服务
 ### 升级
 
 ```bash
-./dshm service update --latest      # 推荐：向 npm 查最新 dsh 版本并本地构建
-./dshm service update               # 拉取 GHCR 上的新镜像（不在本地重建）
-./dshm service update --build       # 本地重建（改了仓库代码时）
-./dshm service update 0.2.0-rc.2 --build   # 指定 dsh 版本
-./dshm service versions             # 列出 npm 上可装的 dsh 版本
+./dshm version update --latest      # 推荐：向 npm 查最新 dsh 版本并本地构建
+./dshm version update               # 拉取 GHCR 上的新镜像（不在本地重建）
+./dshm version update --build       # 本地重建（改了仓库代码时）
+./dshm version update 0.2.0-rc.2 --build   # 指定 dsh 版本
+./dshm version list             # 列出 npm 上可装的 dsh 版本
 ```
 
 镜像由 CI 构建并推送至 GHCR，本地重建既慢又不会带来新版本；仅在拉取失败或需要验证未发布的
@@ -147,18 +147,18 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 
 | 更新对象 | 权威来源 | 命令 |
 |---|---|---|
-| **`dsh` 本体** | **npm registry** | `./dshm service update --latest` |
-| **`dshm` 脚本自身** | **GitHub 仓库** | `./dshm self update` |
+| **`dsh` 本体** | **npm registry** | `./dshm version update --latest` |
+| **`dshm` 脚本自身** | **GitHub 仓库** | `./dshm dshm update` |
 
 - **dsh 的发布渠道是 npm**，不是 GitHub。`service versions` / `--latest` 都直接查 npm，
   所以**即使 GitHub 仓库不是最新，你看到的 dsh 版本仍然是最新的**。
-- **`dshm` 是脚本，随仓库走**。`./dshm self update` 从 GitHub 拉取，适合没保留 git 仓库的
+- **`dshm` 是脚本，随仓库走**。`./dshm dshm update` 从 GitHub 拉取，适合没保留 git 仓库的
   部署机。在 git 工作区里它会先检查本地是否落后于远端 `main`：落后则停下提醒你用 `git pull`，
   不会静默覆盖你的本地改动（`--allow-stale` 可强制覆盖，`--force` 可重新下载）。
 
 ## 管理命令
 
-`dshm` 按用途分组，`dshm help` 可查看全部命令；`./dshm self install` 可将它注册为系统命令，
+`dshm` 按用途分组，`dshm help` 可查看全部命令；`./dshm dshm install` 可将它注册为系统命令，
 之后在任意目录直接调用 `dshm`。
 
 ```bash
@@ -169,31 +169,45 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 ./dshm service status      # 健康状态 / 端口 / 登录用户（附带提示 dsh 是否有新版本）
 ./dshm service logs        # 查看日志
 ./dshm service shell       # 进入容器
-./dshm service update      # 升级
-./dshm service disk        # 磁盘占用与清理命令
+
+# dsh 版本
+./dshm version             # 看全四个版本（配置 / 镜像 / 实际运行 / npm 最新）
+./dshm version list        # 列出 npm 上可装的版本
+./dshm version update      # 升级
 
 # 登录与账号
 ./dshm auth password       # 修改登录密码
 ./dshm auth user add 张三   # 新建用户
 ./dshm auth totp enable    # 开启两步验证
 
-# 管理面板 / 自身
+# 磁盘 / 迁移
+./dshm disk                # 磁盘占用与清理命令
+./dshm migrate             # 旧命名卷数据迁移
+
+# 管理面板 / dshm 自身
 ./dshm admin install       # 安装管理面板
-./dshm self install        # 将 dshm 注册为系统命令
+./dshm dshm install        # 将 dshm 注册为系统命令
 ```
 
 | 分组 | 子命令 | 说明 |
 |---|---|---|
 | `service` | `up` / `down` / `restart` | 启动、停止、重启（`up` 与 `restart` 都会重读 `.env`） |
-| `service` | `status` / `logs` / `disk` | 状态、日志、磁盘占用与清理命令 |
-| `service` | `update` / `version` / `shell` | 升级、查看容器内 dsh 版本、进入容器 |
-| `service` | `versions` | 列出 npm 上可装的 dsh 版本（标出当前与最新） |
-| `service` | `url` / `migrate-home` | 一次性 launch URL（排障）、旧命名卷数据迁移 |
+| `service` | `status` / `logs` / `shell` / `url` | 状态、日志、进容器、一次性 launch URL（排障） |
+| `version` | `show`（默认）/ `list` / `update` | 看四个版本、列出 npm 可装版本、升级 |
 | `auth` | `password` / `user` / `totp` | 改密码、增删禁用用户、两步验证 |
 | `admin` | `install` / `uninstall` / `url` / `password` / `status` / `logs` | 宿主机管理面板 |
-| `self` | `install` / `uninstall` / `update` | 注册为系统命令、从 GitHub 更新 dshm 自身 |
+| `dshm` | `install` / `uninstall` / `update` | 管理 dshm 自身（对齐 `npm install npm` 的惯例） |
+| （顶层） | `disk` / `migrate` / `help` | 磁盘占用、数据迁移、帮助 |
 
-原有的扁平写法（`./dshm up`、`./dshm pw`、`./dshm user add ...`）仍然可用，但不再写入文档。
+> [!NOTE]
+> **只保留这一套写法。** 旧的扁平写法（`./dshm up`、`./dshm pw` …）与分组简称
+> （`svc` / `login` / `cli` / `panel`）**已全部移除** —— 同时维护两套写法会让帮助变长、
+> 新用户不知道该学哪个。误用旧写法时会提示对应的新写法：
+>
+> ```
+> $ ./dshm up
+> 错误：命令 'up' 已改为分组写法：dshm service up
+> ```
 
 ### dsh 版本管理：完整做法
 
@@ -202,7 +216,7 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 
 | 层次 | 是什么 | 怎么更新 | 存在哪 |
 |---|---|---|---|
-| **镜像里的 dsh** | 构建期由 npm 装进镜像的 dsh 本体 | `dshm service update` | 镜像层（**重建容器不会丢**） |
+| **镜像里的 dsh** | 构建期由 npm 装进镜像的 dsh 本体 | `dshm version update` | 镜像层（**重建容器不会丢**） |
 | **profile 里的插件** | 数据目录中的插件（登录、市场等） | `dshm auth` / 容器内 `dsh plugin` / 插件市场 | 数据目录（持久） |
 
 **注意**：如果你用插件（例如 `dsh-plugin-console`）在容器内就地升级 dsh 本身，
@@ -213,15 +227,15 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 
 ```bash
 ./dshm service status      # 当前版本 + 是否有新版（会主动提示）
-./dshm service version     # 只问容器内的 dsh 版本
-./dshm service versions     # 列出 npm 上所有可装版本，标出「当前」与「最新」
+./dshm version show     # 只问容器内的 dsh 版本
+./dshm version list     # 列出 npm 上所有可装版本，标出「当前」与「最新」
 ```
 
 `service status` 的输出长这样：
 
 ```
 dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
-升级：./dshm service update --latest
+升级：./dshm version update --latest
 ```
 
 离线环境可设 `DSHM_SKIP_UPDATE_CHECK=1` 跳过这一步。
@@ -229,9 +243,9 @@ dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
 #### 2. 升：三种方式，按场景选
 
 ```bash
-./dshm service update             # 拉 GHCR 上 CI 构建好的镜像（最快，推荐日常用）
-./dshm service update --latest    # 向 npm 查最新版 → 写回 .env → 本地构建（最慢）
-./dshm service update 0.2.0-rc.2 --build   # 指定版本本地构建
+./dshm version update             # 拉 GHCR 上 CI 构建好的镜像（最快，推荐日常用）
+./dshm version update --latest    # 向 npm 查最新版 → 写回 .env → 本地构建（最慢）
+./dshm version update 0.2.0-rc.2 --build   # 指定版本本地构建
 ```
 
 | 你想要 | 用哪个 | 耗时 |
@@ -247,8 +261,8 @@ dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
 #### 3. 回退：装回旧版本
 
 ```bash
-./dshm service versions              # 先看有哪些版本可选
-./dshm service update 0.1.7-rc.2 --build
+./dshm version list              # 先看有哪些版本可选
+./dshm version update 0.1.7-rc.2 --build
 ```
 
 数据目录不受影响（会话、插件、凭据都在 bind mount 里），所以回退不会丢数据。
@@ -322,7 +336,7 @@ dangling 镜像与构建缓存，以及在网页端执行 dshm 命令的控制�
 | `DSH_CLIENT_IP_HEADER` | `x-forwarded-for` | dsh 自身从哪个请求头取客户端 IP |
 
 **构建期**（修改后需重建镜像）：`DSH_VERSION`、`DSH_AUTH_GATE_VERSION`、`DSH_DEV_TOOLS`；
-`DSH_IMAGE` 决定拉取或构建哪个镜像，`./dshm service update` 会按需写入。其余配置项含义见
+`DSH_IMAGE` 决定拉取或构建哪个镜像，`./dshm version update` 会按需写入。其余配置项含义见
 `.env.example` 注释。
 
 > [!NOTE]
@@ -417,7 +431,7 @@ docker rm -f dsh        # 旧容器名，视旧版本而定；也可先 docker p
 
 自动迁移只在「存在旧命名卷」且「`DSH_HOME_HOST` 为空目录」时执行：源卷以只读方式挂载，复制完成后
 **不删除原卷**，因此随时可以回退。仍有容器挂着旧卷时，只停止名称或镜像属于本项目的容器；若占用者是
-其他容器，则跳过迁移并提示。其他情况可手工执行 `./dshm service migrate-home`；目标目录非空时该命令
+其他容器，则跳过迁移并提示。其他情况可手工执行 `./dshm migrate`；目标目录非空时该命令
 会拒绝执行，以免覆盖已有数据。
 
 ## HTTPS 与反向代理
@@ -549,7 +563,7 @@ DSH_WORKSPACE_HOST=$HOME/dsh-workspace
 <br/>
 
 ```bash
-./dshm service disk        # 查看占用并给出清理命令
+./dshm disk        # 查看占用并给出清理命令
 ```
 
 容器启动时也要求数据目录与工作区至少有 `DSH_DISK_MIN_MB`（默认 256MB）余量，不足会打印清理指引。

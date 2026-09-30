@@ -23,6 +23,7 @@ var interactivePaths = map[string]bool{
 }
 
 // 允许执行的完整命令路径（token 级前缀匹配；后面可以跟参数）。
+// 与 dshm 的分组结构一一对应：service / version / auth / dshm / admin。
 var allowedPaths = [][]string{
 	{"service", "up"},
 	{"service", "down"},
@@ -30,12 +31,12 @@ var allowedPaths = [][]string{
 	{"service", "status"},
 	{"service", "logs"},
 	{"service", "shell"},
-	{"service", "version"},
-	{"service", "versions"},
-	{"service", "update"},
 	{"service", "url"},
-	{"service", "disk"},
 	{"service", "help"},
+	{"version", "show"},
+	{"version", "list"},
+	{"version", "update"},
+	{"version", "help"},
 	{"auth", "help"},
 	{"auth", "password"},
 	{"auth", "user", "list"},
@@ -43,14 +44,15 @@ var allowedPaths = [][]string{
 	{"auth", "user", "disable"},
 	{"auth", "totp", "enable"},
 	{"auth", "totp", "disable"},
-	{"self", "install"},
-	{"self", "uninstall"},
-	{"self", "update"},
-	{"self", "help"},
+	{"dshm", "install"},
+	{"dshm", "uninstall"},
+	{"dshm", "update"},
+	{"dshm", "help"},
 	{"admin", "help"},
 	{"admin", "status"},
 	{"admin", "logs"},
 	{"admin", "url"},
+	{"disk"},
 	{"help"},
 }
 
@@ -66,42 +68,27 @@ var commandCatalog = []CommandInfo{
 	{Path: []string{"service", "down"}, Desc: "停止（数据保留）"},
 	{Path: []string{"service", "status"}, Desc: "健康 / 端口 / 登录用户"},
 	{Path: []string{"service", "logs"}, Desc: "查看 dsh 日志"},
-	{Path: []string{"service", "version"}, Desc: "容器内 dsh 版本"},
-	{Path: []string{"service", "versions"}, Desc: "列出可装的 dsh 版本（npm）"},
-	{Path: []string{"service", "update"}, Desc: "升级（默认拉镜像，可跟版本号）"},
+	{Path: []string{"version", "show"}, Desc: "看全四个 dsh 版本"},
+	{Path: []string{"version", "list"}, Desc: "列出可装的 dsh 版本（npm）"},
+	{Path: []string{"version", "update"}, Desc: "升级（默认拉镜像，可跟版本号）"},
 	{Path: []string{"service", "url"}, Desc: "一次性 launch URL"},
-	{Path: []string{"service", "disk"}, Desc: "磁盘占用"},
+	{Path: []string{"disk"}, Desc: "磁盘占用"},
 	{Path: []string{"auth", "user", "list"}, Desc: "列出登录用户"},
 	{Path: []string{"auth", "user", "disable"}, Desc: "禁用用户（跟用户名）"},
 	{Path: []string{"auth", "totp", "enable"}, Desc: "开启两步验证（跟用户名）"},
 	{Path: []string{"auth", "totp", "disable"}, Desc: "关闭两步验证（跟用户名）"},
-	{Path: []string{"self", "install"}, Desc: "把 dshm 注册为系统命令"},
-	{Path: []string{"self", "uninstall"}, Desc: "移除系统命令"},
-	{Path: []string{"self", "update"}, Desc: "更新 dshm 自身（从 GitHub 拉取）"},
+	{Path: []string{"dshm", "install"}, Desc: "把 dshm 注册为系统命令"},
+	{Path: []string{"dshm", "uninstall"}, Desc: "移除系统命令"},
+	{Path: []string{"dshm", "update"}, Desc: "更新 dshm 自身（从 GitHub 拉取）"},
 	{Path: []string{"admin", "status"}, Desc: "面板运行状态"},
 	{Path: []string{"admin", "logs"}, Desc: "面板日志"},
 	{Path: []string{"admin", "url"}, Desc: "面板地址"},
 	{Path: []string{"admin", "help"}, Desc: "面板命令帮助"},
 }
 
-// 分组别名 + 旧的扁平写法，都归一到 allowedPaths 的形态。
-var groupAlias = map[string]string{
-	"svc":   "service",
-	"login": "auth",
-	"cli":   "self",
-	"panel": "admin",
-}
-
-var legacyAlias = map[string][]string{
-	"up": {"service", "up"}, "down": {"service", "down"}, "restart": {"service", "restart"},
-	"status": {"service", "status"}, "logs": {"service", "logs"}, "version": {"service", "version"},
-	"update": {"service", "update"}, "url": {"service", "url"}, "disk": {"service", "disk"},
-	"versions": {"service", "versions"},
-	"pw":       {"auth", "password"}, "passwd": {"auth", "password"}, "password": {"auth", "password"},
-	"user": {"auth", "user"}, "totp": {"auth", "totp"},
-	"install-self": {"self", "install"}, "link": {"self", "install"}, "install-cli": {"self", "install"},
-	"uninstall-self": {"self", "uninstall"}, "unlink": {"self", "uninstall"},
-}
+// 注意：这里曾经有 groupAlias（svc/login/cli/panel）与 legacyAlias（up/pw …）两张
+// 映射表，以及配套的 normalize()。它们在 dshm 只保留一套写法之后已全部删除 ——
+// 面板不再替用户翻译旧命令，只接受 `dshm <分组> <子命令>`。
 
 var safeArg = regexp.MustCompile(`^[A-Za-z0-9._@/:=+,-]+$`)
 
@@ -146,36 +133,8 @@ func tokenize(line string) ([]string, error) {
 	return out, nil
 }
 
-// normalize 把分组别名与旧扁平写法翻译成规范 token 序列。
-func normalize(tokens []string) []string {
-	if len(tokens) == 0 {
-		return tokens
-	}
-	if l, ok := legacyAlias[tokens[0]]; ok {
-		out := append([]string{}, l...)
-		return append(out, tokens[1:]...)
-	}
-	if g, ok := groupAlias[tokens[0]]; ok {
-		out := append([]string{}, tokens...)
-		out[0] = g
-		return out
-	}
-	return append([]string{}, tokens...)
-}
-
-// validateCommand 返回可以直接交给 exec 的参数数组（不含 dshm 自身）。
-func validateCommand(tokens []string) ([]string, error) {
-	// 允许用户写 `dshm service status` 或 `./dshm service status`
-	if len(tokens) > 0 {
-		switch first := tokens[0]; {
-		case first == "dshm" || first == "./dshm" || strings.HasSuffix(first, "/dshm"):
-			tokens = tokens[1:]
-		}
-	}
-	tokens = normalize(tokens)
-	if len(tokens) == 0 {
-		return nil, errors.New("命令为空")
-	}
+// matchAllowed 返回 tokens 命中的最长白名单路径长度（0 表示不匹配）。
+func matchAllowed(tokens []string) int {
 	best := -1
 	for _, path := range allowedPaths {
 		if len(tokens) < len(path) {
@@ -192,17 +151,39 @@ func validateCommand(tokens []string) ([]string, error) {
 			best = len(path)
 		}
 	}
-	if best < 0 {
+	return best
+}
+
+// validateCommand 返回可以直接交给 exec 的参数数组（不含 dshm 自身）。
+func validateCommand(tokens []string) ([]string, error) {
+	if len(tokens) == 0 {
+		return nil, errors.New("命令为空")
+	}
+	// 允许用户写 `dshm service status` 或 `./dshm service status`。
+	//
+	// 但要注意：`dshm` 本身也是一个**分组名**（管理 dshm 自身，如 `dshm install`）。
+	// 所以不能见到首 token 是 dshm 就无条件剥掉 —— 那会把 `dshm install` 变成
+	// `install`，从而匹配不到白名单里的 {"dshm","install"}。这里两种解释都试，
+	// 取能匹配上的那个。
+	best := matchAllowed(tokens)
+	argv := tokens
+	if first := tokens[0]; first == "dshm" || first == "./dshm" || strings.HasSuffix(first, "/dshm") {
+		if stripped := matchAllowed(tokens[1:]); stripped > best {
+			best = stripped
+			argv = tokens[1:]
+		}
+	}
+	if len(argv) == 0 || best < 0 {
 		return nil, fmt.Errorf("不支持的 dshm 命令：%s（面板只允许白名单内的命令）", strings.Join(tokens, " "))
 	}
-	key := strings.Join(tokens[:best], " ")
+	key := strings.Join(argv[:best], " ")
 	if interactivePaths[key] {
 		return nil, fmt.Errorf("%s 需要交互输入，命令台暂不支持；请在服务器上直接运行", key)
 	}
-	for _, a := range tokens[best:] {
+	for _, a := range argv[best:] {
 		if !safeArg.MatchString(a) {
 			return nil, fmt.Errorf("参数含不允许的字符：%s", a)
 		}
 	}
-	return tokens, nil
+	return argv, nil
 }

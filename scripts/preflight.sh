@@ -166,18 +166,41 @@ check_host_dir() {
 	esac
 
 	# 1) 目录得先存在。系统路径（默认 /dsh）需要 sudo 才能创建。
-	if ! mkdir -p "$dir" 2>/dev/null; then
-		if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-			sudo mkdir -p "$dir" || {
-				printf '%s\n' "无法创建${label}：${dir}" >&2
-				return 1
-			}
-		else
+	#    钉住 umask，避免在宿主的宽松 umask（0000/0002）下把目录建得过宽 —— 目录
+	#    可写会让 agent 在其中新建的文件带上可执行位，进而在 git 工作区里产生一堆
+	#    「已修改但 diff 为空」的噪音。
+	if ( umask 0022; mkdir -p "$dir" ) 2>/dev/null; then
+		:
+	elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+		sudo mkdir -p "$dir" || {
 			printf '%s\n' "无法创建${label}：${dir}" >&2
-			printf '%s\n' "（默认 /dsh 在根目录下，需要 root/sudo；也可以把 .env 里的 ${key} 换成一个你能写的目录）" >&2
 			return 1
-		fi
+		}
+	else
+		printf '%s\n' "无法创建${label}：${dir}" >&2
+		printf '%s\n' "（默认 /dsh 在根目录下，需要 root/sudo；也可以把 .env 里的 ${key} 换成一个你能写的目录）" >&2
+		return 1
 	fi
+
+	# 1b) 已经存在的目录若被改得过宽（g+w / o+w），顺手收紧。
+	#     这是「不小心改了目录权限」之后的自愈路径：跑一次 ./dshm service up 即可，
+	#     不必记住该 chmod 成什么。只收紧「可写」位，不动可执行位与属主。
+	cur_mode="$(stat -c '%a' "$dir" 2>/dev/null || true)"
+	case "$cur_mode" in
+	'' | *[!0-7]*) ;;
+	*)
+		if [ $(( 8#$cur_mode & 8#022 )) -ne 0 ]; then
+			if chmod g-w,o-w "$dir" 2>/dev/null; then
+				printf '    已收紧 %s 的权限：%s → %s（去掉组/其他用户可写）\n' \
+					"$dir" "$cur_mode" "$(stat -c '%a' "$dir" 2>/dev/null)"
+			elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+				sudo chmod g-w,o-w "$dir" 2>/dev/null || true
+			else
+				printf '%s\n' "提示：${dir} 权限为 ${cur_mode}（其他用户可写）。建议执行：chmod g-w,o-w ${dir}" >&2
+			fi
+		fi
+		;;
+	esac
 
 	cu="$(container_uid "$env_file")"; cg="$(container_gid "$env_file")"
 

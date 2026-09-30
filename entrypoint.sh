@@ -11,6 +11,15 @@
 # 登录 / 会话 / TOTP / launch-token 桥接全部由 dsh-auth-gate 在 dsh 进程内完成。
 set -euo pipefail
 
+# 钉住 umask。默认值可能是 0000/0002（面板、某些宿主默认），那样新建文件会是
+# 666/777 —— **带着可执行位**。用户在数据目录里 git clone / git checkout 时，
+# 工作区文件就被加上可执行位，`git status` 从此一堆「已修改」而 diff 为空。
+# 0022 让新建文件为 644、目录为 755，与 git 的期望一致。
+#
+# 放在最前面：本进程是容器内所有后续进程（dsh、agent 执行的命令）的祖先，umask 会
+# 被完整继承。容器里很难得知宿主机的 umask，与其跟随不如固定成一个安全值。
+umask 0022
+
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 

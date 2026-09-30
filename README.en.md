@@ -310,6 +310,23 @@ DSH_GID=1001          # output of id -g
 The container then runs as that identity, so bind-mount ownership matches naturally; `./dshm service up`
 also repairs the data directory ownership with a one-shot root container (idempotent).
 
+### Broke the permissions? One command self-heals
+
+After ownership or modes get scrambled (a manual `chmod`, a panel action, some other tool), you do
+**not** need to remember what they should be. The preflight in `./dshm service up` will:
+
+- `chown` to the container UID when it differs (with root or passwordless sudo), otherwise print the
+  exact command to copy
+- tighten a too-permissive directory by dropping `g+w,o+w`
+- create a missing directory with `umask 0022` (so it is never 777)
+
+In other words: **break the permissions however you like, then run `./dshm service up` once.**
+
+> The entrypoint also pins `umask 0022`. The default may be `0000`/`0002`, in which case new files
+> are created 666/777 — **with the executable bit set**. A `git clone` in the data directory then
+> leaves every file executable, and `git status` reports a pile of "modified" entries with an empty
+> `git diff`. Pinning 0022 yields 644/755, matching git's expectation.
+
 ### Upgrading from an older version
 
 Older versions stored data in the named volume `dsh-home`; it is now a bind mount. The migration is

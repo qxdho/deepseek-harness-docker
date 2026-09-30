@@ -129,6 +129,35 @@ jobs:
           go vet ./...
           go test ./...
 
+      - name: 可执行位守卫
+        run: |
+          set -eu
+          # git 只跟踪「可执行位」，但它决定脚本能否直接运行：
+          #   * 误加可执行位 → 工作区出现一堆「已修改」而 diff 为空（宿主 umask 过宽时极易发生）
+          #   * 误删可执行位 → ./install.sh、./dshm 直接跑不起来
+          # 两侧都卡住：非脚本不得带可执行位，脚本必须带。
+          bad=0
+          while read -r mode path; do
+            [ "$mode" = "100755" ] || continue
+            case "$path" in
+              *.sh | dshm) ;;
+              *)
+                echo "::error file=$path::非脚本文件被标记为可执行（应为 100644）"
+                bad=1
+                ;;
+            esac
+          done < <(git ls-files -s | awk '{print $1, $4}')
+
+          for f in dshm install.sh entrypoint.sh scripts/*.sh; do
+            [ -e "$f" ] || continue
+            m="$(git ls-files -s -- "$f" | awk '{print $1}')"
+            if [ "$m" != "100755" ]; then
+              echo "::error file=$f::脚本缺少可执行位（应为 100755，实际 ${m:-未跟踪}）"
+              bad=1
+            fi
+          done
+          [ "$bad" = "0" ]
+
       - name: 代理注入单元测试
         run: |
           cd proxy

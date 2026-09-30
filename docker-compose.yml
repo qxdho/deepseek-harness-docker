@@ -7,7 +7,7 @@ services:
       context: .
       args:
         DSH_VERSION: ${DSH_VERSION:-0.2.0-rc.2}
-        DSH_AUTH_GATE_VERSION: ${DSH_AUTH_GATE_VERSION:-0.16.0}
+        DSH_AUTH_GATE_VERSION: ${DSH_AUTH_GATE_VERSION:-0.15.0}
         DSH_DEV_TOOLS: ${DSH_DEV_TOOLS:-none}
     container_name: qxdho-dsh
     restart: unless-stopped

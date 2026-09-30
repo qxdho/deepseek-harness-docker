@@ -484,6 +484,22 @@ current_dsh_version() {
 	printf '%s' "$v"
 }
 
+# 该 dsh 版本在 npm 上是否存在（构建前校验，避免打错字等几分钟构建才失败）
+dsh_version_exists() {
+	local want="$1" json
+	json="$(dsh_npm_json)" || return 1
+	local all
+	all="$(dsh_versions_sorted "$json" 2>/dev/null)" || return 1
+	[ -n "$all" ] || return 1
+	printf '%s\n' "$all" | grep -qxF "$want"
+}
+
+# 该镜像 tag 是否已存在于仓库（拉取前校验）
+img_tag_exists() {
+	local want="$1"
+	img_tags 2>/dev/null | grep -qxF "$want"
+}
+
 # 从 npm 解析 dsh 的最新版（dist-tags.latest）。构建镜像前用它把版本 pin 进去，
 # 否则 Dockerfile / compose 里的默认值会一直是发布时的旧版本 —— 这是最容易踩的坑：
 # 「更新了」但装到的还是老版本。
@@ -600,15 +616,16 @@ help_version() {
 
 ${B}版本${RST} — dsh 版本查询与升级
   dshm version                   看全四个版本：配置里钉的 / 镜像 / 容器内实际运行 / npm 最新
-  dshm version list [--all]      列出 npm 上可装的版本（--all 显示全部）
-  dshm version update [版本] [--build] [--latest]
-                                 升级：默认拉预构建镜像（快）
-                                 --build  本地构建（改了仓库代码，或要指定版本）
-                                 --latest 构建前向 npm 查最新版并 pin 进 .env
-                                 （不加就永远是 Dockerfile 里写死的那个版本）
+  dshm version list [--all]      列出「已构建的镜像」与「npm 上可装的 dsh 版本」
+  dshm version update            拉取已构建的最新镜像（快，优先）
+  dshm version update --to <镜像tag>
+                                 拉取指定镜像（回退用），如 0.2.0-rc.2-2026.09.30-1
+  dshm version update --build [--dsh <版本>]
+                                 本地构建（慢）。不指定 --dsh 就用 npm 上的最新版
 
   ${DIM}dsh 在构建期装入镜像，所以换版本要重建镜像、没有热切换；
-  但这样断网也能起，且版本组合有问题会在构建期就失败。${RST}
+  但这样断网也能起，且版本组合有问题会在构建期就失败。
+  镜像 tag = <dsh版本>-<日期>-<序号>，序号保证同一天多次构建互不覆盖、可回退。${RST}
 EOF
 }
 
@@ -898,7 +915,7 @@ service-status)
 				info "dsh 版本：${cur_ver}（已是最新）"
 			else
 				printf '    %sdsh 版本：%s → 有新版本 %s%s\n' "$YEL" "$cur_ver" "$latest_ver" "$RST"
-				info "升级：./dshm version update --latest"
+				info "升级：./dshm version update"
 			fi
 		elif [ -n "$cur_ver" ]; then
 			info "dsh 版本：${cur_ver}（未能查询上游最新版）"
@@ -1005,69 +1022,96 @@ auth-totp)
 	;;
 
 version-update)
-	require_docker; require_env
+	require_docker
+	# 参数解析放在环境检查**之前**：参数写错就该立刻报错，而不是先跑一遍工作区预检、
+	# 最后才说「未知参数」。预检会改 .env、可能要求 chown，走完再报参数错纯属浪费，
+	# 还会让人误以为是自己环境有问题。
+	# 参数：
+	#   （无）           拉取已构建的最新镜像（快，优先）
+	#   --to <镜像tag>   拉取指定镜像（回退用），如 --to 0.2.0-rc.2-2026.09.30-1
+	#   --build          本地构建（慢）。默认用 npm 上的最新 dsh 版本
+	#   --build --dsh <版本>   本地构建并指定 dsh 版本
+	target=""; build=0; dsh_ver=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--build) build=1 ;;
+		--dsh)
+			shift
+			dsh_ver="${1:-}"
+			[ -n "$dsh_ver" ] || die "--dsh 需要版本号（用法：./dshm version update --build --dsh 0.2.0-rc.2）"
+			;;
+		--dsh=*) dsh_ver="${1#--dsh=}" ;;
+		--to)
+			shift
+			target="${1:-}"
+			[ -n "$target" ] || die "--to 需要镜像 tag（用法：./dshm version update --to 0.2.0-rc.2-2026.09.30-1）
+      可先用 ./dshm version list 查看有哪些已构建的镜像"
+			;;
+		--to=*) target="${1#--to=}" ;;
+		--latest)
+			die "--latest 已移除。改用：
+      ./dshm version update --build            本地构建，用 npm 最新版
+      ./dshm version update --build --dsh 版本  本地构建并指定版本"
+			;;
+		-*) die "未知参数：$1（用法：./dshm version update [--to <镜像tag>] [--build [--dsh <版本>]]）" ;;
+		*) die "不接受的参数：$1（指定版本请用 --dsh 或 --to，见 ./dshm version help）" ;;
+		esac
+		shift
+	done
+
+	[ -n "$dsh_ver" ] && [ "$build" != "1" ] && die "--dsh 只在 --build 下有意义（--dsh 指定的是本地构建用的 dsh 版本）"
+
+	# 参数已确认，现在做环境检查（会改 .env、可能要求修属主，属于有副作用的操作）
+	require_env
 	# 与 up 一样先做启动前准备：旧键改名、历史默认值对齐、旧卷迁移、目录属主与
 	# 私密文件权限预检。以前 update 只改名不做预检，于是「更新后容器仍在重启循环」
 	# 时，日志里那条 sudo chown 提示没人执行，文件权限就一直不对。
 	prepare_workspace
-	target=""; build=0; want_latest=0
-	for a in "$@"; do
-		case "$a" in
-		--build) build=1 ;;
-		--latest) want_latest=1 ;;
-		-*) die "未知参数：$a（用法：./dshm version update [版本] [--build] [--latest]）" ;;
-		*) [ -z "$target" ] || die "只接受一个版本参数（用法：./dshm version update [版本]）"; target="$a" ;;
-		esac
-	done
 
-	# --latest：构建前向 npm 查最新版并 pin 进 .env。这解决一个很隐蔽的坑 ——
-	# Dockerfile / compose / .env.example 里的 DSH_VERSION 是**发布时写死的**，
-	# 不查 npm 就永远构建出那个旧版本：「更新过了」但装的还是老 dsh。
-	if [ "$want_latest" = "1" ]; then
-		[ -z "$target" ] || die "版本参数与 --latest 不能同时给（--latest 就是取最新版）"
-		if [ "$build" != "1" ]; then
-			info "--latest 需要本地构建（dsh 在构建期装入），已自动加上 --build"
-			build=1
-		fi
-	fi
-
-	img_base="${DSH_IMAGE_BASE:-ghcr.io/qxdho/deepseek-harness-docker}"
-	# 不带版本 = 用本项目 CI 构建的最新镜像；带版本 = 用该版本 tag。
+	base="$(img_base)"
+	# 不带 --to = 用 CI 构建的最新镜像；带 --to = 用指定的那个构建（回退用）。
 	# 两种情况都优先拉取预构建镜像 —— 本地构建要重新装 dsh 并编译原生依赖，很慢。
 	tag="${target:-latest}"
 
 	if [ "$build" = "1" ]; then
-		if [ "$want_latest" = "1" ]; then
+		if [ -z "$dsh_ver" ]; then
+			# 不指定就用 npm 最新版。这一步解决一个很隐蔽的坑：Dockerfile /
+			# compose / .env.example 里的 DSH_VERSION 是**发布时写死的**，
+			# 不查 npm 就永远构建出那个旧版本 —— 「更新过了」但装的还是老 dsh。
 			hdr "查询 npm 上的最新 dsh 版本"
-			target="$(dsh_latest_version)" || die "无法从 npm 查询最新版本（需要网络，以及 jq/node/python3 之一）
-      也可直接指定版本： ./dshm version update <版本> --build"
-			tag="$target"
-			ok "最新版本：$target"
-		fi
-		if [ -n "$target" ]; then
-			# 钉进 .env：compose 用 ${DSH_VERSION:-…} 传给构建，不写就退回 Dockerfile 默认值
-			set_env DSH_VERSION "$target"
-			set_env DSH_IMAGE "${img_base}:${tag}"
-			info "已把 DSH_VERSION=${target} 写入 .env（构建时使用）"
+			dsh_ver="$(dsh_latest_version)" || die "无法从 npm 查询最新版本（需要网络，以及 jq/node/python3 之一）
+      也可直接指定： ./dshm version update --build --dsh <版本>"
+			ok "将构建 dsh ${dsh_ver}"
 		else
-			warn "未指定版本，将按当前配置里的 dsh 版本构建："
-			printf '        Dockerfile 默认 %s，.env 当前 %s\n' \
-				"$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile 2>/dev/null | head -1)" \
-				"$(env_value_new DSH_VERSION 未设置)"
-			info "要装 npm 上的最新版： ./dshm version update --latest"
+			# 用户明确指定了版本，先确认它在 npm 上存在 —— 打错字立即报错，
+			# 而不是等几分钟构建失败
+			if ! dsh_version_exists "$dsh_ver"; then
+				die "npm 上没有 dsh ${dsh_ver} 这个版本（可用 ./dshm version list 查看）"
+			fi
 		fi
-		hdr "本地构建镜像（--build）"
+		# 钉进 .env：compose 用 ${DSH_VERSION:-…} 传给构建，不写就退回 Dockerfile 默认值
+		set_env DSH_VERSION "$dsh_ver"
+		set_env DSH_IMAGE "${base}:${dsh_ver}-local"
+		info "已把 DSH_VERSION=${dsh_ver} 写入 .env"
+		hdr "本地构建镜像"
 		docker compose build
 	else
-		set_env DSH_IMAGE "${img_base}:${tag}"
+		# 拉取前先确认该 tag 真的存在，避免 compose 报一句难懂的拉取失败
+		if [ -n "$target" ] && ! img_tag_exists "$target"; then
+			warn "镜像仓库里没有 tag ${target}"
+			info "用 ./dshm version list 查看已构建的镜像"
+			die "无效的镜像 tag：${target}"
+		fi
+		set_env DSH_IMAGE "${base}:${tag}"
 		hdr "拉取预构建镜像"
-		info "${img_base}:${tag}"
+		info "${base}:${tag}"
 		if docker compose pull; then
 			ok "已拉取镜像"
 		else
-			warn "没有可用的预构建镜像 ${img_base}:${tag}，改为本地构建（较慢）"
-			[ -n "$target" ] && set_env DSH_VERSION "$target"
-			docker compose build
+			warn "拉取失败。这个版本的镜像可能还没构建出来。"
+			info "要本地构建（较慢）：./dshm version update --build"
+			info "或先看有哪些现成镜像：./dshm version list"
+			die "没有可用的预构建镜像 ${base}:${tag}"
 		fi
 	fi
 
@@ -1118,7 +1162,7 @@ version-show)
 	fi
 	if [ -n "$latest" ] && [ -n "$running" ] && [ "$running" != "$latest" ]; then
 		printf '\n'
-		info "升级到最新：./dshm version update --latest"
+		info "升级：./dshm version update"
 	fi
 	;;
 

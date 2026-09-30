@@ -179,6 +179,11 @@ jobs:
           chmod +x scripts/migrate-home.sh scripts/test-migrate-home.sh
           ./scripts/test-migrate-home.sh
 
+      - name: dsh 版本解析测试
+        run: |
+          chmod +x scripts/test-dshm-versions.sh
+          ./scripts/test-dshm-versions.sh
+
       - name: 管理面板离线测试
         if: needs.changes.outputs.admin == 'true'
         run: |

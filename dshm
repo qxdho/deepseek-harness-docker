@@ -62,6 +62,10 @@ require_running() {
 warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
 is_root() { [ "$(id -u)" = "0" ]; }
 
+# dshm 自身从哪更新。可用 DSHM_REPO 覆盖（fork 或内网镜像）。
+DSHM_REPO_URL="${DSHM_REPO:-https://github.com/qxdho/deepseek-harness-docker}"
+DSHM_RAW_BASE="${DSHM_RAW_BASE:-https://raw.githubusercontent.com/qxdho/deepseek-harness-docker/main}"
+
 # 放系统命令的目录：优先 /usr/local/bin（可写 / root / 免密 sudo），否则 ~/.local/bin。
 # 只认免密 sudo，避免 `sudo -n false` 时卡在密码提示上。
 cli_dir() {
@@ -128,6 +132,105 @@ uninstall_self() {
 	[ "$found" = "1" ] || info "没有找到注册的符号链接（可能未安装过）"
 }
 
+# ── dshm 自更新 ─────────────────────────────────────────────────────────────
+# 从仓库拉取最新的 dshm 覆盖自身。适用场景：只装了 dshm（或已把它注册为系统命令），
+# 没保留 git 仓库 / 不想 git pull 的部署机。
+#
+# 安全和健壮性上做了几件事：
+#   1. 先下载到临时文件、`bash -n` 语法检查，再替换 —— 中途断网不会留下半截脚本。
+#   2. 替换走「同目录内 mv」（原子），不是直接写目标文件。
+#   3. 内容相同就跳过（用 sha256 比对），带 --force 才强制重写。
+#   4. 保留原文件的权限位，脚本仍可执行。
+self_update() {
+	hdr "更新 dshm 自身"
+	local force=0 allow_stale=0
+	for a in "$@"; do
+		case "$a" in
+		--force | -f) force=1 ;;
+		--allow-stale) allow_stale=1 ;;
+		*) die "未知参数：$a（用法：./dshm self update [--force] [--allow-stale]）" ;;
+		esac
+	done
+
+	command -v curl >/dev/null 2>&1 || die "需要 curl 才能自更新（或改用 git pull）"
+
+	# 在 git 工作区里跑时提醒一句：这份文件的权威来源是仓库，自更新会覆盖本地改动。
+	# 并顺手用 ls-remote 查一下**本地 clone 是否落后于远端 main** —— 这是最容易踩的坑：
+	# clone 之后忘了 git pull，本地就是旧脚本，单看文件内容看不出来。
+	if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+		warn "当前目录是 git 工作区，推荐用 git pull 更新；self update 会覆盖本地对 dshm 的改动"
+		local remote_sha local_sha
+		remote_sha="$(timeout 15 git ls-remote "$DSHM_REPO_URL" refs/heads/main 2>/dev/null | cut -f1)"
+		local_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)"
+		if [ -n "$remote_sha" ] && [ -n "$local_sha" ]; then
+			if [ "$remote_sha" = "$local_sha" ]; then
+				if [ "$force" != "1" ]; then
+					ok "本地仓库已与远端 main 一致（${local_sha%"${local_sha#???????}"}）"
+					info "如确实要重新下载，加 --force"
+					return 0
+				fi
+			else
+				warn "本地仓库落后于远端 main："
+				printf '        本地 %s\n        远端 %s\n' "${local_sha%"${local_sha#???????}"}" "${remote_sha%"${remote_sha#???????}"}"
+				info "建议先 git pull；若继续，self update 会拉取远端最新版"
+				if [ "$allow_stale" != "1" ]; then
+					die "已停下以免覆盖你的本地改动。
+      确认要继续（用远端覆盖本地 dshm）：./dshm self update --allow-stale"
+				fi
+			fi
+		fi
+	fi
+
+	local url="$DSHM_RAW_BASE/$CLI_NAME"
+	local tmp
+	tmp="$(mktemp "${TMPDIR:-/tmp}/dshm.XXXXXX")"
+
+	info "下载 $url"
+	if ! curl -fsSL -o "$tmp" "$url"; then
+		rm -f "$tmp"
+		die "下载失败：$url
+      检查网络，或确认分支名（默认 main）；也可用 DSHM_RAW_BASE 指向镜像：
+        DSHM_RAW_BASE=https://你的镜像/dshm ./dshm self update"
+	fi
+
+	# 语法自检：宁可继续用旧版本，也不能换成跑不起来的脚本
+	if ! bash -n "$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		die "下载到的 dshm 未通过语法检查，已放弃替换（原文件未改动）"
+	fi
+
+	# 内容自检：确认下到的确实是本项目脚本，而不是错误页 / 代理返回的 HTML。
+	# 只看一个稳定特征串（命令列表里一定有 self），缺失就拒绝。
+	if ! grep -q 'dshm self' "$tmp"; then
+		rm -f "$tmp"
+		die "下载到的内容不像 dshm（缺少预期特征），已放弃替换。检查 DSHM_RAW_BASE 是否指向正确文件"
+	fi
+
+	local cur="$PROJECT_DIR/$CLI_NAME"
+	if [ "$force" != "1" ] && [ -f "$cur" ] \
+		&& [ "$(sha256sum "$cur" 2>/dev/null | cut -d' ' -f1)" = "$(sha256sum "$tmp" 2>/dev/null | cut -d' ' -f1)" ]; then
+		ok "已经是最新版本，无需更新"
+		return 0
+	fi
+
+	local mode
+	mode="$(stat -c '%a' "$cur" 2>/dev/null || echo 755)"
+	if [ -w "$cur" ] || [ -w "$PROJECT_DIR" ]; then
+		install -m "$mode" "$tmp" "$cur"
+	elif command -v sudo >/dev/null 2>&1; then
+		sudo install -m "$mode" "$tmp" "$cur"
+	else
+		die "无法写入 $cur（需要它可写，或用 sudo）"
+	fi
+	if [ -x "$cur" ]; then
+		ok "已更新：$cur"
+	else
+		chmod +x "$cur" 2>/dev/null || true
+		ok "已更新：$cur（已补可执行位）"
+	fi
+	info "仓库：$DSHM_REPO_URL"
+}
+
 # ── 密码合规检查 ────────────────────────────────────────────────────────────
 # 规则本身写在 scripts/env-config.sh 的 env_validate_password 里（install.sh 也用
 # 那一份），这里只把「不合规」从「返回 1」翻译成「直接退出」。
@@ -183,6 +286,126 @@ prepare_workspace() {
 	ok "工作区就绪：${DSH_WORKSPACE_DIR}"
 }
 
+# ── dsh 版本管理 ────────────────────────────────────────────────────────────
+# npm registry 上的可用版本。解析 JSON 优先用 jq，其次 node / python3 —— 部署机上不一定
+# 装了其中哪一个，所以按顺序回退；都没有就给出 npm 查询地址让用户自己看。
+DSH_NPM_NAME="@deepseek-ai/dsh"
+DSH_NPM_REGISTRY="${DSH_NPM_REGISTRY:-https://registry.npmjs.org}"
+
+dsh_npm_json() {
+	command -v curl >/dev/null 2>&1 || return 1
+	curl -fsSL --max-time 20 "$DSH_NPM_REGISTRY/$DSH_NPM_NAME" 2>/dev/null
+}
+
+# 从 registry JSON 里抽出「每行一个版本，按 semver 升序」
+dsh_versions_sorted() {
+	local json="$1"
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s' "$json" | jq -r '.versions | keys[]' 2>/dev/null | sort -V
+	elif command -v node >/dev/null 2>&1; then
+		printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{Object.keys(JSON.parse(s).versions||{}).forEach(v=>console.log(v))}catch(e){process.exit(1)}})' 2>/dev/null | sort -V
+	elif command -v python3 >/dev/null 2>&1; then
+		printf '%s' "$json" | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin).get("versions",{}).keys()))' 2>/dev/null | sort -V
+	else
+		return 1
+	fi
+}
+
+dsh_dist_tags() {
+	local json="$1"
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s' "$json" | jq -r '."dist-tags" | to_entries | map("\(.key)=\(.value)") | join("  ")' 2>/dev/null
+	elif command -v node >/dev/null 2>&1; then
+		printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=JSON.parse(s)["dist-tags"]||{};console.log(Object.entries(t).map(([k,v])=>k+"="+v).join("  "))}catch(e){process.exit(1)}})' 2>/dev/null
+	elif command -v python3 >/dev/null 2>&1; then
+		printf '%s' "$json" | python3 -c 'import json,sys;t=json.load(sys.stdin).get("dist-tags",{});print("  ".join(f"{k}={v}" for k,v in t.items()))' 2>/dev/null
+	fi
+}
+
+# 当前生效的 dsh 版本：优先问运行中的容器（最准），容器没起就退回 .env / Dockerfile
+current_dsh_version() {
+	local v=""
+	if command -v docker >/dev/null 2>&1 && docker inspect "$CONTAINER" >/dev/null 2>&1; then
+		v="$(docker exec "$CONTAINER" dsh --version 2>/dev/null || true)"
+	fi
+	if [ -z "$v" ]; then
+		v="$(env_value_new DSH_VERSION "")"
+	fi
+	if [ -z "$v" ] && [ -f Dockerfile ]; then
+		v="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile 2>/dev/null | head -1)"
+	fi
+	printf '%s' "$v"
+}
+
+# 从 npm 解析 dsh 的最新版（dist-tags.latest）。构建镜像前用它把版本 pin 进去，
+# 否则 Dockerfile / compose 里的默认值会一直是发布时的旧版本 —— 这是最容易踩的坑：
+# 「更新了」但装到的还是老版本。
+dsh_latest_version() {
+	local json tags
+	json="$(dsh_npm_json)" || return 1
+	if command -v jq >/dev/null 2>&1; then
+		tags="$(printf '%s' "$json" | jq -r '."dist-tags".latest // empty' 2>/dev/null)"
+	elif command -v node >/dev/null 2>&1; then
+		tags="$(printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)["dist-tags"].latest||""))}catch(e){process.exit(1)}})' 2>/dev/null)"
+	elif command -v python3 >/dev/null 2>&1; then
+		tags="$(printf '%s' "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("dist-tags",{}).get("latest",""))' 2>/dev/null)"
+	else
+		return 1
+	fi
+	[ -n "$tags" ] || return 1
+	printf '%s' "$tags"
+}
+
+show_dsh_versions() {
+	local json cur latest tags all total shown
+	json="$(dsh_npm_json)" || {
+		die "无法访问 $DSH_NPM_REGISTRY（需要网络）；可手动查看：
+      $DSH_NPM_REGISTRY/$DSH_NPM_NAME"
+	}
+
+	all="$(dsh_versions_sorted "$json")" || die "解析 registry 响应失败（需要 jq、node 或 python3 之一）"
+	[ -n "$all" ] || die "registry 响应里没有版本信息"
+
+	cur="$(current_dsh_version)"
+	tags="$(dsh_dist_tags "$json")"
+	latest="$(printf '%s\n' "$all" | tail -1)"
+	total="$(printf '%s\n' "$all" | wc -l | tr -d ' ')"
+
+	hdr "dsh 可用版本"
+	# 列表可能很长（本仓库实测 29 个），默认只显示最近 10 个，--all 看全部。
+	shown="${DSH_VERSIONS_SHOWN:-10}"
+	case "${1:-}" in
+	--all | -a) shown="$total" ;;
+	esac
+
+	printf '    当前运行：%s\n' "${cur:-未知}"
+	printf '    最新版本：%s\n' "$latest"
+	printf '    发布标签：%s\n' "${tags:-（无）}"
+	printf '    共 %s 个版本' "$total"
+	[ "$shown" -lt "$total" ] 2>/dev/null && printf '，下面显示最近 %s 个（--all 看全部）' "$shown"
+	printf '\n\n'
+
+	printf '%s\n' "$all" | tail -n "$shown" | while IFS= read -r v; do
+		if [ "$v" = "$cur" ]; then
+			printf '    %s*%s %s  ← 当前\n' "$GRN" "$RST" "$v"
+		elif [ "$v" = "$latest" ]; then
+			printf '      %s  ← 最新\n' "$v"
+		else
+			printf '      %s\n' "$v"
+		fi
+	done
+
+	printf '\n'
+	if [ -n "$cur" ] && [ "$cur" != "$latest" ]; then
+		warn "有新版本可用：$cur → $latest"
+		info "切换版本需要重建镜像（dsh 在构建期装入）："
+		printf '\n      ./dshm service update %s\n\n' "$latest"
+		info "或指定任意版本： ./dshm service update <版本>"
+	else
+		ok "已经是最新版本"
+	fi
+}
+
 # ── 帮助 ────────────────────────────────────────────────────────────────────
 help_service() {
 	cat <<EOF
@@ -195,8 +418,12 @@ ${B}服务${RST} — 管理 dsh 容器
   dshm service logs              日志
   dshm service shell             进容器
   dshm service version           容器内 dsh 版本
-  dshm service update [版本] [--build]
-                                 升级：默认拉预构建镜像（快）；--build 才本地构建
+  dshm service versions          列出 npm 上可装的 dsh 版本（标出当前版本与最新版本）
+  dshm service update [版本] [--build] [--latest]
+                                 升级：默认拉预构建镜像（快）
+                                 --build  本地构建（改了仓库代码，或要指定 dsh 版本）
+                                 --latest 构建前向 npm 查最新 dsh 版本并 pin 进 .env
+                                          （不加就永远是 Dockerfile 里写死的旧版本）
   dshm service migrate-home      把旧命名卷 dsh-home 的数据迁到宿主数据目录
                                  （install.sh / service up 已自动执行，通常无需手工调用）
   dshm service url               一次性 launch URL（排障）
@@ -223,6 +450,9 @@ help_self() {
 ${B}自身${RST}
   dshm self install             把 dshm 注册为系统命令（之后任意目录可直接 dshm …）
   dshm self uninstall           移除系统命令
+  dshm self update [--force]    从 GitHub 拉取最新的 dshm 覆盖自身（无需 git）
+                                git 工作区里会先检查本地是否落后，落后则停下提醒
+                                （--force 重新下载，--allow-stale 允许覆盖落后的本地）
 EOF
 }
 
@@ -299,6 +529,7 @@ cli | self)
 	case "$sub" in
 	install) cmd=install-self ;;
 	uninstall) cmd=uninstall-self ;;
+	update | upgrade) cmd=update-self ;;
 	help | -h | --help | "") cmd=help; set -- self ;;
 	*) die "未知子命令：self $sub（运行 dshm help）" ;;
 	esac
@@ -486,14 +717,26 @@ update)
 	# 私密文件权限预检。以前 update 只改名不做预检，于是「更新后容器仍在重启循环」
 	# 时，日志里那条 sudo chown 提示没人执行，文件权限就一直不对。
 	prepare_workspace
-	target=""; build=0
+	target=""; build=0; want_latest=0
 	for a in "$@"; do
 		case "$a" in
 		--build) build=1 ;;
-		-*) die "未知参数：$a（用法：./dshm service update [版本] [--build]）" ;;
+		--latest) want_latest=1 ;;
+		-*) die "未知参数：$a（用法：./dshm service update [版本] [--build] [--latest]）" ;;
 		*) [ -z "$target" ] || die "只接受一个版本参数（用法：./dshm service update [版本]）"; target="$a" ;;
 		esac
 	done
+
+	# --latest：构建前向 npm 查最新版并 pin 进 .env。这解决一个很隐蔽的坑 ——
+	# Dockerfile / compose / .env.example 里的 DSH_VERSION 是**发布时写死的**，
+	# 不查 npm 就永远构建出那个旧版本：「更新过了」但装的还是老 dsh。
+	if [ "$want_latest" = "1" ]; then
+		[ -z "$target" ] || die "版本参数与 --latest 不能同时给（--latest 就是取最新版）"
+		if [ "$build" != "1" ]; then
+			info "--latest 需要本地构建（dsh 在构建期装入），已自动加上 --build"
+			build=1
+		fi
+	fi
 
 	img_base="${DSH_IMAGE_BASE:-ghcr.io/qxdho/deepseek-harness-docker}"
 	# 不带版本 = 用本项目 CI 构建的最新镜像；带版本 = 用该版本 tag。
@@ -501,10 +744,24 @@ update)
 	tag="${target:-latest}"
 
 	if [ "$build" = "1" ]; then
-		# 指定了版本就把 tag 也钉到该版本，别让本地构建出来的镜像盖到 :latest 上
+		if [ "$want_latest" = "1" ]; then
+			hdr "查询 npm 上的最新 dsh 版本"
+			target="$(dsh_latest_version)" || die "无法从 npm 查询最新版本（需要网络，以及 jq/node/python3 之一）
+      也可直接指定版本： ./dshm service update <版本> --build"
+			tag="$target"
+			ok "最新版本：$target"
+		fi
 		if [ -n "$target" ]; then
+			# 钉进 .env：compose 用 ${DSH_VERSION:-…} 传给构建，不写就退回 Dockerfile 默认值
 			set_env DSH_VERSION "$target"
 			set_env DSH_IMAGE "${img_base}:${tag}"
+			info "已把 DSH_VERSION=${target} 写入 .env（构建时使用）"
+		else
+			warn "未指定版本，将按当前配置里的 dsh 版本构建："
+			printf '        Dockerfile 默认 %s，.env 当前 %s\n' \
+				"$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile 2>/dev/null | head -1)" \
+				"$(env_value_new DSH_VERSION 未设置)"
+			info "要装 npm 上的最新版： ./dshm service update --latest"
 		fi
 		hdr "本地构建镜像（--build）"
 		docker compose build
@@ -537,6 +794,13 @@ version)
 	docker exec "$CONTAINER" dsh --version
 	;;
 
+versions)
+	# 列出 npm 上可装的 dsh 版本，并标出当前镜像里跑的是哪个。
+	# 换版本要重建镜像（dsh 是构建期 npm install -g 装进去的），所以这里只负责
+	# 「看有哪些版本」，实际切换用 `dshm service update <版本>` 或面板。
+	show_dsh_versions "$@"
+	;;
+
 migrate-home | migrate)
 	# 旧版本把 DSH_HOME 放在命名卷 dsh-home 里；现在默认是宿主 bind 挂载。
 	# 实现放在 scripts/migrate-home.sh（install.sh 与 dshm service up 会自动调用），
@@ -558,6 +822,10 @@ install-self | link | install-cli)
 
 uninstall-self | unlink)
 	uninstall_self
+	;;
+
+update-self)
+	self_update "$@"
 	;;
 
 help | -h | --help | "")

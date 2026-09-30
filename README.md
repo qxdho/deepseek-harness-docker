@@ -113,13 +113,37 @@ docker compose up -d     # 启动服务
 ### 升级
 
 ```bash
-./dshm service update          # 默认拉取 GHCR 上的新镜像（不在本地重建）
-./dshm service update --build  # 强制本地重建镜像（改了仓库代码时）
-./dshm service update 0.1.7-rc.2   # 指定版本
+./dshm service update --latest      # 推荐：向 npm 查最新 dsh 版本并本地构建
+./dshm service update               # 拉取 GHCR 上的新镜像（不在本地重建）
+./dshm service update --build       # 本地重建（改了仓库代码时）
+./dshm service update 0.2.0-rc.2 --build   # 指定 dsh 版本
+./dshm service versions             # 列出 npm 上可装的 dsh 版本
 ```
 
 镜像由 CI 构建并推送至 GHCR，本地重建既慢又不会带来新版本；仅在拉取失败或需要验证未发布的
 仓库改动时才使用 `--build`。两种方式都会等待容器进入健康状态，未健康则打印日志并以非 0 退出。
+
+> [!IMPORTANT]
+> **`dsh` 在构建期由 npm 装入镜像**，所以换 dsh 版本需要**本地重建**，没有热切换。
+> 而 `Dockerfile` / `docker-compose.yml` / `.env.example` 里的 `DSH_VERSION` 是**发布时写死的**，
+> 因此直接 `--build` 只会构建出那个旧版本。
+>
+> 用 **`--latest`** 才会先向 npm 查询最新版并写回 `.env` 再构建。
+
+### 两个更新渠道，权威来源不同
+
+这点容易混淆，务必分清：
+
+| 更新对象 | 权威来源 | 命令 |
+|---|---|---|
+| **`dsh` 本体** | **npm registry** | `./dshm service update --latest` |
+| **`dshm` 脚本自身** | **GitHub 仓库** | `./dshm self update` |
+
+- **dsh 的发布渠道是 npm**，不是 GitHub。`service versions` / `--latest` 都直接查 npm，
+  所以**即使 GitHub 仓库不是最新，你看到的 dsh 版本仍然是最新的**。
+- **`dshm` 是脚本，随仓库走**。`./dshm self update` 从 GitHub 拉取，适合没保留 git 仓库的
+  部署机。在 git 工作区里它会先检查本地是否落后于远端 `main`：落后则停下提醒你用 `git pull`，
+  不会静默覆盖你的本地改动（`--allow-stale` 可强制覆盖，`--force` 可重新下载）。
 
 ## 管理命令
 
@@ -152,10 +176,11 @@ docker compose up -d     # 启动服务
 | `service` | `up` / `down` / `restart` | 启动、停止、重启（`up` 与 `restart` 都会重读 `.env`） |
 | `service` | `status` / `logs` / `disk` | 状态、日志、磁盘占用与清理命令 |
 | `service` | `update` / `version` / `shell` | 升级、查看容器内 dsh 版本、进入容器 |
+| `service` | `versions` | 列出 npm 上可装的 dsh 版本（标出当前与最新） |
 | `service` | `url` / `migrate-home` | 一次性 launch URL（排障）、旧命名卷数据迁移 |
 | `auth` | `password` / `user` / `totp` | 改密码、增删禁用用户、两步验证 |
 | `admin` | `install` / `uninstall` / `url` / `password` / `status` / `logs` | 宿主机管理面板 |
-| `self` | `install` / `uninstall` | 把 `dshm` 注册为系统命令 |
+| `self` | `install` / `uninstall` / `update` | 注册为系统命令、从 GitHub 更新 dshm 自身 |
 
 原有的扁平写法（`./dshm up`、`./dshm pw`、`./dshm user add ...`）仍然可用，但不再写入文档。
 

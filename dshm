@@ -1309,6 +1309,11 @@ dshm-version)
 		info "发布：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
 	elif [ "$cur" = "$latest" ]; then
 		ok "已是最新发布版本（v${latest}）"
+	elif [ -n "$(git -C "$PROJECT_DIR" describe --tags --match "v${latest}" HEAD 2>/dev/null || true)" ]; then
+		# 本地从最新 tag 出发又有新提交（git describe 会给出 v<tag>-<n>-g<sha>）。
+		# 这是**领先**，不能报「有新版」—— 那会误导用户去执行一次回退。
+		ok "本地领先最新发布版本（v${latest} + 尚未发布的提交）"
+		info "要把这些改动发出去：./scripts/release.sh"
 	else
 		printf '    %s有新版：v%s → v%s%s\n' "$YEL" "$cur" "$latest" "$RST"
 		info "更新：./dshm dshm update"

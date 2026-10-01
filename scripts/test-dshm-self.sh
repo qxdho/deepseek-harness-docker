@@ -38,7 +38,7 @@ git push -q "$tmp/remote.git" --tags
 
 # 把 dshm 里被测的函数抽出来
 fnfile="$tmp/fn.sh"
-for fn in ver_of_tag dshm_version dshm_tags dshm_latest_tag dshm_tag_sha dshm_raw_url dshm_release_url; do
+for fn in ver_of_tag dshm_version dshm_tags dshm_latest_tag dshm_tag_sha dshm_release_url; do
 	awk "/^${fn}\\(\\)/,/^}/" "$root/dshm" >>"$fnfile"
 done
 CLI_NAME=dshm

@@ -169,11 +169,6 @@ dshm_tag_sha() {
 		awk 'NR==1{print $1}'
 }
 
-# 该 tag 对应的 dshm 脚本下载地址
-dshm_raw_url() {
-	local ver="$1"
-	printf 'https://raw.githubusercontent.com/qxdho/deepseek-harness-docker/v%s/%s' "$ver" "$CLI_NAME"
-}
 
 # 该 tag 的 release **发布包**（dshm 的完整运行目录，版本号已由 CI 写死）。
 # 这是首选下载地址：自更新的目标机器通常既没有 git 仓库也没有 VERSION 文件，

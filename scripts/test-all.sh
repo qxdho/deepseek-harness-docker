@@ -18,8 +18,20 @@ cd "$root"
 verbose=0
 [ "${1:-}" = "-v" ] && verbose=1
 
-# 脚本必须带上可执行位（CI 有单独守卫，这里顺手确保能跑）
-chmod +x "$here"/*.sh 2>/dev/null || true
+# **不要**在这里 `chmod +x`。CI 有一步「可执行位守卫」专门检查 git 里的 mode；
+# 本地跑测试时顺手把工作区的脚本都改成可执行，会让"忘了给新脚本加可执行位"这类问题
+# 在本地永远看不到（工作区已经是 +x），而 git 里仍是 100644 —— 推到 CI 才红。
+#
+# 改成：发现有脚本少了可执行位就**报告**（提示怎么修），不自动改。
+missing_exec=""
+for s in "$here"/*.sh; do
+	[ -f "$s" ] || continue
+	[ -x "$s" ] || missing_exec="$missing_exec $(basename "$s")"
+done
+if [ -n "$missing_exec" ]; then
+	printf '\n\033[33m注意\033[0m：以下脚本缺少可执行位，CI 的守卫会失败：%s\n' "$missing_exec"
+	printf '      修：chmod +x scripts/<脚本>&& git add scripts/<脚本>\n'
+fi
 
 shopt -s nullglob
 scripts=("$here"/test-*.sh)

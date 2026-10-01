@@ -11,6 +11,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      delete_tags:
+        description: '要删除的 GHCR tag（空格分隔），留空则只做常规构建'
+        required: false
+        default: ''
 
 # 同一个 ref 上不并行跑两次（后到的排队），但**不取消正在运行的运行**：
 # 多架构构建被半路掐断，GHCR 上可能只推了一半的 tag，比排队更糟。
@@ -323,6 +328,43 @@ jobs:
                 || echo "::warning::删除 ${name} 失败（不影响发布）"
             else
               echo "未找到 ${name}，跳过"
+            fi
+          done
+
+  # 手动清理指定的 GHCR tag（workflow_dispatch）。
+  #
+  # 用途：清掉历史遗留的临时 tag —— 例如「按架构构建」方案落地之前留下的
+  # amd64-<sha> / arm64-<sha>，或是验证流程时打的测试镜像 tag。
+  # 平时的临时 tag 由 cleanup-staging 自动清，这个入口只处理历史遗留。
+  #
+  # 为什么用这个作业而不是本地 curl：删除 package version 需要 token 有
+  # read/delete packages 权限，个人 PAT 常常没有（实测 403）；CI 自带的
+  # GITHUB_TOKEN 在本仓库有 packages: write，可以删。
+  cleanup-versions:
+    if: github.event_name == 'workflow_dispatch' && inputs.delete_tags != ''
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: 删除指定 tag 对应的 package version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DELETE_TAGS: ${{ inputs.delete_tags }}
+        run: |
+          set -euo pipefail
+          api="users/qxdho/packages/container/deepseek-harness-docker/versions"
+          for name in $DELETE_TAGS; do
+            vid="$(gh api "${api}?per_page=100" \
+              --jq ".[] | select(.metadata.container.tags | index(\"${name}\")) | .id" 2>/dev/null | head -1 || true)"
+            if [ -n "$vid" ]; then
+              if gh api -X DELETE "${api}/${vid}" >/dev/null 2>&1; then
+                echo "已删除 ${name}（version ${vid}）"
+              else
+                echo "::error::删除 ${name} 失败"
+                exit 1
+              fi
+            else
+              echo "未找到 ${name}"
             fi
           done
   checks:

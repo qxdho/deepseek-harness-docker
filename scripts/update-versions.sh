@@ -87,23 +87,55 @@ current_pin() {
 # current != latest 时把版本写进三个文件。
 # 每处都用锚定到具体键名的替换，避免误伤别的行（例如 .env.example 里可能还有注释
 # 提到同一个版本号）。
-apply_version() {
-	local name="$1" old="$2" new="$3" changed=0
+# 该条目**应该**出现在哪些文件里。顺序与 apply_version 的检查顺序一致：
+#   d = Dockerfile、c = docker-compose.yml、e = .env.example
+# 有了这个清单，apply_version 才能判断「是格式漂移」还是「这个条目本来就不在某个文件里」——
+# 否则「匹配到 2 处」既可能是正常的（如 DSH_AUTH_GATE_VERSION 确实没有 .env.example 项），
+# 也可能是 compose 那行被人改坏了，两者无法区分。
+targets_of() {
+	case "$1" in
+	DSH_VERSION) printf 'dce' ;;
+	DSH_AUTH_GATE_VERSION) printf 'dc' ;;
+	PNPM_VERSION) printf 'dc' ;; # 只报告不写，这里仅用于一致性
+	*) printf 'dce' ;;
+	esac
+}
 
-	if grep -q "^ARG ${name}=${old}$" "$DOCKERFILE"; then
-		sed -i "s|^ARG ${name}=${old}$|ARG ${name}=${new}|" "$DOCKERFILE"
-		changed=1
-	fi
-	# compose 里是 ${NAME:-旧值} 形式
-	if grep -q "^        ${name}: \${${name}:-${old}}$" "$COMPOSE"; then
-		sed -i "s|^        ${name}: \${${name}:-${old}}$|        ${name}: \${${name}:-${new}}|" "$COMPOSE"
-		changed=1
-	fi
-	if grep -q "^${name}=${old}$" "$ENVEXAMPLE"; then
-		sed -i "s|^${name}=${old}$|${name}=${new}|" "$ENVEXAMPLE"
-		changed=1
-	fi
-	return 0
+# 把 name 的版本从 old 改成 new，**在 stdout 打印「改动数 目标数」**（如 `3 3`）。
+#
+# 为什么不是返回值：返回值只适合表达成功/失败，而这里要传两个计数。原来恒 return 0，
+# 调用方无从判断到底写没写进去 —— 即使一处都没匹配上，也照样打印「已写入三个文件」，
+# 每周定时任务据此开出一个什么都没改的空 PR。
+#
+# `改动数 < 目标数` 即「有目标文件没按预期格式找到」，调用方据此判为漂移并失败。
+apply_version() {
+	local name="$1" old="$2" new="$3" changed=0 want
+	want="$(targets_of "$name")"
+
+	case "$want" in *d*)
+		if grep -q "^ARG ${name}=${old}$" "$DOCKERFILE"; then
+			sed -i "s|^ARG ${name}=${old}$|ARG ${name}=${new}|" "$DOCKERFILE"
+			changed=$((changed + 1))
+		fi
+		;;
+	esac
+	case "$want" in *c*)
+		# compose 里是 ${NAME:-旧值} 形式。**缩进写死 8 个空格** —— 改缩进会让这里匹配不上，
+		# 所以上面的单测专门钉住了这个前提。
+		if grep -q "^        ${name}: \${${name}:-${old}}$" "$COMPOSE"; then
+			sed -i "s|^        ${name}: \${${name}:-${old}}$|        ${name}: \${${name}:-${new}}|" "$COMPOSE"
+			changed=$((changed + 1))
+		fi
+		;;
+	esac
+	case "$want" in *e*)
+		if grep -q "^${name}=${old}$" "$ENVEXAMPLE"; then
+			sed -i "s|^${name}=${old}$|${name}=${new}|" "$ENVEXAMPLE"
+			changed=$((changed + 1))
+		fi
+		;;
+	esac
+	printf '%s %s' "$changed" "${#want}"
 }
 
 # 版本条目：<ARG 名>:<npm 包名>[:skip]
@@ -116,6 +148,7 @@ ENTRIES=(
 
 updated=0
 have_update=0
+unmatched=0
 printf '%-26s %-14s %-14s %s\n' "配置项" "当前" "最新" "动作"
 printf '%-26s %-14s %-14s %s\n' "--------------------------" "--------------" "--------------" "----"
 
@@ -151,9 +184,17 @@ for entry in "${ENTRIES[@]}"; do
 		printf '%-26s %-14s %-14s %s\n' "$name" "$old" "$new" "可更新"
 		continue
 	fi
-	apply_version "$name" "$old" "$new"
-	printf '%-26s %-14s %-14s %s\n' "$name" "$old" "$new" "已写入三个文件"
+	# apply_version 在 stdout 报「改动数 目标数」（见其注释）。
+	# 改动数 < 目标数 说明有目标文件不是预期写法 —— 多半是格式漂移，必须失败，
+	# 否则会开出一个没改完（甚至没改）的空 PR，而看起来像"自动更新在工作"。
+	av_out="$(apply_version "$name" "$old" "$new")"
+	n_changed="${av_out%% *}"
+	n_want="${av_out##* }"
+	printf '%-26s %-14s %-14s %s\n' "$name" "$old" "$new" "已写入 ${n_changed}/${n_want} 处"
 	updated=$((updated + 1))
+	if [ "$n_changed" != "$n_want" ]; then
+		unmatched=$((unmatched + 1))
+	fi
 done
 
 echo
@@ -171,4 +212,12 @@ if [ "$updated" = "0" ]; then
 else
 	echo "已更新 $updated 项；受影响文件：Dockerfile、docker-compose.yml、.env.example"
 	echo "注意：跨次版本（如 0.1.x → 0.2.x）可能有破坏性变更，建议先看上游 release notes 再合并。"
+fi
+
+# 有项匹配不上就明确失败：定时任务据此不开 PR，而不是开一个什么都没改的空 PR。
+if [ "$unmatched" != "0" ]; then
+	echo
+	echo "错误：有 $unmatched 项的旧值在目标文件里找不到（格式可能已漂移）。" >&2
+	echo "      请手工确认 Dockerfile / docker-compose.yml / .env.example 里的写法。" >&2
+	exit 1
 fi

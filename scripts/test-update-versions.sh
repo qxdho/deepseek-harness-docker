@@ -102,11 +102,13 @@ fi
 
 d2="$(pin DSH_AUTH_GATE_VERSION)"
 c2="$(compose_val DSH_AUTH_GATE_VERSION)"
-e2="$(env_val DSH_AUTH_GATE_VERSION)"
-if [ "$d2" = "9.8.8" ] && [ "$d2" = "$c2" ] && [ "$d2" = "$e2" ]; then
-	pass "auth-gate 版本也被更新且三处一致（$d2）"
+# auth-gate 只在 Dockerfile 与 compose 里有，.env.example 里**本来就没有**这一项
+# （见 update-versions.sh 的 targets_of：DSH_AUTH_GATE_VERSION → "dc"）。
+# 所以只校验这两处一致 —— 以前这里断言"三处一致"，等于把不存在的第三处也算进来了。
+if [ "$d2" = "9.8.8" ] && [ "$d2" = "$c2" ]; then
+	pass "auth-gate 版本也被更新且两处一致（$d2）"
 else
-	fail "auth-gate 不一致：Dockerfile=$d2 compose=$c2 .env.example=$e2"
+	fail "auth-gate 不一致：Dockerfile=$d2 compose=$c2"
 fi
 
 # ── 幂等 ──────────────────────────────────────────────────────────────────
@@ -159,4 +161,115 @@ else
 	fail "registry 不可达时文件被改动"
 fi
 
+
+# ── apply_version 必须在 stdout 报告真实改动数 ──────────────────────────────
+# 它原来恒 return 0、调用处无条件打印「已写入三个文件」：格式漂移导致一个文件都没改时，
+# 脚本照样报成功，每周定时任务会据此开出一个什么都没改的空 PR。
+# 这里直接对函数做单元测试，不依赖 registry 与前面的用例状态。
+av_dir="$tmp/applyver"
+rm -rf "$av_dir"
+mkdir -p "$av_dir"
+{
+	sed -n '/^targets_of()/,/^}/p' "$here/update-versions.sh"
+	sed -n '/^apply_version()/,/^}/p' "$here/update-versions.sh"
+} >"$av_dir/fn.sh"
+write_av_fixtures() { # <Dockerfile 行> <compose 行> <env.example 行>
+	printf '%s\n' "$1" >"$av_dir/Dockerfile"
+	printf '%s\n' "$2" >"$av_dir/compose.yml"
+	printf '%s\n' "$3" >"$av_dir/.env.example"
+}
+run_av() {
+	(
+		DOCKERFILE="$av_dir/Dockerfile" COMPOSE="$av_dir/compose.yml" ENVEXAMPLE="$av_dir/.env.example"
+		export DOCKERFILE COMPOSE ENVEXAMPLE
+		# shellcheck disable=SC1091
+		. "$av_dir/fn.sh"
+		apply_version "$@"
+	)
+}
+
+write_av_fixtures \
+	'ARG DSH_VERSION=0.1.0' \
+	'        DSH_VERSION: ${DSH_VERSION:-0.1.0}' \
+	'DSH_VERSION=0.1.0'
+got="$(run_av DSH_VERSION 0.1.0 0.2.0)"
+if [ "$got" = "3 3" ]; then
+	pass "三处都能匹配时报告 3/3"
+else
+	fail "三处匹配时应报告「3 3」，实际「$got」"
+fi
+if grep -q 'ARG DSH_VERSION=0.2.0' "$av_dir/Dockerfile" &&
+	grep -q 'DSH_VERSION:-0.2.0' "$av_dir/compose.yml" &&
+	grep -q '^DSH_VERSION=0.2.0$' "$av_dir/.env.example"; then
+	pass "三个文件确实都被写入新值"
+else
+	fail "文件内容没被正确写入"
+fi
+
+write_av_fixtures 'ARG OTHER=x' 'other: x' 'OTHER=x'
+got="$(run_av DSH_VERSION 0.1.0 0.2.0)"
+if [ "$got" = "0 3" ]; then
+	pass "一处都匹配不上时报告 0/3（能看出一个都没改）"
+else
+	fail "一处都匹配不上时应报告「0 3」，实际「$got」"
+fi
+
+write_av_fixtures 'ARG DSH_VERSION=0.1.0' 'other: x' 'OTHER=x'
+got="$(run_av DSH_VERSION 0.1.0 0.2.0)"
+if [ "$got" = "1 3" ]; then
+	pass "只有一处匹配时报告 1/3（精确计数，不是布尔）"
+else
+	fail "只有一处匹配时应报告「1 3」，实际「$got」"
+fi
+
+# compose 的缩进如果不符（这里用 6 个空格），就匹配不上 —— 正则里写死了 8 个空格。
+# 这既验证计数，也把这个隐含前提钉住：改 docker-compose.yml 缩进会让自动更新失效。
+write_av_fixtures 'ARG DSH_VERSION=0.1.0' '      DSH_VERSION: ${DSH_VERSION:-0.1.0}' 'DSH_VERSION=0.1.0'
+got="$(run_av DSH_VERSION 0.1.0 0.2.0)"
+if [ "$got" = "2 3" ]; then
+	pass "compose 缩进不符时报告 2/3（暴露「缩进写死」这一隐含前提）"
+else
+	fail "compose 缩进不符时应报告「2 3」，实际「$got」"
+fi
+# 端到端：格式漂移时必须非 0 退出并说明哪一项没写全（而不是开出一个空 PR）
+#
+# 构造：把三个文件的钉住值都改成 9.9.8（假 registry 报 9.9.9，所以「有可更新项」），
+# 再把 compose 里的 `${DSH_VERSION:-...}` 换成写死的值 —— 正则匹配不上，即格式漂移。
+# 此时 Dockerfile 与 .env.example 仍应被正常写入（不能因为一处不匹配就整体不干活）。
+drift_repo="$tmp/drift"
+rm -rf "$drift_repo"
+mkdir -p "$drift_repo"
+cp "$root/Dockerfile" "$root/docker-compose.yml" "$root/.env.example" "$drift_repo/"
+sed -i "s|^ARG DSH_VERSION=.*|ARG DSH_VERSION=9.9.8|" "$drift_repo/Dockerfile"
+sed -i "s|^DSH_VERSION=.*|DSH_VERSION=9.9.8|" "$drift_repo/.env.example"
+sed -i "s|^        DSH_VERSION: .*|        DSH_VERSION: 9.9.8|" "$drift_repo/docker-compose.yml"
+
+set +e
+DSH_UPDATE_REPO_ROOT="$drift_repo" DSH_NPM_REGISTRY="http://127.0.0.1:$port" \
+	"$here/update-versions.sh" >"$tmp/drift.out" 2>&1
+drift_rc=$?
+set -e
+if [ "$drift_rc" -ne 0 ]; then
+	pass "格式漂移时以非 0 退出（定时任务不会开空 PR）"
+else
+	fail "格式漂移却仍报成功（exit 0）：$(tail -1 "$tmp/drift.out")"
+fi
+# 输出里要能看出「3 处目标只写了 2 处」
+if grep -qE '已写入 2/3 处' "$tmp/drift.out"; then
+	pass "并给出 2/3 的计数（能直接看出有一处没写进去）"
+else
+	fail "没有给出 2/3 计数：$(grep DSH_VERSION "$tmp/drift.out" | head -1)"
+fi
+if grep -q '格式可能已漂移' "$tmp/drift.out"; then
+	pass "并提示是格式漂移"
+else
+	fail "没提示格式漂移：$(tail -2 "$tmp/drift.out" | tr '\n' ' ')"
+fi
+# 匹配得上的那两个文件仍应被写入
+if grep -q '^ARG DSH_VERSION=9.9.9$' "$drift_repo/Dockerfile" &&
+	grep -q '^DSH_VERSION=9.9.9$' "$drift_repo/.env.example"; then
+	pass "匹配得上的文件仍被写入新值"
+else
+	fail "匹配得上的文件没被写入"
+fi
 run_tests

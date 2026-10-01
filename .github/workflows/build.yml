@@ -592,18 +592,33 @@ jobs:
           grep -q 'if true; then' "$pkg/dshm" \
             || { echo "::error::版本判断未替换（脚本会把自己当未发布版）" >&2; exit 1; }
           bash -n "$pkg/dshm" || { echo "::error::替换后语法有误" >&2; exit 1; }
-          # dshm 运行所需的同目录文件，缺一不可
-          cp scripts/env-config.sh scripts/migrate-home.sh scripts/admin.sh "$pkg/scripts/"
+          # dshm 运行所需的同目录文件。**用 glob 拷贝 + 显式白名单校验**：
+          #
+          # 原来这里是手写清单（只列 env-config/migrate-home/admin 三个），而 dshm 实际
+          # 还会 `. scripts/log.sh`（启动第一件事）与 `. ./scripts/preflight.sh`（service up
+          # 时）—— 两者都不在清单里，于是**发布出去的包开箱即废**：
+          #   ./dshm help → line 37: .../scripts/log.sh: No such file or directory（退出码 1）
+          # 更糟的是下面的解包自检用的是**同一份不全的清单**，所以 CI 永远绿。
+          # 手写清单注定会再漏，所以改成「全拷 + 白名单校验」：多拷一个文件无害，
+          # 漏拷一个就让自更新把用户装挂。
+          cp scripts/*.sh "$pkg/scripts/"
+          rm -f "$pkg"/scripts/test-*.sh "$pkg"/scripts/smoke-*.sh "$pkg"/scripts/test-lib.sh
           # 不带 VERSION 文件：版本号已写死在脚本里，留着反而多一个会过期的来源
-          chmod +x "$pkg/dshm"
+          chmod +x "$pkg/dshm" "$pkg"/scripts/*.sh
           tar -czf "${pkg}.tar.gz" "$pkg"
-          # 解包自检：确认包内容完整、脚本语法正确
+          # 解包自检：确认**运行时依赖一个不少**、且每个脚本都语法正确。
+          # 这份清单必须与 dshm 里真正 source 的文件一致 —— 下面 dshm 侧的
+          # REQUIRED_SCRIPTS 也用它，两处一起改。
           rm -rf /tmp/verify && mkdir -p /tmp/verify
           tar -xzf "${pkg}.tar.gz" -C /tmp/verify
-          for f in dshm scripts/env-config.sh scripts/migrate-home.sh scripts/admin.sh; do
-            [ -f "/tmp/verify/${pkg}/${f}" ] || { echo "::error::发布包缺少 ${f}" >&2; exit 1; }
+          required="dshm scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh scripts/preflight.sh scripts/admin.sh"
+          for f in $required; do
+            [ -f "/tmp/verify/${pkg}/${f}" ] || { echo "::error::发布包缺少 ${f}（dshm 运行时会 source 它）" >&2; exit 1; }
           done
-          bash -n "/tmp/verify/${pkg}/dshm"
+          # 每个脚本都过一遍语法检查，而不是只查 dshm
+          for f in /tmp/verify/"${pkg}"/dshm /tmp/verify/"${pkg}"/scripts/*.sh; do
+            bash -n "$f" || { echo "::error::$(basename "$f") 语法有误" >&2; exit 1; }
+          done
           rm -rf /tmp/verify
           sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
           echo "已生成 ${pkg}.tar.gz（$(wc -c < "${pkg}.tar.gz") 字节，版本 ${NUM}）"

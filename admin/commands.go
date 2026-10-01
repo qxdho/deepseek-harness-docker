@@ -185,5 +185,14 @@ func validateCommand(tokens []string) ([]string, error) {
 			return nil, fmt.Errorf("参数含不允许的字符：%s", a)
 		}
 	}
+	// `service logs` 默认是 `docker compose logs -f`（跟随滚动、永不返回）。面板把 dshm
+	// 调用串行化（一把 execMu），一个不返回的命令会占住那把锁直到 15 分钟超时，期间
+	// 启停、重启、切换 dsh 版本全部 409 —— 一个只读的"看日志"按钮就能把面板锁死。
+	// 所以面板一律补上 --no-follow（打印最近 100 行后返回）。
+	// 放在这里而不是 UI 里：面板的日志按钮走 /api/logs，但命令台里手敲
+	// `service logs` 也要被兜住。
+	if key == "service logs" {
+		argv = append(argv, "--no-follow")
+	}
 	return argv, nil
 }

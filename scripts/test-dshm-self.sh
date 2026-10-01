@@ -38,7 +38,7 @@ git push -q "$tmp/remote.git" --tags
 
 # 把 dshm 里被测的函数抽出来
 fnfile="$tmp/fn.sh"
-for fn in dshm_version dshm_tags dshm_latest_tag dshm_tag_sha dshm_raw_url dshm_release_url; do
+for fn in ver_of_tag dshm_version dshm_tags dshm_latest_tag dshm_tag_sha dshm_raw_url dshm_release_url; do
 	awk "/^${fn}\\(\\)/,/^}/" "$root/dshm" >>"$fnfile"
 done
 CLI_NAME=dshm
@@ -58,29 +58,39 @@ else
 	fail "推断不出当前版本，实际 '$v'"
 fi
 
-# 只列 v* tag，且忽略 release-*
+# 只列形如 v<数字>… 或 <数字>… 的 tag（忽略 release-* 等）。
+# **两类都列**：v* 是 dshm 发布 tag，不带 v 的是镜像 tag，用户回退时要用镜像 tag。
 out="$(dshm_tags)"
 n="$(printf '%s\n' "$out" | grep -c . || true)"
 if [ "$n" = "5" ]; then
-	pass "只列出 v* 开头的 tag（5 个，忽略了 release-*）"
+	pass "列出全部版本 tag（5 个，忽略 release-*）"
 else
 	fail "tag 数量应为 5，实际 ${n}：$out"
 fi
 
 # 降序且版本感知：2026.10.1 > 2026.09.30 > 2026.09.10 > 2026.09.9 > 2025.12.31
+# 输出的是**完整 tag 名**（带 v），所以期望值也带 v。
 got="$(printf '%s\n' "$out" | awk '{print $2}' | tr '\n' ' ')"
-want="2026.10.1 2026.09.30 2026.09.10 2026.09.9 2025.12.31 "
+want="v2026.10.1 v2026.09.30 v2026.09.10 v2026.09.9 v2025.12.31 "
 if [ "$got" = "$want" ]; then
 	pass "按版本降序（字符串排序会把 2026.09.9 排在 2026.09.30 前面）"
 else
 	fail "排序不对：$got"
 fi
 
+# dshm_latest_tag 返回**完整 tag 名**（自更新的下载地址与解包目录都依赖它带 v）。
 latest="$(dshm_latest_tag)"
-if [ "$latest" = "2026.10.1" ]; then
-	pass "dshm_latest_tag 取到最新的 tag"
+if [ "$latest" = "v2026.10.1" ]; then
+	pass "dshm_latest_tag 取到最新的完整 tag 名（v2026.10.1）"
 else
-	fail "最新 tag 应为 2026.10.1，实际 '$latest'"
+	fail "最新 tag 应为 v2026.10.1，实际 '$latest'"
+fi
+
+# 版本文本助手：比较与显示要用它去掉 v
+if [ "$(ver_of_tag "$latest")" = "2026.10.1" ]; then
+	pass "ver_of_tag 能去掉 v 前缀（比较/显示用）"
+else
+	fail "ver_of_tag 结果不对：$(ver_of_tag "$latest")"
 fi
 
 # 指定 tag 能查到 sha（回退功能依赖它）
@@ -174,4 +184,59 @@ else
 	fail "CI 里找不到 __VERSION__ 替换逻辑"
 fi
 
+
+# ── 运行时依赖清单必须三处一致 ────────────────────────────────────────────
+# 这个 bug 曾真实发生并已发布到线上：dshm 启动就 source scripts/log.sh、
+# service up 时 source scripts/preflight.sh，但 CI 的打包清单里只有
+# env-config/migrate-home/admin 三个 —— 发布包解包后 `./dshm help` 立刻报
+#   line 37: .../scripts/log.sh: No such file or directory
+# 而 CI 的解包自检用的是同一份不全的清单，所以永远绿、永远发现不了。
+#
+# 现在要求三处指向同一组文件：dshm 的 source 语句、dshm 的包结构校验、
+# CI 的打包 required 清单。下面逐个抽出并比对。
+#
+# 抽取用 awk 而不是精巧的正则：清单里用 `\` 续行跨了两行，正则很难写对。
+# 只认真正的 source 语句（`. ./scripts/x.sh` 或 `. "..."/scripts/x.sh'），
+# 不认注释里提到的文件名 —— 否则会把 release.sh / update-versions.sh 也算进来。
+sourced="$(grep -E '^[[:space:]]*\.[[:space:]]+' "$root/dshm" |
+	grep -oE 'scripts/[a-z-]+\.sh' | sort -u)"
+dshm_list="$(awk '
+	/for f in scripts\// { inlist = 1 }
+	inlist { gsub(/\\/, " "); print }
+	inlist && /; do/ { inlist = 0 }
+' "$root/dshm" | grep -oE 'scripts/[a-z-]+\.sh' | sort -u)"
+ci_list="$(grep -oE 'required="[^"]+"' "$root/.github/workflows/build.yml" |
+	sed 's/required="//; s/"//' | tr ' ' '\n' | grep '^scripts/' | sort -u)"
+
+if [ -n "$sourced" ] && [ "$(printf '%s\n' "$sourced" | wc -l)" -ge 4 ]; then
+	pass "抽出 dshm 的 source 清单（$(printf '%s\n' "$sourced" | wc -l) 个脚本）"
+else
+	fail "dshm 的 source 清单抽出来只有「$(printf '%s' "$sourced" | tr '\n' ' ')」—— 测试前提已变"
+fi
+
+missing=""
+for f in $sourced; do
+	if ! printf '%s\n' "$dshm_list" | grep -qx "$f"; then
+		missing="$missing $f(dshm 校验清单里没有)"
+	fi
+	if ! printf '%s\n' "$ci_list" | grep -qx "$f"; then
+		missing="$missing $f(CI required 清单里没有)"
+	fi
+done
+if [ -z "$missing" ]; then
+	pass "dshm 用到的每个脚本都在 dshm 校验清单与 CI required 清单里"
+else
+	fail "这些运行时依赖没被校验/打包：$missing"
+fi
+
+# 反向：两份清单里的文件必须真实存在，否则打包步骤会自己失败
+ghost=""
+for f in $ci_list $dshm_list; do
+	[ -f "$root/$f" ] || ghost="$ghost $f"
+done
+if [ -z "$ghost" ]; then
+	pass "两份清单里的文件都真实存在"
+else
+	fail "清单里有不存在的文件：$ghost"
+fi
 run_tests

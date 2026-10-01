@@ -116,29 +116,50 @@ dshm_version() {
 # 约定：dshm 的发布 tag 形如 v2026.09.30（带 v 前缀，否则 CI 的 refs/tags/v* 不触发）。
 
 # 列出全部 dshm 发布 tag（降序，最新在前）。取不到就返回非 0。
+# 把 tag 名转成「显示/比较用的版本文本」：去掉可能存在的 v 前导。
+# dshm 的发布 tag 形如 v2026.10.01-2，镜像 tag 形如 0.2.0-rc.2-2026.10.01-3。
+ver_of_tag() { printf '%s' "${1#v}"; }
+
+# 列出发布 tag。输出每行「<sha> <完整 tag 名>」，按版本降序。
+#
+# **同一提交可能同时带两类 tag**（v2026.10.01-2 与 0.2.0-rc.2-2026.10.01-3），
+# 两者都列出来：用户回退时用的是镜像 tag，自更新时用的是 v* tag，缺一不可。
+# 早先这里用 `$2 ~ /^v[0-9]/` 过滤，把镜像 tag 全滤掉了 —— 于是
+# `dshm dshm update --to <镜像tag>` 必然报「无效的版本」，而 README 与 CI 都宣称它能用。
 dshm_tags() {
 	command -v git >/dev/null 2>&1 || return 1
 	local raw
 	raw="$(timeout 20 git ls-remote --tags --refs "$DSHM_REPO_URL" 2>/dev/null)" || return 1
 	printf '%s\n' "$raw" |
-		awk -F'refs/tags/' 'NF==2 && $2 ~ /^v[0-9]/{print $1 "\t" $2}' |
-		while IFS="$(printf '\t')" read -r sha tag; do
-			printf '%s %s\n' "$sha" "${tag#v}"
-		done |
-	# -V（版本感知）而不是普通降序：字符串排序会把 2026.09.9 排在 2026.09.30 前面。
-	# 零填充的日期不受影响，但既然容易踩就一次做对。
+		awk -F'refs/tags/' '
+			NF == 2 && $2 != "" {
+				# 只要形如 v<数字>... 或 <数字>... 的 tag；其它（release-* 等）跳过
+				if ($2 ~ /^v?[0-9]/) print $1 "\t" $2
+			}' |
+		# -V（版本感知）而不是普通降序：字符串排序会把 2026.09.9 排在 2026.09.30 前面。
+		# 镜像 tag 以 dsh 版本开头，排序天然排在当天日期 tag 之前/之后都可能，故对
+		# 「去掉 v 前缀」的文本排序，保证同一天的 tag 相邻。
 		sort -k2,2rV
 }
 
+# 最新发布 tag（完整名）。优先取 v* 形式的 dshm 发布 tag —— 自更新拿的是 dshm 包，
+# 只有 v* tag 一定带包；镜像 tag 也带包（CI 会发），但 v* 更明确。
 dshm_latest_tag() {
-	dshm_tags 2>/dev/null | head -1 | awk '{print $2}'
+	local all
+	all="$(dshm_tags 2>/dev/null || true)"
+	[ -n "$all" ] || return 0
+	printf '%s\n' "$all" | awk '{print $2}' | grep -E '^v[0-9]' | head -1
 }
 
-# 某个 tag 对应的 commit（找不到就返回非 0）
+# 某个 tag 对应的 commit（找不到就返回非 0）。接受带或不带 v 前缀。
 dshm_tag_sha() {
 	local want="$1"
 	command -v git >/dev/null 2>&1 || return 1
-	timeout 20 git ls-remote --tags --refs "$DSHM_REPO_URL" "refs/tags/v${want}" 2>/dev/null |
+	case "$want" in
+	v*) ;;
+	*) want="v${want}" ;;
+	esac
+	timeout 20 git ls-remote --tags --refs "$DSHM_REPO_URL" "refs/tags/${want}" 2>/dev/null |
 		awk 'NR==1{print $1}'
 }
 
@@ -279,21 +300,21 @@ self_update() {
     * 在 git 工作区里：git pull
     * 发布一个版本：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
 		fi
-		info "最新发布版本：v${target}"
+		info "最新发布版本：${target}"
 	fi
 
 	# 确认目标 tag 真实存在（打错版本号时立刻报错，而不是下到一个 404 页面）
 	local sha
 	sha="$(dshm_tag_sha "$target" 2>/dev/null || true)"
 	if [ -z "$sha" ]; then
-		warn "找不到 tag v${target}，已发布的版本："
+		warn "找不到 tag ${target}，已发布的版本："
 		if ! dshm_tags 2>/dev/null | awk '{print $2}' | sed 's/^/        /' ; then
 			printf '        （查询失败，检查网络）\n'
 		fi
 		die "无效的版本：${target}"
 	fi
 
-	if [ "$force" != "1" ] && [ "$cur" = "$target" ]; then
+	if [ "$force" != "1" ] && [ "$(ver_of_tag "$target")" = "$cur" ]; then
 		ok "已经是该版本（v${cur}），无需更新"
 		info "如确实要重新下载，加 --force"
 		return 0
@@ -355,14 +376,23 @@ self_update() {
 
 	# 先在临时目录解包并**全部**验证完，任何一步不过都不碰现有文件
 	tar -xzf "$tgz" -C "$workdir" || die "解包失败（文件可能损坏）"
-	local src="$workdir/dshm-v${target}"
+	# 包内目录名 = dshm-<完整 tag>（CI 用 pkg="dshm-${GITHUB_REF_NAME}" 打包）。
+	# 早先是 `dshm-v${target}`，而 target 那时已被剥掉 v —— 两类命名各错一半。
+	local src="$workdir/dshm-${target}"
 	[ -f "$src/dshm" ] || die "发布包里缺少 dshm（包结构异常）"
+	# 运行时依赖一个都不能少。这份清单必须与 .github/workflows/build.yml 里
+	# 打包自检的 `required=...` 以及 dshm 顶部真正 source 的文件一致 ——
+	# 正是因为这里漏了 log.sh 与 preflight.sh，线上发布包曾开箱即废
+	# （`./dshm help` → line 37: scripts/log.sh: No such file or directory）。
 	local f
-	for f in scripts/env-config.sh scripts/migrate-home.sh scripts/admin.sh; do
-		[ -f "$src/$f" ] || die "发布包里缺少 $f（包结构异常）"
+	for f in scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh \
+		scripts/preflight.sh scripts/admin.sh; do
+		[ -f "$src/$f" ] || die "发布包里缺少 $f（dshm 运行时会 source 它，包结构异常）"
 	done
-	# 语法自检：宁可继续用旧版本，也不能换成跑不起来的脚本
-	bash -n "$src/dshm" 2>/dev/null || die "下载到的 dshm 未通过语法检查，已放弃替换（原文件未改动）"
+	# 每个脚本都过语法检查，而不只是 dshm
+	for f in "$src/dshm" "$src"/scripts/*.sh; do
+		bash -n "$f" 2>/dev/null || die "$(basename "$f") 未通过语法检查，已放弃替换（原文件未改动）"
+	done
 	# 内容自检：确认确实是本项目脚本，而不是错误页 / 代理返回的 HTML
 	grep -q 'dshm dshm' "$src/dshm" || die "下载到的内容不像 dshm（缺少预期特征），已放弃替换"
 
@@ -695,8 +725,8 @@ EOF
 	if [ -n "$cur" ] && [ "$cur" != "$latest" ]; then
 		warn "有新版本可用：$cur → $latest"
 		info "切换版本需要重建镜像（dsh 在构建期装入）："
-		printf '\n      ./dshm version update %s\n\n' "$latest"
-		info "或指定任意版本： ./dshm version update <版本>"
+		info "  本地构建该版本：./dshm version update --build --dsh ${latest}"
+		info "  或先拉已构建的镜像（需镜像 tag，见 ./dshm version list）：./dshm version update --to <镜像tag>"
 	else
 		ok "已经是最新版本"
 	fi
@@ -723,9 +753,9 @@ help_version() {
 ${B}版本${RST} — dsh 版本查询与升级
   dshm version                   看全四个版本：配置里钉的 / 镜像 / 容器内实际运行 / npm 最新
   dshm version list [--all]      列出「已构建的镜像」与「npm 上可装的 dsh 版本」
-  dshm version update            拉取已构建的最新镜像（快，优先）
-  dshm version update --to <镜像tag>
-                                 拉取指定镜像（回退用），如 0.2.0-rc.2-2026.09.30-1
+  dshm version update                  拉取已构建的最新镜像（快，优先）
+  dshm version update --to <镜像tag>   拉取指定镜像（回退用），如 0.2.0-rc.2-2026.09.30-1
+                                 注意：这里要的是**镜像 tag**，不是 dsh 版本号
   dshm version update --build [--dsh <版本>]
                                  本地构建（慢）。不指定 --dsh 就用 npm 上的最新版
 
@@ -991,8 +1021,31 @@ service-restart)
 	;;
 
 service-logs)
+	# 先解析参数、处理 --help，再要求 docker：否则 `./dshm service logs --help`
+	# 在没有 docker 的机器上会报「未找到 docker」，而不是打印用法。
+	follow=1
+	for a in "$@"; do
+		case "$a" in
+		--no-follow) follow=0 ;;
+		-h | --help)
+			cat <<'EOF'
+
+  dshm service logs [--no-follow]
+      默认跟随滚动（Ctrl-C 退出）。
+      --no-follow   只打印最近 100 行后返回（管理面板用：面板把 dshm 调用串行化，
+                    不返回的命令会占住那把锁直到超时，把启停/升级全堵住）
+EOF
+			return 0
+			;;
+		*) die "未知参数：$a（用法：./dshm service logs [--no-follow]）" ;;
+		esac
+	done
 	require_docker
-	docker compose logs -f --tail 100
+	if [ "$follow" = "1" ]; then
+		docker compose logs -f --tail 100
+	else
+		docker compose logs --tail 100
+	fi
 	;;
 
 service-status)
@@ -1340,14 +1393,17 @@ dshm-version)
 	fi
 
 	# 只比 tag：没有 tag 就老实说无法比较，绝不去比 main。
-	latest="$(dshm_latest_tag 2>/dev/null || true)"
+	# dshm_latest_tag 现在返回**完整 tag 名**（形如 v2026.10.01-2），而 cur 是裸版本；
+	# 比较与显示都要用 ver_of_tag 去掉 v，否则永远是「有新版」。
+	latest_tag="$(dshm_latest_tag 2>/dev/null || true)"
+	latest="$(ver_of_tag "$latest_tag")"
 	printf '\n'
 	if [ -z "$latest" ]; then
 		info "尚未发布任何版本 tag，无法比较是否有新版。"
 		info "发布：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
 	elif [ "$cur" = "$latest" ]; then
 		ok "已是最新发布版本（v${latest}）"
-	elif [ -n "$(git -C "$PROJECT_DIR" describe --tags --match "v${latest}" HEAD 2>/dev/null || true)" ]; then
+	elif [ -n "$(git -C "$PROJECT_DIR" describe --tags --match "${latest_tag}" HEAD 2>/dev/null || true)" ]; then
 		# 本地从最新 tag 出发又有新提交（git describe 会给出 v<tag>-<n>-g<sha>）。
 		# 这是**领先**，不能报「有新版」—— 那会误导用户去执行一次回退。
 		ok "本地领先最新发布版本（v${latest} + 尚未发布的提交）"
@@ -1370,15 +1426,25 @@ dshm-list)
 		info "发布：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
 		exit 0
 	fi
-	printf '%s\n' "$tags" | while read -r sha ver; do
-		if [ "$ver" = "$cur" ]; then
-			printf '    %s*%s v%s  ← 当前（%s）\n' "$GRN" "$RST" "$ver" "${sha%"${sha#???????}"}"
-		else
-			printf '      v%s  (%s)\n' "$ver" "${sha%"${sha#???????}"}"
-		fi
+	# tag 现在带完整名（v* 或镜像 tag）。用 v 前缀区分两类，并只对 v* 标「当前」
+	# —— 当前版本号是裸版本，镜像 tag 与它不同名，标在上面会误导。
+	printf '%s\n' "$tags" | while read -r sha tag; do
+		short="${sha%"${sha#???????}"}"
+		case "$tag" in
+		v*)
+			if [ "$(ver_of_tag "$tag")" = "$cur" ]; then
+				printf '    %s*%s %s  ← 当前（%s）\n' "$GRN" "$RST" "$tag" "$short"
+			else
+				printf '      %s  (%s)\n' "$tag" "$short"
+			fi
+			;;
+		*)
+			printf '      %s  (%s)  ← 镜像 tag\n' "$tag" "$short"
+			;;
+		esac
 	done
 	printf '\n'
-	info "装指定版本（可回退）：./dshm dshm update --to <版本>"
+	info "装指定版本（可回退）：./dshm dshm update --to <上面的 tag>"
 	;;
 
 dshm-install)

@@ -60,7 +60,6 @@ func newDshVersionClient() *dshVersionClient {
 	}
 }
 
-
 // all 返回全部版本（semver 升序）与发布标签。
 func (c *dshVersionClient) all(ctx context.Context) ([]string, map[string]string, error) {
 	doc, err := c.fetch(ctx)

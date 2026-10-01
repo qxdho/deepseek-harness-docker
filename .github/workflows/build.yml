@@ -566,12 +566,19 @@ jobs:
           NUM="$(tr -d ' \t\r\n' < VERSION)"
           [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
           # 一致性已在作业开头校验过（那样能在编译 Go 之前就失败），这里不再重复。
-          # 包名从**本次推送的 tag 名**派生，而不是按 VERSION 拼 `v${NUM}`：
-          # 镜像 tag（0.2.0-rc.2-2026.10.01-3）不带 v 前缀，按 VERSION 拼会得到另一个名字，
-          # 于是 `dshm dshm update --to <镜像tag>` 永远 404。
-          # 统一规则：包名 = dshm-<tag>.tar.gz —— tag 名是唯一标识。
-          # 一致性已在作业开头校验过（那样能在编译 Go 之前就失败），这里不再重复。
-          pkg="dshm-${GITHUB_REF_NAME}"
+          # 包名规则：**tag 推送用 tag 名，main 推送回退到 v<VERSION>**。
+          #   * tag 推送（v2026.10.01-2 / 0.2.0-rc.2-2026.10.01-3）→ dshm-<tag>.tar.gz
+          #     直接用 tag 名，`dshm dshm update --to <tag>` 才能对上；按 VERSION 拼的话，
+          #     对不带 v 的镜像 tag 会得到另一个名字 → 404。
+          #   * main 推送（GITHUB_REF_NAME == "main"）→ dshm-v<VERSION>.tar.gz
+          #     此时没有 tag，只能按 VERSION 拼；而且必须与下面「更新 latest release」
+          #     那一步算出的包名完全一致（曾写成 `${GITHUB_REF_NAME}`，main 上就成了
+          #     dshm-main.tar.gz，导致 latest 更新找不到包而失败）。
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            pkg="dshm-${GITHUB_REF_NAME}"
+          else
+            pkg="dshm-v${NUM}"
+          fi
           rm -rf "$pkg"
           mkdir -p "$pkg/scripts"
           sed -e "s|^DSHM_VERSION_RAW=.*|DSHM_VERSION_RAW=\"\${DSHM_VERSION:-${NUM}}\"|" \

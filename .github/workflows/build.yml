@@ -20,6 +20,10 @@ on:
         description: '要删除的 GHCR tag 前缀（如 sha- 或 staging-，按前缀批量删）'
         required: false
         default: ''
+      confirm:
+        description: '要真正执行删除，必须在这里手打 DELETE（防手滑；不填则只做常规构建/检查和预览）'
+        required: false
+        default: ''
 
 # 同一个 ref 上不并行跑两次（后到的排队），但**不取消正在运行的运行**：
 # 多架构构建被半路掐断，GHCR 上可能只推了一半的 tag，比排队更糟。
@@ -380,8 +384,18 @@ jobs:
   # 都是 unknown）。下面的 awk 会**逐一看过 version 的全部 tag**，只要有一个不在
   # 「允许删」的集合里就整条跳过并打印 SKIP。
   cleanup-versions:
+    # 三个条件缺一不可：
+    #   1. 手动触发
+    #   2. 给了要删的目标（精确名或前缀）
+    #   3. **confirm 必须手打 DELETE**
+    #
+    # 第 3 条是加这道闸门的原因：不可逆的批量删除不该"点一下就跑"。曾经因为
+    # "tag 列表里含 sha-* 就删整条 version"的错误假设，一次 operation 把整个包的
+    # 镜像版本删光了（详见 cleanup 步骤里的说明）。把确认词做成一个**必须手动输入**
+    # 的输入框，能让任何人在按下运行前再想一次"我要删的到底是什么"。
     if: |
       github.event_name == 'workflow_dispatch' &&
+      inputs.confirm == 'DELETE' &&
       (inputs.delete_tags != '' || inputs.delete_prefix != '')
     runs-on: ubuntu-latest
     permissions:

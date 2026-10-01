@@ -87,11 +87,10 @@ jobs:
   # 依赖 smoke：串行后总墙钟更短（不做两遍重复构建），而且不会把冒烟没过的镜像
   # 推成 latest。`changes` 也必须列进 needs —— 引用了它的 output 就得声明依赖。
   build:
-    needs: [changes, smoke]
+    needs: changes
     if: |
       github.event_name != 'pull_request' &&
       needs.changes.outputs.code == 'true' &&
-      needs.smoke.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -145,11 +144,36 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # 一次构建、先推「待检」tag → 拉下来跑冒烟 → 通过后才打正式 tag。
+      #
+      # 为什么不再用两次构建（原来 checks 用 load:true 构建一遍测试、build 再构建一遍
+      # 推送）：那是同一个镜像构建两次，白白多花一倍时间。这里只构建一次，而且
+      # **跑冒烟的就是将要发布的那个 digest** —— 不存在「测的是一份、推的是另一份」的风险。
+      #
+      # 待检 tag 带 run id，并发 run 之间互不干扰，用完即删。
+      - name: 构建并推送到待检 tag
+        id: stage
+        run: |
+          set -euo pipefail
+          staging="${REGISTRY}/${IMAGE_NAME}:staging-${GITHUB_RUN_ID}"
+          echo "staging=${staging}" >> "$GITHUB_OUTPUT"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            --tag "$staging" \
+            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+          echo "已推送待检镜像：${staging}"
+
+      - name: 拉取待检镜像（amd64）并跑冒烟
+        run: |
+          set -euo pipefail
+          # 冒烟脚本要求镜像已在本地（只在镜像不存在时它才会自己构建）
+          docker pull --platform linux/amd64 "${{ steps.stage.outputs.staging }}"
+          ./scripts/smoke-test.sh "${{ steps.stage.outputs.staging }}"
 
       - id: meta
         uses: docker/metadata-action@v5
@@ -162,76 +186,49 @@ jobs:
             # 精确到提交，便于排查；同一提交重复构建内容可能不同，故不作为版本依据
             type=sha,format=short
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            DSH_VERSION=${{ steps.ver.outputs.dsh }}
-            DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: 打正式 tag（只改引用，不重新构建）
+        run: |
+          set -euo pipefail
+          staging="${{ steps.stage.outputs.staging }}"
+          while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            echo "  ${staging}  →  ${t}"
+            docker buildx imagetools create --tag "$t" "$staging"
+          done <<TAGS
+          ${{ steps.meta.outputs.tags }}
+          TAGS
 
-  # 单架构构建 + 真实起容器冒烟（PR 也跑）
-  smoke:
+      - name: 清理待检 tag
+        if: always()
+        run: |
+          # 用完即删。tag 里带 run id，不会动到并发 run 正在用的那份。
+          docker buildx imagetools rm "${{ steps.stage.outputs.staging }}" 2>/dev/null \
+            && echo "已清理待检 tag" \
+            || echo "待检 tag 已不存在或无法删除（无碍：它只是临时引用）"
+  # 静态检查与离线测试 —— 不需要 docker、也不构建镜像。
+  #
+  # 与 build 作业并行：build 负责「构建镜像 → 推送前跑冒烟 → 打正式 tag」，
+  # 本作业只管纯静态/离线检查，两者互不依赖。
+  checks:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 读取内置版本
-        id: ver
-        run: |
-          set -euo pipefail
-          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
-          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
-          # 读不到就会生成空 tag / 空构建参数（装成 latest），必须在这里就失败
-          [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
-          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
-          echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
-          echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: admin/go.mod
 
-      - uses: docker/setup-buildx-action@v3
 
       # 离线检查先跑：不需要 docker，几秒出结果，避免白等一轮镜像构建。
-      - name: 工作区预检离线测试
-        run: |
-          chmod +x scripts/preflight.sh scripts/test-preflight.sh
-          ./scripts/test-preflight.sh
-
-      - name: .env 配置项逻辑测试
-        run: |
-          chmod +x scripts/env-config.sh scripts/test-env-config.sh
-          ./scripts/test-env-config.sh
-
-      - name: 旧卷迁移逻辑测试
-        run: |
-          chmod +x scripts/migrate-home.sh scripts/test-migrate-home.sh
-          ./scripts/test-migrate-home.sh
-
-      - name: dsh 版本解析测试
-        run: |
-          chmod +x scripts/test-dshm-versions.sh
-          ./scripts/test-dshm-versions.sh
-
-      - name: dshm 自身版本与 tag 测试
-        run: |
-          chmod +x scripts/test-dshm-self.sh
-          ./scripts/test-dshm-self.sh
-
-      - name: 版本更新脚本测试
-        run: |
-          chmod +x scripts/update-versions.sh scripts/test-update-versions.sh
-          ./scripts/test-update-versions.sh
-
+      #
+      # 由 scripts/test-all.sh 自动发现并运行 scripts/test-*.sh —— 原来这里是 6 个
+      # 逐字重复的步骤（各自 `chmod +x a.sh && ./b.sh`），新增测试还要记得加步骤。
+      # 现在新增脚本会被自动跑到，CI 侧只有一个步骤。
+      - name: 离线测试（自动发现 scripts/test-*.sh）
+        run: ./scripts/test-all.sh -v
       - name: 管理面板离线测试
         if: needs.changes.outputs.admin == 'true'
         run: |
@@ -281,25 +278,6 @@ jobs:
         run: |
           cd proxy
           npm install --omit=dev --no-fund --no-audit
-          node test-inject.js
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          load: true
-          tags: dsh-test:smoke
-          build-args: |
-            DSH_VERSION=${{ steps.ver.outputs.dsh }}
-            DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}
-          cache-from: type=gha
-
-      - name: 冒烟测试
-        run: |
-          chmod +x scripts/smoke-test.sh
-          ./scripts/smoke-test.sh dsh-test:smoke
-
-  # 打 tag 时发布宿主用的静态二进制，供 ./dshm admin install（宿主模式）下载
   # 管理面板二进制。安装脚本从 releases/latest/download/... 拉取，所以**必须**在推
   # main 时也发布 —— 只在打 tag 时发的话，没有 tag 的仓库永远没有可下载的产物，
   # `dshm admin install` 就会一路回退到「本机 Go 构建」并最终失败。
@@ -316,6 +294,23 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      # 一致性校验放在最前面：tag 必须等于 v + VERSION。
+      #
+      # 包名、release 下载地址、脚本里写死的版本号全从这一个号派生。两者脱节（例如 tag 是
+      # v2026.10.01-1 而 VERSION 还是 2026.10.01）会发出一个「包名对不上、自更新 404」的
+      # release —— 而且从产物上很难看出来。放最前面是为了在**编译 Go 之前**就失败。
+      - name: 校验 tag 与 VERSION 一致
+        run: |
+          set -eu
+          NUM="$(tr -d ' \t\r\n' < VERSION)"
+          [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${NUM}" ]; then
+            echo "::error::tag 与 VERSION 不一致：tag=${GITHUB_REF_NAME}，VERSION=${NUM}（应为 v${NUM}）" >&2
+            echo "  发布流程：先改 VERSION 并提交，再打同名 tag。" >&2
+            exit 1
+          fi
+          echo "版本一致性 OK（VERSION=${NUM}，ref=${GITHUB_REF_NAME:-$GITHUB_REF_TYPE}）"
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: admin/go.mod
@@ -353,19 +348,7 @@ jobs:
           NUM="$(tr -d ' \t\r\n' < VERSION)"
           [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
           VER="v${NUM}"
-          # 拒绝点：tag 名必须就是 v + VERSION 的内容。
-          #
-          # 为什么必须一致：包名、release 下载地址、脚本里写死的版本号全都从这一个号
-          # 派生。一旦 tag 与 VERSION 脱节（例如 tag 是 v2026.10.01-1 而 VERSION 还是
-          # 2026.10.01），发出来的包叫 dshm-v2026.10.01.tar.gz，而脚本会去请求
-          # .../v2026.10.01-1/dshm-v2026.10.01-1.tar.gz —— 404，自更新直接坏掉。
-          # 这种不一致极难从产物上看出来，所以在这里直接失败。
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$VER" ]; then
-            echo "::error::tag 与 VERSION 不一致：tag=${GITHUB_REF_NAME}，VERSION=${NUM}（应为 v${NUM}）" >&2
-            echo "  发布流程：先改 VERSION 并提交，再打同名 tag。同一天第二次发布就把 VERSION 写成 2026.10.01-1。" >&2
-            exit 1
-          fi
-          echo "版本：${NUM}（tag ${GITHUB_REF_NAME:-$VER}）"
+          # 一致性已在作业开头校验过（那样能在编译 Go 之前就失败），这里不再重复。
           pkg="dshm-${VER}"
           rm -rf "$pkg"
           mkdir -p "$pkg/scripts"

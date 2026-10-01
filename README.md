@@ -643,11 +643,33 @@ DSH_WORKSPACE_HOST=$HOME/dsh-workspace
 - **流程**：Fork → 新建分支 → 提交改动 → 创建 PR
 - **提交信息**：遵循 [Conventional Commits](https://www.conventionalcommits.org/)（`feat:` / `fix:` / `docs:` / `chore:`）
 - **改动前**：先跑一遍离线测试，确认没有回归
+  - **改动前**：跑一遍离线测试（自动发现 `scripts/test-*.sh`），确认没有回归
 
-  ```bash
-  ./scripts/test-preflight.sh && ./scripts/test-env-config.sh && \
-  ./scripts/test-migrate-home.sh && (cd proxy && node test-inject.js)
-  ```
+    ```bash
+    ./scripts/test-all.sh
+    ```
+
+### 维护者：发布一个版本
+
+发布是维护者动作，**不在 `dshm` 里** —— 普通用户既没有推送权限，也不该关心 tag 和
+release。用 `scripts/release.sh`：
+
+```bash
+./scripts/release.sh --dry-run    # 先看它要做什么
+./scripts/release.sh              # 自动取当天日期；当天已发过则自动加 -1/-2
+./scripts/release.sh 2026.10.02   # 指定版本号
+```
+
+它会依次：预检（分支 / 工作区 / 与远端同步 / tag 未占用）→ 写 `VERSION` → 提交 →
+打同名 tag → 推送 → 等 CI 产出 release。
+
+> [!IMPORTANT]
+> **tag 名必须等于 `v` + `VERSION` 的内容**（CI 强制校验）。包名、release 下载地址、
+> 脚本里写死的版本号全都从这一个号派生 —— 两者脱节会发出一个「自更新 404」的 release。
+> 详见 [DESIGN.md](DESIGN.md) 第 10 节。
+
+**镜像不用手动打 tag**：推 `main` 时 CI 自动构建，并以 `<dsh版本>-<日期>-<序号>`
+（如 `0.2.0-rc.2-2026.10.01-1`）推送，序号保证同一天多次构建互不覆盖、可回退。
 
 ## 许可证
 

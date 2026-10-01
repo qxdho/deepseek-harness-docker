@@ -1,11 +1,3 @@
-<p align="center">
-  <b>deepseek-harness-docker</b><br/>
-  <sub>Package DeepSeek Harness into a one-command Docker service with a built-in login gate</sub>
-</p>
-
-<p align="center">
-  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-b8863b?style=flat-square&labelColor=101f38"></a>
-  <a href="https://github.com/qxdho/deepseek-harness-docker/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/qxdho/deepseek-harness-docker?style=flat-square&labelColor=101f38&color=b8863b"></a>
   <a href="https://github.com/qxdho/deepseek-harness-docker/issues"><img alt="Issues" src="https://img.shields.io/github/issues/qxdho/deepseek-harness-docker?style=flat-square&labelColor=101f38&color=b8863b"></a>
   <a href="./SECURITY.md"><img alt="Security" src="https://img.shields.io/badge/security-policy-b8863b?style=flat-square&labelColor=101f38"></a>
 </p>
@@ -681,11 +673,34 @@ Pull Request.
 - **Process**: Fork → create a branch → commit → open a PR
 - **Commit messages**: follow [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:` / `fix:` / `docs:` / `chore:`)
-- **Before changing code**: run the offline tests to make sure there are no regressions
+- **Before changing code**: run the offline tests (auto-discovers `scripts/test-*.sh`)
 
   ```bash
-  ./scripts/test-preflight.sh && ./scripts/test-env-config.sh && \
-  ./scripts/test-migrate-home.sh && (cd proxy && node test-inject.js)
+  ./scripts/test-all.sh
+  ```
+
+### Maintainers: cutting a release
+
+Releasing is a maintainer action and is **not part of `dshm`** — regular users have no push
+access and should not need to think about tags or releases. Use `scripts/release.sh`:
+
+```bash
+./scripts/release.sh --dry-run    # see what it would do first
+./scripts/release.sh              # today's date; auto -1/-2 if already released today
+./scripts/release.sh 2026.10.02   # explicit version
+```
+
+It then: pre-flight (branch / clean tree / in sync / tag free) → write `VERSION` → commit →
+tag with the same name → push → wait for CI to publish the release.
+
+> [!IMPORTANT]
+> **The tag name must equal `v` + the contents of `VERSION`** (CI enforces this). The package
+> name, the release download URL and the version baked into the script all derive from that one
+> number — if they drift you publish a release whose self-update 404s. See DESIGN.md section 10.
+
+**Images need no manual tag**: a push to `main` builds one and pushes it as
+`<dsh version>-<date>-<sequence>` (e.g. `0.2.0-rc.2-2026.10.01-1`); the sequence keeps multiple
+builds on the same day from overwriting each other, so rollbacks stay possible.
   ```
 
 ## License

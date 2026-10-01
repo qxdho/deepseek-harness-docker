@@ -4,10 +4,10 @@
 set -euo pipefail
 PORT="${PROXY_PORT:-3080}"
 
-code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/auth/login" || true)"
+code="$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/auth/login" || true)"
 [ "$code" = "200" ] && exit 0
 
-code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/" || true)"
+code="$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/" || true)"
 case "$code" in 200 | 302 | 401) exit 0 ;; esac
 
 exit 1

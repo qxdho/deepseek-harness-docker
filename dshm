@@ -304,6 +304,24 @@ self_update() {
 		info "最新发布版本：${target}"
 	fi
 
+	# ── tag 归一化：统一成**带 v 的完整 tag** ────────────────────────────────
+	#
+	# 这是全脚本唯一的规范形态。`dshm_latest_tag` 返回的就是带 v 的完整 tag，而用户
+	# 敲 `--to 2026.10.01-3` 时是裸版本 —— 两者必须在这里归一，否则下游会各错一半：
+	#   * `v${target}` 拼出 `vv2026.10.01-3`（release URL 404，实测）；
+	#   * `$cur != $target` 拿裸版本比带 v 的，恒真（"已是该版本"的提示永不出现）；
+	#   * `dshm-v${target}` 包名拼错。
+	# 之前这些地方各自 `v${target}`，就是因为归一化缺失。
+	case "$target" in
+	v*) ;;
+	*) target="v${target}" ;;
+	esac
+	# cur 也归一（它来自 dshm_version，可能带或不带 v）
+	case "$cur" in
+	v*) ;;
+	*) cur="v${cur}" ;;
+	esac
+
 	# 确认目标 tag 真实存在（打错版本号时立刻报错，而不是下到一个 404 页面）
 	local sha
 	sha="$(dshm_tag_sha "$target" 2>/dev/null || true)"
@@ -316,7 +334,7 @@ self_update() {
 	fi
 
 	if [ "$force" != "1" ] && [ "$(ver_of_tag "$target")" = "$cur" ]; then
-		ok "已经是该版本（v${cur}），无需更新"
+		ok "已经是该版本（${cur}），无需更新"
 		info "如确实要重新下载，加 --force"
 		return 0
 	fi
@@ -326,7 +344,7 @@ self_update() {
 	if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1 && [ "$allow_stale" != "1" ]; then
 		warn "当前目录是 git 工作区，推荐用 git pull 更新"
 		if [ "$cur" != "$target" ]; then
-			warn "若继续，会用 v${target} 的 dshm 覆盖你工作树里的文件（含 tag 之后的提交改动）"
+			warn "若继续，会用 ${target} 的 dshm 覆盖你工作树里的文件（含 tag 之后的提交改动）"
 		fi
 		die "已停下以免覆盖你的本地改动。
       确认要继续：./dshm dshm update --to ${target} --allow-stale"
@@ -355,7 +373,7 @@ self_update() {
 	if ! curl -fsSL -o "$tgz" "$tgz_url"; then
 		rm -f "$tgz"
 		die "下载失败：$tgz_url
-      tag v${target} 的 release 里可能还没有 dshm 发布包（CI 尚未发布完成）。
+      tag ${target} 的 release 里可能还没有 dshm 发布包（CI 尚未发布完成）。
       也可用镜像地址：DSHM_REPO 指向你的 fork / 内网镜像"
 	fi
 
@@ -425,8 +443,8 @@ self_update() {
 			cp "$src/scripts/"*.sh "$PROJECT_DIR/scripts/" ||
 			die "安装失败"
 	fi
-	ok "已更新到 v${target}：$curfile（含 scripts/ 依赖）"
-	[ "$cur" != "$target" ] && info "版本：v${cur} → v${target}"
+	ok "已更新到 ${target}：$curfile（含 scripts/ 依赖）"
+	[ "$cur" != "$target" ] && info "版本：${cur} → ${target}"
 	info "仓库：$DSHM_REPO_URL"
 }
 

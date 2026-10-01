@@ -416,42 +416,55 @@ jobs:
 
           # **必须翻页**：默认一页 100 条，而 sha-* 曾堆到 92 个；只取第一页会静默漏删。
           # 每条输出「id<TAB>逗号分隔的全部 tag」。
-          plan="$(gh api "${api}?per_page=100" --paginate \
-            --jq '.[] | [.id, ((.metadata.container.tags // []) | join(","))] | @tsv' 2>/dev/null |
-            awk -F'\t' -v want="$DELETE_TAGS" -v pre="$DELETE_PREFIX" '
-              {
-                id = $1; tags = $2
-                n = split(want, arr, " ")
-                m = split(tags, one, ",")
+          #
+          # `|| true` + 显式判空：没有它时 `gh api` 一失败（token 权限、仓库名写错），
+          # `set -o pipefail` 会让这一步**静默退出、日志里一个字都没有**（实测）。
+          raw="$(gh api "${api}?per_page=100" --paginate \
+            --jq '.[] | [.id, ((.metadata.container.tags // []) | join(","))] | @tsv' 2>/dev/null || true)"
+          if [ -z "$(printf '%s' "$raw" | tr -d '[:space:]')" ]; then
+            echo "::error::取不到 package versions（token 权限不足？仓库名不对？）—— 已中止，没有删除任何东西"
+            exit 1
+          fi
 
-                # ① 这条 version 有没有命中（精确名或前缀）
-                hit = ""
-                for (i = 1; i <= m; i++) {
-                  t = one[i]
-                  if (t == "") continue
-                  for (j = 1; j <= n; j++) if (arr[j] != "" && t == arr[j]) { hit = t; break }
-                  if (hit == "") continue
-                  break
-                }
-                if (hit == "" && pre != "") {
-                  for (i = 1; i <= m; i++) if (one[i] != "" && index(one[i], pre) == 1) { hit = one[i]; break }
-                }
-                if (hit == "") next
+          # ⚠ 匹配规则**刻意保持简单**：精确名，或"以给定前缀开头"。
+          #
+          # 我试过加"前缀到边界"的细化（要求 `sha-` 后面必须是数字，想避免 `amd64-1`
+          # 命中 `amd64-12345`），结果把 `sha-aaa` 这类正常标签也挡掉了 —— 前缀删除直接
+          # 失效。清理入口的语义本来就是"删所有以它开头的"，宽松匹配 + ② 的安全闸门才是
+          # 正确分工。**会不可逆删数据的路径不要加未经验证的"聪明"规则。**
+          plan="$(printf '%s\n' "$raw" | awk -F'\t' -v want="$DELETE_TAGS" -v pre="$DELETE_PREFIX" '
+            {
+              id = $1; tags = $2
+              n = split(want, arr, " ")
+              m = split(tags, one, ",")
 
-                # ② 安全闸门：它的**每个** tag 都必须属于「允许删」的集合
-                blocked = ""
-                for (i = 1; i <= m; i++) {
-                  t = one[i]
-                  if (t == "") continue
-                  ok = 0
-                  for (j = 1; j <= n; j++) if (arr[j] != "" && t == arr[j]) { ok = 1; break }
-                  if (!ok && pre != "" && index(t, pre) == 1) ok = 1
-                  if (!ok) { blocked = t; break }
-                }
-                if (blocked != "") { printf "SKIP\t%s\t%s\t%s\n", id, hit, blocked; next }
-                printf "DEL\t%s\t%s\n", id, hit
-              }')"
+              # ① 这条 version 有没有命中（精确名或前缀）
+              hit = ""
+              for (i = 1; i <= m; i++) {
+                t = one[i]
+                if (t == "") continue
+                for (j = 1; j <= n; j++) if (arr[j] != "" && t == arr[j]) { hit = t; break }
+                if (hit == "") continue
+                break
+              }
+              if (hit == "" && pre != "") {
+                for (i = 1; i <= m; i++) if (one[i] != "" && index(one[i], pre) == 1) { hit = one[i]; break }
+              }
+              if (hit == "") next
 
+              # ② 安全闸门：它的**每个** tag 都必须属于「允许删」的集合
+              blocked = ""
+              for (i = 1; i <= m; i++) {
+                t = one[i]
+                if (t == "") continue
+                ok = 0
+                for (j = 1; j <= n; j++) if (arr[j] != "" && t == arr[j]) { ok = 1; break }
+                if (!ok && pre != "" && index(t, pre) == 1) ok = 1
+                if (!ok) { blocked = t; break }
+              }
+              if (blocked != "") { printf "SKIP\t%s\t%s\t%s\n", id, hit, blocked; next }
+              printf "DEL\t%s\t%s\n", id, hit
+            }')"
           dels="$(printf '%s\n' "$plan" | awk -F'\t' '$1 == "DEL"')"
           skips="$(printf '%s\n' "$plan" | awk -F'\t' '$1 == "SKIP"')"
 

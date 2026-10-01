@@ -306,7 +306,7 @@ directory.
 
 ```bash
 ./dshm dshm update                 # install the newest published version
-./dshm dshm update --to <version>  # install / roll back to a specific one, e.g. --to 2026.10.01
+./dshm dshm update --to <tag>       # install / roll back to a specific one, e.g. --to v2026.10.01-3
 ```
 
 **Tags only — never `main`**, so you can never pull a commit you have not decided to release.

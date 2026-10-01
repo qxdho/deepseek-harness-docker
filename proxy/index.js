@@ -167,7 +167,23 @@ function rewriteIncomingHeaders(req) {
   // 删掉 Expect：否则 http-proxy 走的是"等上游 100"的分支，而我们已经把
   // Content-Length 之类都定好了；同时避免上游 100-continue 与我们的改写竞争。
   delete h.expect;
-  for (const name of HOP_BY_HOP) delete h[name];
+  // 删掉 hop-by-hop 头。**但升级请求必须放过 `connection` 与 `upgrade`**：
+  // 这两条正是 WebSocket 握手需要的 —— Node 的 http.request 只在 `connection` 含
+  // `upgrade`（或存在 `upgrade` 头）时才发真正的升级请求。无条件删掉它们，上游收到的
+  // 就是普通 GET、升级被降级，实时通道（dsh 的 /api/remote.mux）彻底不可用。
+  //
+  // 我加这段时正是无条件删的，造成过一次真回归；而且**普通 HTTP 用例全都照样通过**，
+  // 只有专门发裸 socket 升级请求的用例才抓得到（见 test-inject.js 第 18 条）。
+  const isUpgrade = /(^|,)\s*upgrade\s*($|,)/i.test(String(h.connection || ''));
+  for (const name of HOP_BY_HOP) {
+    if (isUpgrade && (name === 'connection' || name === 'upgrade')) continue;
+    delete h[name];
+  }
+  if (isUpgrade) {
+    // 规范化成小写值：有些客户端写 `Connection: upgrade` 或带额外 token
+    h.connection = 'Upgrade';
+    h.upgrade = 'websocket';
+  }
   // accept-encoding 固定为 identity：注入逻辑不做压缩，这样上游直接给明文
   h['accept-encoding'] = 'identity';
 }

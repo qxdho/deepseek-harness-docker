@@ -271,6 +271,17 @@ grep -q '^run ' "$FAKE/calls" && pass "并确实执行了复制" || fail "没有
 new_case multi-project-2
 set_dest
 reset_fake alpha_dsh-home beta_dsh-home
+# **必须在 reset_fake 之后**写入 marker：reset_fake 会重建（清空）$FAKE/src，
+# 顺序反了就是"往空目录里复制"，下面两条污染断言会变成假通过 —— 上一版正是如此：
+# 把 legacy_dsh_home_volume 换回旧的 `| head -n1` 任取，这两条照样 PASS。
+printf 'alpha-project-secret\n' >"$FAKE/src/settings.yaml"
+printf 'alpha-only\n' >"$FAKE/src/alpha-marker.txt"
+# 自检：marker 必须真的存在于"源卷"里，否则后面的断言没有意义
+if [ -f "$FAKE/src/alpha-marker.txt" ]; then
+	pass "夹具就绪：源卷里有只属于别的项目的 marker"
+else
+	fail "夹具错误：源卷里没有 marker（污染断言会假通过）"
+fi
 rc=0
 out7="$(migrate_legacy_home explicit 2>&1)" || rc=$?
 [ "$rc" != "0" ] && pass "多候选且无法判断时 explicit 模式报错退出（rc=$rc）" \
@@ -290,10 +301,10 @@ if [ -z "$(ls -A "$(dst_of)" 2>/dev/null)" ]; then
 else
 	fail "多候选却写了数据：$(ls -A "$(dst_of)" | tr '\n' ' ')"
 fi
-if [ -f "$(dst_of)/settings.yaml" ]; then
-	fail "把别的项目的数据（settings.yaml）迁进来了"
+if [ -f "$(dst_of)/alpha-marker.txt" ] || [ -f "$(dst_of)/settings.yaml" ]; then
+	fail "把别的项目的数据迁进来了：$(ls -A "$(dst_of)" | tr '\n' ' ')"
 else
-	pass "别的项目的数据没有被写入目标"
+	pass "别的项目的数据（含 marker）没有被写入目标"
 fi
 
 # 7c. 只有一个候选时照常自动迁移（不能因为加了守卫就不干活）

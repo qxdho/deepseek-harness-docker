@@ -76,7 +76,11 @@ admin_locate_bin() {
 		local ver
 		ver="$(dshm_latest_tag 2>/dev/null || true)"
 		if [ -n "$ver" ]; then
-			url="https://github.com/qxdho/deepseek-harness-docker/releases/download/v${ver}/dsh-admin-linux-${arch}"
+			# dshm_latest_tag 返回的是**带 v 的完整 tag**（如 v2026.10.01-3）。
+			# 这里**不要**再手写一个 v —— 那会拼成 vv2026.10.01-3，实测 404，
+			# 然后静默退回 releases/latest（那是跟随 main 的移动 release），
+			# "面板与 dshm 同版本"被悄悄破坏，还会打一句误导的"release 里没有产物"。
+			url="https://github.com/qxdho/deepseek-harness-docker/releases/download/${ver}/dsh-admin-linux-${arch}"
 		else
 			url="https://github.com/qxdho/deepseek-harness-docker/releases/latest/download/dsh-admin-linux-${arch}"
 		fi

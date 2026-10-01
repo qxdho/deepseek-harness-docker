@@ -55,7 +55,7 @@ extract() {
 		}
 		# 单行形态：`run: <命令>`。**也要抽** —— 以前只认 `run: |`，于是单行 run 里的
 		# shell 问题（语法错误、孤儿片段）从来没被本地检查过（当前有 4 处）。
-		/^[[:space:]]*run: [^|]/ {
+		/^[[:space:]]*run: [^|>]/ {
 			match($0, /^[[:space:]]*/); n++
 			cmd = $0
 			sub(/^[[:space:]]*run: /, "", cmd)
@@ -129,27 +129,15 @@ for f in "${files[@]}"; do
 		ok "$name：$n 个内嵌脚本块语法正确"
 	fi
 
-	# SC2015 形态（`A && B || C` 不是 if-then-else）。**只扫抽出来的 run: 块**：
-	# 早先这里 grep 的是整个 workflow YAML，于是 GitHub Actions 的合法表达式
-	# `if: a && b || c` 会被判成问题并让本检查失败（假红）。YAML 里的 if: 是
-	# GH Actions 表达式语言，不是 shell，SC2015 根本不适用。
-	sc_lines=""
-	i=1
-	while [ "$i" -le "$n" ]; do
-		blk="$tmp/$name/b$i"
-		if [ -s "$blk" ]; then
-			found="$(grep -nE '^[[:space:]]*[^#[:space:]].*(&&.*\|\||\|\|.*&&)' "$blk" 2>/dev/null || true)"
-			if [ -n "$found" ]; then
-				sc_lines="${sc_lines}${sc_lines:+$'\n'}第 ${i} 块：${found}"
-			fi
-		fi
-		i=$((i + 1))
-	done
-	if [ -n "$sc_lines" ]; then
-		fails=$((fails + 1))
-		warn "$name：发现 SC2015 形态（与运算接或运算不是 if-then-else）"
-		printf '%s\n' "$sc_lines" | sed 's/^/        /'
-	fi
+	# ⚠ 这里**故意不做** SC2015（`A && B || C`）的启发式扫描。
+	#
+	# 曾经有一条：对整个抽取块裸扫 `&& … || …`。问题是它不分语言 —— 抽取块里既有
+	# shell 也有 awk/内联脚本，一条合法的 awk 表达式 `a && b || c` 会被判成 shell 的
+	# SC2015，让本检查变红。**为了让它闭嘴，我甚至去改了那行生产 awk 的写法** ——
+	# 检查工具逼着代码变形，这比漏报更糟。
+	#
+	# 这条规则本来就由 shellcheck（SC2015）真实覆盖：下面就是逐块跑 shellcheck 的
+	# 步骤，它按 shell 语法解析、不会误判 awk。少一条启发式不会漏东西。
 done
 
 # ── 作业级 if 的语义检查（YAML 合法 ≠ 条件写对）────────────────────────────

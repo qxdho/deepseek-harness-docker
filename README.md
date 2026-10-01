@@ -297,7 +297,7 @@ npm 最新：        0.2.0-rc.2      ← 可以要什么
 
 ```bash
 ./dshm dshm update                 # 装最新已发布版本
-./dshm dshm update --to <版本>      # 装/回退到指定版本，如 --to 2026.10.01
+./dshm dshm update --to <tag>         # 装/回退到指定版本，如 --to v2026.10.01-3（裸版本也可以，会补 v）
 ```
 
 **只认 tag，绝不跟随 main** —— 以免装到你还没决定发布的中间提交。在 git 工作区里请用

@@ -164,7 +164,7 @@ for i in $(seq 1 60); do
 	if curl -fsSL -o /dev/null --max-time 20 "$url" 2>/dev/null; then
 		printf '\n'
 		ok "发布包已就绪：dshm-${tag}.tar.gz"
-		info "验证：./dshm dshm list && ./dshm dshm update --to ${want}"
+		info "验证：./dshm dshm list && ./dshm dshm update --to ${tag}"
 		exit 0
 	fi
 	printf '\r    等待发布包…（%ds）' "$((i * 15))"

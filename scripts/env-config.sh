@@ -148,9 +148,11 @@ normalize_defaults() {
 	fi
 }
 
-# 键是否存在（哪怕值为空）
+# 键是否存在（哪怕值为空）。
+# `^[[:space:]]*` 与 get_env 保持一致 —— 不一致会让"有缩进的键"在 get_env 里能读到、
+# 在 has_key 里却判为不存在（migrate_legacy_keys 会因此静默跳过改名）。
 has_key() {
-	grep -qE "^$1=" "$ENV_FILE" 2>/dev/null
+	grep -qE "^[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null
 }
 
 # ── 生效配置汇总 ────────────────────────────────────────────────────────────
@@ -250,9 +252,12 @@ rewrite_env_atomic() { # <命令> [参数…]
 
 set_env() {
 	local k="$1" v="$2"
+	# 正则 `^[[:space:]]*k=` 与 get_env/has_key 一致：否则 `.env` 里写成
+	# `  DSH_HTTP_PORT=3080` 时，get_env 读到 3080、set_env 却新加一行 ——
+	# "写进去了但读到的还是旧值"，看起来像没生效。
 	K="$k" V="$v" rewrite_env_atomic awk '
 		BEGIN { d=0; k=ENVIRON["K"]; v=ENVIRON["V"] }
-		$0 ~ ("^" k "=") { print k "=" v; d=1; next }
+		$0 ~ ("^[[:space:]]*" k "=") { print k "=" v; d=1; next }
 		{ print }
 		END { if (!d) print k "=" v }
 	'
@@ -260,7 +265,7 @@ set_env() {
 
 unset_env() {
 	local k="$1"
-	K="$k" rewrite_env_atomic awk '$0 !~ ("^" ENVIRON["K"] "=")'
+	K="$k" rewrite_env_atomic awk '$0 !~ ("^[[:space:]]*" ENVIRON["K"] "=")'
 }
 
 # 示例文件里的占位符等同于「未配置」

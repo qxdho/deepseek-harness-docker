@@ -225,10 +225,13 @@ case "$DSH_AUTH_TOTP" in off | optional | required) ;; *) die "DSH_AUTH_TOTP 只
 # 本脚本前面专门为 ENOSPC 做了预检，可真写满时 `cat >` 会留下一个**空或半截**的
 # cordis.patch.yml（mode: password 丢了），容器随即进重启循环 —— 明明只是磁盘满了。
 # 另外 DSH_PUBLIC_HOST / DSH_CLIENT_IP_HEADER 会被插进 YAML，必须校验字符集，
-# 否则一个带双引号的 publicHost 就能生成非法 YAML（实测 `evil".example.com` 会写出
-# `publicHost: "evil".example.com"`）。
+# 允许集：字母数字 + `.` `:` `_` `-` + **方括号**。
+# 方括号是 IPv6 字面量的一部分（`[::1]:3080` 是合法 authority），漏掉它会让
+# 用 IPv6 反代的人直接起不来；而 `2001:db8::1`（不带方括号）其实是非法 authority，
+# 但这里只做"防注入"的最小校验，不追求完整的 authority 语法 —— 放行它无害
+# （写进 YAML 只是个字符串），误拒合法值才是有害的。
 case "$DSH_PUBLIC_HOST" in
-*[!A-Za-z0-9.:_-]*) die "DSH_PUBLIC_HOST 含不允许的字符（只允许字母数字和 . : _ -）：$DSH_PUBLIC_HOST" ;;
+*[!A-Za-z0-9.:_\[\]-]*) die "DSH_PUBLIC_HOST 含不允许的字符（只允许字母数字和 . : _ - [ ]）：$DSH_PUBLIC_HOST" ;;
 esac
 case "$DSH_CLIENT_IP_HEADER" in
 *[!A-Za-z0-9-]*) die "DSH_CLIENT_IP_HEADER 含不允许的字符（只允许字母数字和 -）：$DSH_CLIENT_IP_HEADER" ;;
@@ -304,7 +307,9 @@ chmod 700 "$DSH_HOME/auth" 2>/dev/null || true
 # 而下面特意"带着现场重来"（打印日志尾部）就永远只能看到本次的。
 # 用一个分隔行标出本次启动的边界，便于区分。
 {
-  printf '\n===== %s 启动（pid $$）=====\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  # 注意格式串要两个 %s：`pid $$` 写在单引号里是**字面量**，
+  # 曾经输出成「启动（pid ）」—— 分隔行的作用就是区分不同次启动，pid 不能丢。
+  printf '\n===== %s 启动（pid %s）=====\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$"
 } >>"$WEB_LOG" 2>/dev/null || true
 log "启动 dsh: dsh --profile web --host $DSH_HOST --port $DSH_PORT --no-open"
 # tail 从文件末尾开始跟随本次输出；用 -n 0 只看新内容，历史留在文件里供排查
@@ -399,5 +404,4 @@ if ! kill -0 "$DSH_PID" 2>/dev/null; then
 else
   log "代理已退出（status $status），停止容器"
 fi
-exit "$status"
 exit "$status"

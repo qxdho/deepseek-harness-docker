@@ -86,6 +86,21 @@ const upstream = http.createServer((req, res) => {
   res.end(body);
 });
 
+// WebSocket 升级：记录上游是否收到**真正的**升级请求。
+// 关键点：Node 的 http.request 只在 `connection` 含 `upgrade`（或 `upgrade` 头存在）
+// 时才发升级请求；代理若把这两个头当 hop-by-hop 删掉，上游收到的是普通 GET、
+// 升级被降级 —— 实时通道直接不可用，而普通 HTTP 用例全都照样通过（所以必须有这条）。
+let sawUpgrade = 0;
+let upgradeHeaders = null;
+upstream.on('upgrade', (req, socket) => {
+  sawUpgrade += 1;
+  upgradeHeaders = { upgrade: req.headers.upgrade, connection: req.headers.connection };
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
+  );
+  socket.destroy();
+});
+
 function get(port, p, extraHeaders) {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port, path: p, headers: extraHeaders || {} }, (res) => {
@@ -101,6 +116,44 @@ function get(port, p, extraHeaders) {
   });
 }
 
+
+// 用裸 socket 发一个 WebSocket 升级请求，返回 { status, headers, raw }。
+// 不走 http.get —— 它不会发升级请求。
+function rawUpgrade(port, p) {
+  return new Promise((resolve) => {
+    const net = require('node:net');
+    const sock = net.connect(port, '127.0.0.1');
+    let buf = '';
+    let settled = false;
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {}
+      resolve(r);
+    };
+    sock.setTimeout(4000, () => done({ status: 0, raw: buf }));
+    sock.on('connect', () => {
+      sock.write(
+        `GET ${p} HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${port}\r\n` +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
+          'Sec-WebSocket-Version: 13\r\n' +
+          '\r\n'
+      );
+    });
+    sock.on('data', (c) => {
+      buf += c.toString('latin1');
+      const m = /^HTTP\/1\.1 (\d{3})/.exec(buf);
+      if (m) done({ status: Number(m[1]), raw: buf });
+    });
+    sock.on('error', () => done({ status: 0, raw: buf }));
+    sock.on('close', () => done({ status: 0, raw: buf }));
+  });
+}
 const INJECT_ID = 'dsh-forward-inject';
 
 (async () => {
@@ -334,6 +387,30 @@ const INJECT_ID = 'dsh-forward-inject';
   }
   trusted.kill('SIGTERM');
 
+
+  // 18. WebSocket 升级必须真的被转发（实时通道 /api/remote.mux 依赖它）
+  //
+  // 这里曾有真回归：`rewriteIncomingHeaders` 把 `connection` 与 `upgrade` 当
+  // hop-by-hop 头一起删了，而它同时被 `server.on('upgrade')` 调用 —— Node 的
+  // http.request 只在 `connection` 含 `upgrade` 时才发真正的升级请求，于是上游收到
+  // 普通 GET、升级被降级，实时通道彻底不可用。**普通 HTTP 用例全都照样通过**，
+  // 所以这条用例是唯一能挡住它的东西。
+  const wsResult = await rawUpgrade(PROXY_PORT, '/api/remote.mux');
+  if (wsResult.status === 101) {
+    ok('WebSocket 升级被转发（上游回了 101）');
+  } else {
+    bad(`WebSocket 升级没有被转发：客户端收到 ${wsResult.status || '（连接被关）'}`);
+  }
+  if (sawUpgrade > 0) {
+    ok(`上游收到了真正的升级请求（升级头 upgrade=${upgradeHeaders && upgradeHeaders.upgrade}）`);
+  } else {
+    bad('上游从未收到升级请求（被降级成普通 GET）');
+  }
+  if (upgradeHeaders && /websocket/i.test(upgradeHeaders.upgrade || '')) {
+    ok('转发时保留了 upgrade: websocket');
+  } else {
+    bad(`转发时丢了 upgrade 头：${JSON.stringify(upgradeHeaders)}`);
+  }
   proxy.kill('SIGTERM');
   upstream.close();
   console.log(`\nPASS=${PASS} FAIL=${FAIL}`);

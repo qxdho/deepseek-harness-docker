@@ -12,9 +12,39 @@
 #   * 仍有容器挂着旧卷时，只停「看起来就是本项目」的容器，其他容器不动。
 
 # 旧卷名：compose 建的是 <项目名>_dsh-home，也有人手工建 dsh-home
+# 找出旧的命名卷 `<project>_dsh-home`。
+#
+# 为什么不能 `| head -n1` 任取一个：同一台机器上可以跑多个 compose 项目，各自都有
+# `xxx_dsh-home`。任取会把**别的项目的数据**迁进本项目的 DSH_HOME_HOST —— 源卷不删，
+# 但目标被污染，而且脚本会打印「迁移成功」，用户完全看不出来。这比"迁移失败"危险得多。
+#
+# 规则：明确知道本项目名时只认 `<项目名>_dsh-home` 与裸 `dsh-home`；
+# 都不匹配就把全部候选原样返回，由调用方判断（多于一个就报错，**不猜**）。
 legacy_dsh_home_volume() {
 	command -v docker >/dev/null 2>&1 || return 0
-	docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '(^|_)dsh-home$' | head -n1 || true
+	local all proj mine bare
+	all="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '(^|_)dsh-home$' || true)"
+	[ -n "$all" ] || return 0
+
+	# 本项目名：优先显式配置，其次用项目目录名（compose 默认就是目录名）
+	proj="${COMPOSE_PROJECT_NAME:-}"
+	if [ -z "$proj" ] && [ -n "${PROJECT_DIR:-}" ]; then
+		proj="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+	fi
+	if [ -n "$proj" ]; then
+		mine="$(printf '%s\n' "$all" | grep -E "^${proj}_dsh-home$" || true)"
+		if [ -n "$mine" ]; then
+			printf '%s\n' "$mine"
+			return 0
+		fi
+	fi
+	# 早期版本没设项目名，卷就叫 dsh-home
+	bare="$(printf '%s\n' "$all" | grep -x 'dsh-home' || true)"
+	if [ -n "$bare" ]; then
+		printf '%s\n' "$bare"
+		return 0
+	fi
+	printf '%s\n' "$all"
 }
 
 # 目录为空（不存在也算空）
@@ -65,6 +95,21 @@ migrate_legacy_home() {
 	dest="$(env_value DSH_HOME_HOST /dsh)"
 	vol="$(legacy_dsh_home_volume)"
 	[ -n "$vol" ] || return 1
+	# 多于一个候选说明本机有多个项目的旧卷，而我们无法确定哪个属于本项目。
+	# **绝不任取一个**：那会把别的项目的数据迁进来，还会打印"迁移成功"。
+	local n_vol
+	n_vol="$(printf '%s\n' "$vol" | grep -c . || true)"
+	if [ "$n_vol" -gt 1 ]; then
+		if [ "$mode" = "explicit" ]; then
+			die "检测到多个旧数据卷，无法确定哪个属于本项目：
+$(printf '%s\n' "$vol" | sed 's/^/          /')
+      请确认后手工迁移，或用 COMPOSE_PROJECT_NAME=<本项目> ./dshm migrate 指定项目名。"
+		fi
+		warn "检测到多个旧数据卷，无法确定属于本项目，已跳过自动迁移："
+		printf '%s\n' "$vol" | sed 's/^/        /'
+		info "确认后执行 ./dshm migrate（或用 COMPOSE_PROJECT_NAME=<本项目> 指定）"
+		return 3
+	fi
 	dest_is_empty "$dest" || return 2
 
 	hdr "迁移旧版数据卷"

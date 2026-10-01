@@ -245,5 +245,63 @@ if [ -z "$leftover" ]; then
 else
 	fail "残留了临时目录：$leftover"
 fi
+
+# ── 7. 多个项目各有旧卷时，绝不任取一个 ─────────────────────────────────────
+# 原来 `docker volume ls | grep dsh-home | head -n1` 会任取第一个 —— 同机多项目时
+# 会把**别的项目的数据**迁进本项目，还打印「迁移成功」。目标被污染且用户看不出来，
+# 比"迁移失败"危险得多。现在：优先本项目（COMPOSE_PROJECT_NAME 或目录名），
+# 认不出且有多个候选时就 fail-closed。
+echo "== 7. 多项目同名旧卷时不猜 =="
+
+# 7a. 明确指定了 COMPOSE_PROJECT_NAME → 只认本项目那个
+new_case multi-project
+set_dest
+reset_fake alpha_dsh-home beta_dsh-home
+rc=0
+COMPOSE_PROJECT_NAME=beta migrate_legacy_home auto || rc=$?
+if [ "$rc" = "0" ]; then
+	pass "指定 COMPOSE_PROJECT_NAME=beta 时迁移成功（认出本项目）"
+else
+	fail "指定项目名后应能迁移，实际 rc=$rc"
+fi
+# beta 的复制内容来自同一个假 src，这里只要确认它没因为"多个候选"被跳过
+grep -q '^run ' "$FAKE/calls" && pass "并确实执行了复制" || fail "没有执行复制"
+
+# 7b. 没有项目名、多个候选 → 必须失败而不是任取
+new_case multi-project-2
+set_dest
+reset_fake alpha_dsh-home beta_dsh-home
+rc=0
+out7="$(migrate_legacy_home explicit 2>&1)" || rc=$?
+[ "$rc" != "0" ] && pass "多候选且无法判断时 explicit 模式报错退出（rc=$rc）" \
+	|| fail "多候选时应报错，却成功退出"
+case "$out7" in
+*"多个旧数据卷"*) pass "错误里说明了「检测到多个旧数据卷」" ;;
+*) fail "缺少针对性诊断：$(printf '%s' "$out7" | tail -2 | tr '\n' ' ')" ;;
+esac
+# 诊断里要列出候选卷名，否则用户没法判断该用哪个
+case "$out7" in
+*alpha_dsh-home*) pass "列出了候选卷（alpha_dsh-home）" ;;
+*) fail "没有列出候选卷名" ;;
+esac
+# **最关键**：这种情况下一个字节都不该往目标目录写
+if [ -z "$(ls -A "$(dst_of)" 2>/dev/null)" ]; then
+	pass "多候选时目标目录保持为空（没有把别人的数据迁进来）"
+else
+	fail "多候选却写了数据：$(ls -A "$(dst_of)" | tr '\n' ' ')"
+fi
+if [ -f "$(dst_of)/settings.yaml" ]; then
+	fail "把别的项目的数据（settings.yaml）迁进来了"
+else
+	pass "别的项目的数据没有被写入目标"
+fi
+
+# 7c. 只有一个候选时照常自动迁移（不能因为加了守卫就不干活）
+new_case single
+set_dest
+reset_fake only_dsh-home
+rc=0
+migrate_legacy_home auto || rc=$?
+[ "$rc" = "0" ] && pass "只有一个候选时照常自动迁移" || fail "单候选应能迁移，实际 rc=$rc"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

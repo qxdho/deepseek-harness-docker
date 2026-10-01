@@ -316,7 +316,7 @@ admin_uninstall() {
 			systemctl disable --now dsh-admin 2>/dev/null || true
 			rm -f /etc/systemd/system/dsh-admin.service
 			systemctl daemon-reload 2>/dev/null || true
-		elif command -v sudo >/dev/null 2>&1; then
+		elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
 			sudo systemctl disable --now dsh-admin 2>/dev/null || true
 			sudo rm -f /etc/systemd/system/dsh-admin.service || removed=0
 			sudo systemctl daemon-reload 2>/dev/null || true
@@ -329,7 +329,7 @@ admin_uninstall() {
 	fi
 	if [ -w "$dir" ]; then
 		rm -f "$dir/dsh-admin"
-	elif command -v sudo >/dev/null 2>&1; then
+	elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
 		sudo rm -f "$dir/dsh-admin" || removed=0
 	else
 		removed=0

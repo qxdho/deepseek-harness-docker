@@ -7,19 +7,14 @@
 #       值的才询问）→ 拉 GHCR 镜像（拉不到就本地构建）→ 旧命名卷数据迁移（仅旧版
 #       升级时需要）→ 准备宿主工作区（属主/可写性预检）→ 启动 → 等待健康 → 打印访问地址。
 set -euo pipefail
-cd "$(dirname "$0")"
+# 定位脚本所在目录（不是 cwd），这样从任何地方调用都能找到同目录的 scripts/。
+here="$(cd "$(dirname "$0")" && pwd)"
+cd "$here" || die "无法进入脚本所在目录：$here"
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-	B=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; RED=$'\033[31m'; YEL=$'\033[33m'; RST=$'\033[0m'
-else
-	B=; DIM=; GRN=; RED=; YEL=; RST=
-fi
-hdr() { printf '\n%s==> %s%s\n' "$B" "$*" "$RST"; }
-info() { printf '    %s\n' "$*"; }
-ok() { printf '    %s✓%s %s\n' "$GRN" "$RST" "$*"; }
-warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
-die() { printf '\n%s错误：%s%s\n\n' "$RED" "$*" "$RST" >&2; exit 1; }
+# 与 dshm、scripts/release.sh 共用同一份实现（scripts/log.sh）。
+# 以前这里逐字抄了一遍颜色与 hdr/info/ok/warn/die —— 改一处必然漏另一处。
+. "$here/scripts/log.sh"
 
 command -v docker >/dev/null 2>&1 || die "未安装 docker"
 docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"

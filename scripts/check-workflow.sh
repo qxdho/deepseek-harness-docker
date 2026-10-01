@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# 检查 workflow 里内嵌 shell 的问题 —— 不依赖 shellcheck。
+# 检查 workflow 里内嵌 shell 的问题 —— 目标是**能在本地预先复现 CI 的检查**。
 #
-# 为什么需要它：CI 里用 actionlint 校验 workflow，而 actionlint 的 shellcheck 检查
-# **依赖 runner 上装了 shellcheck**。本地（或任何没装 shellcheck 的环境）跑 actionlint
-# 会「静默通过」，于是同一个问题只在 CI 暴露 —— 这个坑真踩过两次：
+# 为什么需要它：CI 用 actionlint 校验 workflow，而 actionlint 的 shellcheck 部分
+# **依赖 runner 上装了 shellcheck**。本地往往没装，于是 actionlint「静默通过」、
+# CI 却报错 —— 这个坑反复踩过：悬空 `&&`、SC2015、SC2153/SC2215，以及一次多次编辑
+# workflow 后留下的孤儿代码片段（CI 报 SC2215/SC1089，本地却看不出）。
 #
-#   1) `if:` 表达式以 `&&` 结尾（悬空）→ 整个 workflow 被 GitHub 拒绝，0 个作业
-#   2) `A && B || { ...; exit 1; }` 简写 → shellcheck SC2015，兜底分支会在不该执行时执行
-#
-# 本脚本覆盖这两类的**语法**层面：抽出每个 `run: |` 块逐个 `bash -n`，并扫描 SC2015
-# 形态（同一行同时出现 && 与 ||）。它替代不了 shellcheck 的语义分析，但能在没有
-# shellcheck 的环境里挡住上面两类。
+# 本脚本做两件事：
+#   1. 逐个 `run: |` 块跑 `bash -n`（纯语法，任何环境都能跑）—— 孤儿代码、括号不匹配
+#      这类问题在这一步就会暴露
+#   2. 若找得到 shellcheck，就按 actionlint 的方式（先把 `${{ }}` 换成占位符）对每个块
+#      跑 shellcheck，把 CI 会报的问题提前拿到
 #
 #   ./scripts/check-workflow.sh
 set -uo pipefail
@@ -24,44 +24,93 @@ files=("$root"/.github/workflows/*.yml)
 shopt -u nullglob
 [ "${#files[@]}" -gt 0 ] || die "没有找到 .github/workflows/*.yml"
 
+# 找 shellcheck（顺序：$SHELLCHECK → PATH → ~/bin → /workspace/.local/bin）
+sc=""
+for cand in "${SHELLCHECK:-}" "$(command -v shellcheck 2>/dev/null || true)" \
+	"$HOME/bin/shellcheck" /workspace/.local/bin/shellcheck; do
+	if [ -n "$cand" ] && [ -x "$cand" ]; then
+		sc="$cand"
+		break
+	fi
+done
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# 把一个 workflow 的每个 run: | 块抽成独立文件：
+#   $tmp/<name>.<i>   块内容
+#   $tmp/<name>.count 块数量
+extract() {
+	# 只用两个参数：($1=workflow 文件, $2=块名)。输出目录用全局 $tmp。
+	# 早先写成 `local d="$2" dirout="$d/$name"` 的形式，但同一行里引用自己，
+	# set -u 下报 unbound variable。
+	local f="$1" name="$2" dirout="$tmp/$name"
+	mkdir -p "$dirout"
+	# awk 变量名不要用 dir —— shell 里已有 $dir，set -u 下会报 unbound variable。
+	awk -v od="$dirout" '
+		/^[[:space:]]*run: \|/ {
+			match($0, /^[[:space:]]*/); r = RLENGTH; n++
+			cur = n
+			next
+		}
+		cur == 0 { next }
+		{
+			if ($0 ~ /^[[:space:]]*$/) { print "" > (od "/b" cur); next }
+			match($0, /^[[:space:]]*/); ind = RLENGTH
+			if (ind <= r) { cur = 0; next }
+			print > (od "/b" cur)
+		}
+		END { print n + 0 > (od "/count") }
+	' "$f"
+}
+
 fails=0
 total=0
+sc_findings=0
 
 for f in "${files[@]}"; do
-	name="$(basename "$f")"
+	name="$(basename "$f" .yml)"
+	extract "$f" "$name"
+	n="$(cat "$tmp/$name/count" 2>/dev/null || echo 0)"
 
-	# 抽出 run: | 的正文。规则：记录 `run: |` 那一行的缩进 R；其后的行
-	#   * 空行      → 属于块（保留）
-	#   * 缩进 > R  → 属于块
-	#   * 缩进 <= R → 块结束（这一步最初写漏了，导致把后面的 YAML 也吃进来）
-	awk -v dir="$tmp" '
-		/^[[:space:]]*run: \|/ {
-			match($0, /^[[:space:]]*/); r = RLENGTH; n++; next
-		}
-		{
-			if (r == "") next
-			if ($0 ~ /^[[:space:]]*$/) { print "" > (dir "/b" n); next }
-			match($0, /^[[:space:]]*/); ind = RLENGTH
-			if (ind <= r) { r = ""; next }
-			print > (dir "/b" n)
-		}
-		END { print n + 0 > (dir "/count") }
-	' "$f"
-
-	n="$(cat "$tmp/count" 2>/dev/null || echo 0)"
 	broken=0
 	i=1
 	while [ "$i" -le "$n" ]; do
-		if [ -s "$tmp/b$i" ]; then
+		blk="$tmp/$name/b$i"
+		if [ -s "$blk" ]; then
 			total=$((total + 1))
-			if ! bash -n "$tmp/b$i" 2>"$tmp/err"; then
+			if ! bash -n "$blk" 2>"$tmp/err"; then
 				broken=$((broken + 1))
 				fails=$((fails + 1))
-				fail "$name 第 $i 个内嵌脚本语法错误"
+				warn "$name 第 $i 个内嵌脚本语法错误（孤儿代码 / 括号不匹配）"
 				head -3 "$tmp/err" | sed 's/^/        /'
+			fi
+			if [ -n "$sc" ]; then
+				# 与 actionlint 一致：先替换 GitHub 表达式，否则 shellcheck 会把
+				# ${{ ... }} 当成非法参数展开（SC2296）而误报。
+				#
+				# 每个**出现**都替换成唯一占位符。若都换成同一个字符串，
+				# `[ "${{ github.event_name }}" = "pull_request" ]` 会被看成
+				# 「常量比较恒假」而误报 SC2050；只按行号区分也不够，因为同一行
+				# 可能有两个表达式被替换成同一个值。
+				awk '{
+					out = ""
+					rest = $0
+					while (match(rest, /\$\{\{[^}]*\}\}/)) {
+						cnt++
+						out = out substr(rest, 1, RSTART - 1) "EXPR" cnt
+						rest = substr(rest, RSTART + RLENGTH)
+					}
+					print out rest
+				}' "$blk" >"$tmp/e$i"
+				if ! "$sc" -s bash "$tmp/e$i" >"$tmp/o$i" 2>&1; then
+					# 只警告、不退码：本脚本用「唯一占位符」替代 GitHub 表达式，
+					# 无法完美复刻 actionlint 的处理，会残留 SC2050 这类误报。
+					# CI 的权威是 actionlint；这里的作用是提前看到可能的真问题。
+					sc_findings=$((sc_findings + 1))
+					warn "$name 第 $i 个内嵌脚本 shellcheck 有提示（供参考）"
+					grep -E 'SC[0-9]+' "$tmp/o$i" | head -5 | sed 's/^/        /'
+				fi
 			fi
 		fi
 		i=$((i + 1))
@@ -74,13 +123,18 @@ for f in "${files[@]}"; do
 	sc_lines="$(grep -nE '^[[:space:]]*[^#[:space:]].*(&&.*\|\||\|\|.*&&)' "$f" 2>/dev/null || true)"
 	if [ -n "$sc_lines" ]; then
 		fails=$((fails + 1))
-		fail "$name：发现 SC2015 形态（与运算接或运算不是 if-then-else）"
+		warn "$name：发现 SC2015 形态（与运算接或运算不是 if-then-else）"
 		printf '%s\n' "$sc_lines" | sed 's/^/        /'
-	else
-		ok "$name：无 SC2015 形态"
 	fi
 done
 
 printf '\n  共检查 %s 个内嵌脚本块\n' "$total"
+if [ -z "$sc" ]; then
+	warn "没找到 shellcheck —— 只做了语法检查，CI 的 shellcheck 部分未在本地复现"
+	warn "装上后本脚本会自动启用：https://github.com/koalaman/shellcheck/releases"
+else
+	ok "已用 shellcheck 检查（$sc），与 CI 的 actionlint 同一套规则"
+	[ "$sc_findings" = "0" ] || warn "shellcheck 报告 $sc_findings 个块有问题"
+fi
 [ "$fails" = "0" ] || exit 1
 ok "workflow 内嵌脚本检查通过"

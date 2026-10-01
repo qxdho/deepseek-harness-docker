@@ -65,6 +65,10 @@ jobs:
           # 面板相关的两个测试（离线 + go 单测）合计约 20s，只在 admin/ 或本 workflow
           # 改动时才跑 —— 它们只验证 admin 这个程序，与镜像内容无关。
           admin=false
+          # 用进程替换而不是 `done <<EOF`：heredoc 的结束符 `EOF` 在 YAML 块标量里
+          # 无法放在行首（会被缩进），既让 shellcheck 报「here document 未正确结束」，
+          # 也让这里的意图变得含糊。进程替换没有这个问题，且循环仍在当前 shell 里跑
+          # （code/admin 的赋值能保留下来）。
           while IFS= read -r p; do
             [ -n "$p" ] || continue
             case "$p" in
@@ -75,9 +79,7 @@ jobs:
             *.md | LICENSE | .github/* | .gitignore | .dockerignore) ;;
             *) code=true ;;
             esac
-          done <<EOF
-          $files
-          EOF
+          done < <(printf '%s\n' "$files")
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "admin=$admin" >> "$GITHUB_OUTPUT"
           echo "需要构建镜像：$code；需要跑面板测试：$admin"
@@ -234,15 +236,6 @@ jobs:
             --cache-to type=gha,mode=max \
             .
           echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            .
-          echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            .
-          echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
   # 本作业只管纯静态/离线检查，两者互不依赖。
   checks:
     needs: changes
@@ -333,8 +326,10 @@ jobs:
 
       - name: 代理注入单元测试
         run: |
-          cd proxy
+          # `|| exit` 不能省：cd 失败时若不退出，npm install 会在错误目录里执行（shellcheck SC2164）。
+          cd proxy || exit 1
           npm install --omit=dev --no-fund --no-audit
+          node test-inject.js
   # 管理面板二进制。安装脚本从 releases/latest/download/... 拉取，所以**必须**在推
   # main 时也发布 —— 只在打 tag 时发的话，没有 tag 的仓库永远没有可下载的产物，
   # `dshm admin install` 就会一路回退到「本机 Go 构建」并最终失败。

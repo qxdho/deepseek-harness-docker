@@ -814,5 +814,44 @@ if [ -n "$logfile" ] && [ -f "$logfile" ]; then
 else
 	skip "没找到 web.log，跳过日志保留的行为验证"
 fi
+
+
+# ── 11. .env 解析：两份实现必须一致 ─────────────────────────────────────────
+# 曾经分叉：preflight.sh 的 env_file_value 允许行首空白，env-config.sh 的 get_env 不允许。
+# 于是 `.env` 里写成 `  DSH_UID=1111` 时，preflight 读到 1111 去做属主检查、
+# 而 env_value 读到空并用默认 1000 —— **检查通过但容器以错误的 uid 启动**。
+echo "== 11. .env 解析两份实现结果一致 =="
+pv_file="$sandbox/pv.env"
+printf '  DSH_UID=1111\nDSH_GID="2222"\nDSH_BIND=127.0.0.1\n' >"$pv_file"
+
+# 在被测脚本之外单独起一个 bash，同时加载两份实现并各自取值。
+# 放在沙箱里而不是 scripts/ 下：scripts/ 里叫 test-*.sh 的会被 test-all.sh 自动执行。
+probe="$sandbox/probe.sh"
+{
+	printf '%s\n' '#!/usr/bin/env bash'
+	printf '%s\n' 'ec="$1"; pf="$2"; ef="$3"; key="$4"'
+	printf '%s\n' '. "$ec"'
+	printf '%s\n' 'ENV_FILE="$ef"'
+	printf '%s\n' 'printf "get_env\t%s\n" "$(get_env "$key")"'
+	printf '%s\n' '. "$pf" 2>/dev/null || true'
+	printf '%s\n' 'printf "env_file_value\t%s\n" "$(env_file_value "$ef" "$key")"'
+} >"$probe"
+chmod +x "$probe"
+
+check_parse() { # <键> <期望>
+	local key="$1" want="$2" out g p
+	out="$(bash "$probe" "$HERE/env-config.sh" "$HERE/preflight.sh" "$pv_file" "$key" 2>/dev/null)"
+	g="$(printf '%s\n' "$out" | awk -F'\t' '$1=="get_env"{print $2}')"
+	p="$(printf '%s\n' "$out" | awk -F'\t' '$1=="env_file_value"{print $2}')"
+	if [ "$g" = "$p" ] && [ "$g" = "$want" ]; then
+		ok "$key 两份实现一致且值正确（$g）"
+	else
+		bad "$key 不一致或值不对：get_env=[$g] env_file_value=[$p] 期望=[$want]"
+	fi
+}
+check_parse DSH_UID 1111       # 行首带空格
+check_parse DSH_GID 2222       # 带双引号，要去掉一层
+check_parse DSH_BIND 127.0.0.1 # 普通值
+check_parse NOPE_KEY ""        # 不存在的键 → 两边都空、都不报错
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

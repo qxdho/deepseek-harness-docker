@@ -23,19 +23,30 @@
 #   1  未就绪（已打印修复方法）
 #   2  .env 缺失
 
-# 从 .env 读一个键。只认形如 KEY=value 的行，忽略注释。
+# 读任意 .env 文件里的键（preflight 会对临时 .env 做检查，所以不能只用 $ENV_FILE）。
+#
+# **规则必须与 env-config.sh 的 get_env 完全一致** —— 这里有两条路：
+#   * 调用方已经 source 过 env-config.sh（dshm / install.sh 都会）→ 直接委托；
+#   * 没 source（例如单独跑 preflight 的测试）→ 用同一套规则自己实现。
+# 两份实现曾经分叉：这个允许行首空白、get_env 不允许，于是 `  DSH_UID=1111`
+# 会让 preflight 以为容器用 1111、而实际用默认 1000 —— 检查通过但容器起不来。
 env_file_value() {
-	local file="$1" key="$2" line
+	local file="$1" key="$2"
+	if command -v get_env >/dev/null 2>&1 && [ "${ENV_FILE:-}" != "$file" ]; then
+		# get_env 的实现里已经带了「允许行首空白 + 去一层引号」，直接用它
+		get_env "$key" "$file"
+		return 0
+	fi
+	local v
 	[ -f "$file" ] || return 0
-	line="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -n1 || true)"
-	[ -n "$line" ] || return 0
-	line="${line#*=}"
-	# 去掉一层包裹的引号
-	case "$line" in
-	\"*\") line="${line#\"}"; line="${line%\"}" ;;
-	\'*\') line="${line#\'}"; line="${line%\'}" ;;
+	v="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -n1 || true)"
+	[ -n "$v" ] || return 0
+	v="${v#*=}"
+	case "$v" in
+	\"*\") v="${v#\"}"; v="${v%\"}" ;;
+	\'*\') v="${v#\'}"; v="${v%\'}" ;;
 	esac
-	printf '%s' "$line"
+	printf '%s' "$v"
 }
 
 # 进入项目目录后，${DSH_WORKSPACE_HOST} 的相对路径与 docker compose 的解析一致

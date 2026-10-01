@@ -235,9 +235,13 @@ jobs:
   # **只改引用，不重新构建** —— 两个架构已由上面的作业并行构建好。
   merge-manifests:
     needs: [changes, build-amd64, build-arm64]
+    # 条件与两个 build 作业**保持一致**（都要求 code==true）。少了这一条，
+    # 一旦 code 为 false，build-* 会跳过而本作业照跑，然后去读根本不存在的
+    # amd64-<run id> manifest 而失败。
     if: |
       startsWith(github.ref, 'refs/tags/') &&
-      !startsWith(github.ref, 'refs/tags/v')
+      !startsWith(github.ref, 'refs/tags/v') &&
+      needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -776,10 +780,19 @@ jobs:
 
           for i in 1 2 3; do
             # 用 if 而不是「或运算接或运算」的链式简写（shellcheck SC2015）。
+            # GitHub 的 /releases/latest 是按「创建时间最新」挑的，而不是按名叫 latest。
+            # 打镜像 tag 会新建一个 tag release，于是 /releases/latest 会指向**那个**
+            # 而不是我们维护的 latest release —— 而 install.sh / dshm admin install 用的
+            # 正是 releases/latest/download/...，语义就不可控了。
+            #
+            # 改法：创建时带 --latest，并且每次 main 推送都显式把 latest 标回最新。
+            # （效果上两种消费者都能拿到东西，但"哪个是官方最新"要明确。）
             if ! gh release view "$tag" >/dev/null 2>&1; then
               gh release create "$tag" --title "latest（main 最新构建）" \
                 --notes "由 main 分支自动更新，供安装脚本从 releases/latest 拉取。" \
-                >/dev/null 2>&1 || true
+                --latest >/dev/null 2>&1 || true
+            else
+              gh release edit "$tag" --latest >/dev/null 2>&1 || true
             fi
 
             # 先清掉 latest 里的历史发布包。否则每发一个版本就多留一份，latest 会一直

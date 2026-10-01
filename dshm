@@ -41,9 +41,15 @@ require_docker() {
 	docker compose version >/dev/null 2>&1 || die "未找到 docker compose v2"
 }
 require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env，请先运行 ./install.sh"; }
+# 容器是否在运行。**只有这一个实现** —— 之前散在三处（require_running、disk 分支、
+# current_dsh_version 里各写一遍 `docker inspect … | grep -q true`），改判断条件时
+# 要记得改三处。
+container_running() {
+	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true
+}
+
 require_running() {
-	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
-		|| die "容器 $CONTAINER 没在运行，先执行 ./dshm service up"
+	container_running || die "容器 $CONTAINER 没在运行，先执行 ./dshm service up"
 }
 # .env 的读写统一走 lib，和 install.sh 共用一份实现，避免两套解析器慢慢跑偏。
 # shellcheck source=scripts/env-config.sh
@@ -1113,7 +1119,7 @@ disk)
 	hdr "磁盘占用"
 	info "宿主："
 	df -h / 2>/dev/null | sed 's/^/    /' || true
-	if docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+	if container_running; then
 		info "容器内 $(dsh_home_in_container) 所在卷："
 		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" sh -c 'df -h "$DSH_HOME"' 2>/dev/null |
 			sed 's/^/    /' || true

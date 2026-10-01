@@ -104,9 +104,18 @@ read_secret() {
 }
 
 # 读取一个键。去掉一层包裹的引号，和 preflight 的解析保持一致。
+# 读 .env 里某个键的值。`<文件>` 可选，默认 $ENV_FILE —— 带上文件参数是为了让
+# preflight.sh（它对任意临时 .env 做检查）也能复用同一份实现。
+#
+# **允许行首空白**：Compose 自己的 .env 解析就接受 `  KEY=value`，我们若只认 `^KEY=`
+# 就会出现"preflight 读到 1111、env_value 读到空并用默认 1000"这种分歧 ——
+# 检查通过但容器以错误的 uid 启动。统一到这里之后两边结果必然一致。
 get_env() {
-	local v
-	v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+	local key="$1" file="${2:-${ENV_FILE:-}}" v
+	[ -n "$file" ] && [ -f "$file" ] || { printf '%s' ""; return 0; }
+	v="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -n1 || true)"
+	[ -n "$v" ] || { printf '%s' ""; return 0; }
+	v="${v#*=}"
 	case "$v" in
 	\"*\") v="${v#\"}"; v="${v%\"}" ;;
 	\'*\') v="${v#\'}"; v="${v%\'}" ;;

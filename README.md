@@ -120,8 +120,8 @@ docker compose up -d     # 启动服务
 ./dshm version update --build --dsh 0.1.7-rc.2   # 本地构建并指定 dsh 版本
 ```
 
-**优先用已构建的镜像**：CI 每次推 main 都会构建镜像，`version update` 直接拉即可。
-只有需要验证未发布的仓库改动、或仓库还没构建过该版本时，才用 `--build` 本地构建。
+**优先用已构建的镜像**：打**镜像 tag** 时 CI 会构建并推送，`version update` 直接拉即可。
+只有需要验证未发布的仓库改动、或该 dsh 版本还没有已构建的镜像时，才用 `--build` 本地构建。
 
 ### 镜像 tag 是怎么编号的
 
@@ -316,9 +316,10 @@ git commit -am "chore(release): v2026.10.01" && git push
 git tag v2026.10.01 && git push origin v2026.10.01
 ```
 
-**镜像不用手动打 tag**：每次推 main，CI 自动构建并以
-`<dsh版本>-<日期>-<序号>`（如 `0.2.0-rc.2-2026.10.01-1`）推送到 GHCR，序号保证
-同一天多次构建**互不覆盖**。
+**镜像要单独打 tag 构建**：推 `main` 不会构建镜像（多平台构建要几分钟），需要时推一个
+**镜像 tag**（`git tag 0.2.0-rc.2-2026.10.01-3 && git push origin 0.2.0-rc.2-2026.10.01-3`），
+CI 会在原生 amd64/arm64 runner 上并行构建并合并成多平台镜像，序号保证同一天多次构建
+**互不覆盖**。
 
 **仓库自己也不会落后**：CI 每周查一次上游 dsh 版本，有新版本就**开 PR**（见
 `.github/workflows/update-versions.yml`），你 review 后合并即可，不必手工改
@@ -664,12 +665,20 @@ release。用 `scripts/release.sh`：
 打同名 tag → 推送 → 等 CI 产出 release。
 
 > [!IMPORTANT]
-> **tag 名必须等于 `v` + `VERSION` 的内容**（CI 强制校验）。包名、release 下载地址、
-> 脚本里写死的版本号全都从这一个号派生 —— 两者脱节会发出一个「自更新 404」的 release。
-> 详见 [DESIGN.md](DESIGN.md) 第 10 节。
+> **dshm 发布 tag（`v*`）必须等于 `v` + `VERSION` 的内容**（CI 强制校验）。包名、release
+> 下载地址、脚本里写死的版本号全都从这一个号派生 —— 两者脱节会发出一个「自更新 404」的
+> release。详见 [DESIGN.md](DESIGN.md) 第 10 节。
 
-**镜像不用手动打 tag**：推 `main` 时 CI 自动构建，并以 `<dsh版本>-<日期>-<序号>`
-（如 `0.2.0-rc.2-2026.10.01-1`）推送，序号保证同一天多次构建互不覆盖、可回退。
+**镜像要单独打 tag 构建**：推 `main` **不再**构建镜像（多平台构建要几分钟，日常推 main
+多数时候并不需要新镜像）。需要新镜像时打一个 **镜像 tag**：
+
+```bash
+git tag 0.2.0-rc.2-2026.10.01-3 && git push origin 0.2.0-rc.2-2026.10.01-3
+```
+
+tag 名形如 `<dsh版本>-<日期>-<序号>`，序号保证同一天多次构建互不覆盖、可回退。CI 会在
+两个原生 runner 上并行构建 amd64 / arm64 并合并成多平台镜像，同时为该 tag 发一份 release
+（这样 `./dshm dshm update --to <该 tag>` 也能用）。
 
 ## 许可证
 

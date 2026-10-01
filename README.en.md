@@ -120,9 +120,9 @@ docker compose up -d     # start the service
 ./dshm version update --build --dsh 0.1.7-rc.2   # build locally with a chosen dsh version
 ```
 
-**Prefer an already-built image**: CI builds one on every push to `main`, so `version update`
-just pulls it. Only reach for `--build` when you need to validate uncommitted repository changes,
-or no image exists for the version you want.
+**Prefer an already-built image**: pushing an **image tag** makes CI build and push one, so
+`version update` just pulls it. Only reach for `--build` when you need to validate uncommitted
+repository changes, or no image exists yet for the version you want.
 
 ### How image tags are numbered
 
@@ -323,9 +323,11 @@ git commit -am "chore(release): v2026.10.01" && git push
 git tag v2026.10.01 && git push origin v2026.10.01
 ```
 
-**Images need no manual tag**: every push to `main` makes CI build and push
-`<dsh version>-<date>-<sequence>` (e.g. `0.2.0-rc.2-2026.10.01-1`) to GHCR. The sequence number
-guarantees that multiple builds on the same day **never overwrite each other**.
+**Image tags are pushed separately**: a push to `main` does not build an image (a multi-platform
+build takes minutes). When you need one, push an **image tag**
+(`git tag 0.2.0-rc.2-2026.10.01-3 && git push origin 0.2.0-rc.2-2026.10.01-3`). CI builds amd64
+and arm64 in parallel on native runners and merges them into one multi-platform image; the
+sequence number guarantees that multiple builds on the same day **never overwrite each other**.
 
 **The repository also keeps itself current**: CI checks upstream weekly and **opens a PR** when a
 newer dsh exists (see `.github/workflows/update-versions.yml`) — no hand-editing of
@@ -694,14 +696,23 @@ It then: pre-flight (branch / clean tree / in sync / tag free) → write `VERSIO
 tag with the same name → push → wait for CI to publish the release.
 
 > [!IMPORTANT]
-> **The tag name must equal `v` + the contents of `VERSION`** (CI enforces this). The package
-> name, the release download URL and the version baked into the script all derive from that one
-> number — if they drift you publish a release whose self-update 404s. See DESIGN.md section 10.
+> **A dshm release tag (`v*`) must equal `v` + the contents of `VERSION`** (CI enforces this).
+> The package name, the release download URL and the version baked into the script all derive
+> from that one number — if they drift you publish a release whose self-update 404s.
+> See DESIGN.md section 10.
 
-**Images need no manual tag**: a push to `main` builds one and pushes it as
-`<dsh version>-<date>-<sequence>` (e.g. `0.2.0-rc.2-2026.10.01-1`); the sequence keeps multiple
-builds on the same day from overwriting each other, so rollbacks stay possible.
-  ```
+**Image tags are pushed separately**: a push to `main` **no longer** builds an image (a
+multi-platform build takes minutes, and most main pushes do not need a new image). When you do
+need one, push an **image tag**:
+
+```bash
+git tag 0.2.0-rc.2-2026.10.01-3 && git push origin 0.2.0-rc.2-2026.10.01-3
+```
+
+The tag looks like `<dsh version>-<date>-<sequence>`; the sequence keeps multiple builds on the
+same day from overwriting each other, so rollbacks stay possible. CI builds amd64 and arm64 in
+parallel on native runners, merges them into one multi-platform image, and also publishes a
+release for that tag (so `./dshm dshm update --to <that tag>` works too).
 
 ## License
 

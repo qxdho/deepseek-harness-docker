@@ -274,8 +274,8 @@ reintroduce a network requirement for the first install.
 这些文件）。现在发布的是**整个运行目录的 tar 包**：
 
 ```
-dshm-v<版本>.tar.gz
-└── dshm-v<版本>/
+dshm-<tag>.tar.gz
+└── dshm-<tag>/
     ├── dshm
     └── scripts/{env-config,migrate-home,admin}.sh
 ```
@@ -283,19 +283,30 @@ dshm-v<版本>.tar.gz
 安装时先在临时目录解包并**全部**校验（结构、语法、特征串），任何一步不过都不碰现有
 文件 —— 宁可继续用旧版本，也不能换成跑不起来的脚本。
 
-### 10.3 tag 名必须等于 `v` + `VERSION`
+### 10.3 命名规则：包名 = `dshm-<tag>.tar.gz`
 
-**这是硬约束，CI 强制校验。** 理由：包名、release 下载地址、脚本里写死的版本号**全都
-从这一个号派生**。一旦 tag 与 `VERSION` 脱节，就会发出一个包名对不上的 release：
+**tag 名是唯一标识，包名直接从它派生。** 这条规则同时覆盖两类 tag：
+
+| tag | 包名 |
+|---|---|
+| `v2026.10.01-1`（dshm 发布 tag） | `dshm-v2026.10.01-1.tar.gz` |
+| `0.2.0-rc.2-2026.10.01-3`（镜像 tag） | `dshm-0.2.0-rc.2-2026.10.01-3.tar.gz` |
+
+早先的写法是按 `v` + `VERSION` 拼包名，对 dshm 自己的 tag 勉强能对上，但对**镜像 tag**
+（以数字开头、不带 `v`）必然错位：
 
 ```
-tag         v2026.10.01-1
-VERSION     2026.10.01              ← 脱节
-产物包名    dshm-v2026.10.01.tar.gz
-脚本请求    .../v2026.10.01-1/dshm-v2026.10.01-1.tar.gz   → 404
+要发布的东西  镜像 tag 0.2.0-rc.2-2026.10.01-3
+按 VERSION 拼 dshm-v2026.10.01-1.tar.gz     ← 名字对不上
+--to 请求    .../0.2.0-rc.2-2026.10.01-3/dshm-0.2.0-rc.2-2026.10.01-3.tar.gz  → 404
 ```
 
-这种不一致**从产物上极难看出来**，所以 CI 在编译任何东西之前就校验并失败。
+改成从 tag 名派生后，两类 tag 都自洽。**推 main 时没有 tag**，包名回退到
+`dshm-v<VERSION>.tar.gz`（`latest` release 用的就是它）。
+
+对内建版本号仍有一条硬约束：**dshm 发布 tag（`v*`）必须等于 `v` + `VERSION`**，CI 强制
+校验。理由：那条路径下包名、release 地址、脚本里写死的版本号**全都从这一个号派生**。
+镜像 tag 与 `VERSION` 无关，CI 对它们跳过这条校验（否则必然失败）。
 
 发布流程因此简化为（`scripts/release.sh` 自动完成）：
 
@@ -372,10 +383,17 @@ changes ──> checks         (静态/离线：测试、面板 go test、可执
 
 面板二进制与 dshm 包在**同一个 `release-admin` 作业**里产出：
 
-* 打 tag → 发到该 tag 的 release（版本化，可回退）
+* 打 tag → 发到该 tag 的 release（版本化，可回退）。**两类 tag 都发**：
+  dshm 发布 tag（`v*`）与镜像 tag（`<dsh版本>-<日期>-<序号>`）。后者也要发，是因为
+  `dshm dshm update --to <镜像tag>` 需要那个 tag 下有 dshm 包 —— 否则只有镜像，自更新 404。
 * 推 main → 更新固定的 `latest` release，供没打 tag 的部署机安装
 
-上传用**精确文件名**而不是 `dshm-*` 通配符：后者会匹配到工作区里生成发布包时留下的
-**目录** `dshm-v<版本>/`，`gh` 会试图把目录当附件上传并失败（报错是
-`read dshm-v<版本>: is a directory`，完全不会让人联想到通配符）。上传前还会清掉
+包名一律从 **tag 名**派生（`dshm-<tag>.tar.gz`，见 10.3）；推 main 时没有 tag，回退到
+`dshm-v<VERSION>.tar.gz`。**两条路径算出的包名必须一致** —— 曾经在 main 上误用
+`${GITHUB_REF_NAME}`（那时它等于 `main`），生成 `dshm-main.tar.gz`，而 `latest` 更新那步
+按 `v<VERSION>` 找包，于是失败。
+
+上传用 `dshm-*.tar.gz`（**限定到 `.tar.gz` 结尾**）而不是 `dshm-*`：后者会匹配到工作区里
+生成发布包时留下的**目录** `dshm-<tag>/`，`gh` 会试图把目录当附件上传并失败（报错是
+`read dshm-<tag>: is a directory`，完全不会让人联想到通配符）。上传前还会清掉
 `latest` 里的历史包，否则每发一版就多留一份旧包。

@@ -239,4 +239,49 @@ if [ -z "$ghost" ]; then
 else
 	fail "清单里有不存在的文件：$ghost"
 fi
+
+# ── 通过符号链接调用必须能正常工作 ──────────────────────────────────────────
+# `dshm dshm install` 会把 dshm 软链到 /usr/local/bin，之后从任意目录以软链身份运行。
+# 这时 `${BASH_SOURCE[0]}` **不解析符号链接**，用它拼路径会得到
+# `/usr/local/bin/scripts/log.sh` —— 一执行就报 No such file or directory，
+# 而报错行号指向 source 那一行，很容易被误以为是"装没装上"。这个 bug 真发生过。
+echo "== 通过符号链接调用 =="
+sl_dir="$(mktemp -d)"
+trap 'rm -rf "$sl_dir"' EXIT
+# 复制整仓到临时目录再软链过去 —— 必须是**拷贝**，不能软链到仓库里的 dshm：
+# 那样测的是仓库文件，`$root` 又是真实路径，测试会失去判别力。
+sl_repo="$sl_dir/repo"
+mkdir -p "$sl_repo"
+cp -a "$root/." "$sl_repo/" 2>/dev/null || true
+ln -sf "$sl_repo/dshm" "$sl_dir/dshm"
+
+# 1) 关键：**非注释代码里不该出现 BASH_SOURCE**（它是不解析软链的那个变量）。
+#    这是这条回归最有效的判据 —— 只要有人再写回去，这里立刻红。
+if grep -v '^[[:space:]]*#' "$sl_repo/dshm" | grep -q 'BASH_SOURCE'; then
+	fail "dshm 的非注释代码里使用了 BASH_SOURCE（不解析符号链接，从 PATH 调用会找不到 scripts/）"
+else
+	pass "dshm 的非注释代码不使用 BASH_SOURCE（用解析过软链的 \$PROJECT_DIR）"
+fi
+
+# 2) 真正以软链身份跑一个**一定会加载 scripts/log.sh** 的命令。
+#    不能用 `--version` 之类未知参数：输出为空时"没匹配到错误串"会变成假通过。
+out_sl="$(bash "$sl_dir/dshm" help 2>&1 || true)"
+case "$out_sl" in
+*"scripts/log.sh: No such file"*)
+	fail "以符号链接调用时找不到 scripts/log.sh（BASH_SOURCE 未解析软链）"
+	;;
+"")
+	fail "以符号链接调用 dshm help 没有任何输出（很可能又走向了错误路径）"
+	;;
+*)
+	pass "以符号链接调用正常（首行：$(printf '%s' "$out_sl" | grep -m1 . | cut -c1-30))"
+	;;
+esac
+
+# 3) 常见的"跑不起来"报错形态一并钉住（防止换个写法又回来）
+if printf '%s' "$out_sl" | grep -qE 'No such file or directory'; then
+	fail "以符号链接调用时出现 No such file or directory：$out_sl"
+else
+	pass "以符号链接调用没有 No such file or directory"
+fi
 run_tests

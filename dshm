@@ -33,8 +33,14 @@ cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
 # 与 scripts/release.sh 共用同一份实现，避免两处颜色/格式慢慢跑偏。
+#
+# ⚠ 这里必须用上面**已经解析过符号链接**的 $PROJECT_DIR，**不要**用
+# `dirname "${BASH_SOURCE[0]}"`：BASH_SOURCE 不会解析符号链接，`dshm dshm install`
+# 之后从 PATH 调用（/usr/local/bin/dshm → 真实位置）时它会指向 /usr/local/bin，
+# 于是拼出 /usr/local/bin/scripts/log.sh —— **一执行就报 No such file or directory**，
+# 而且报错行号指向这一行，很容易误以为是安装没装上。
 # shellcheck source=scripts/log.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/log.sh"
+. "$PROJECT_DIR/scripts/log.sh"
 
 require_docker() {
 	command -v docker >/dev/null 2>&1 || die "未找到 docker"

@@ -339,29 +339,58 @@ dshm-<tag>.tar.gz
 ### 11.1 作业图
 
 ```
-changes ──> checks         (静态/离线：测试、面板 go test、可执行位、代理注入)
-        └─> build          (构建镜像 → 推送前跑冒烟 → 通过才打正式 tag)
-        └─> release-admin   (打 tag 时发 dshm 包与面板二进制)
+changes ─┬─> checks          推 main / PR：静态与离线检查（测试、面板 go test、可执行位、代理注入）
+         ├─> release-admin   推 main 与两类 tag：面板二进制 + dshm 发布包
+         │
+         └─ 打「镜像 tag」时（形如 <dsh版本>-<日期>-<序号>）：
+             build-amd64     (ubuntu-latest)      构建 → 本地冒烟 → 推 :amd64-<run id>
+             build-arm64     (ubuntu-24.04-arm)   构建 → 推 :arm64-<run id>
+                    └─> merge-manifests   合成多平台 manifest 并打正式 tag
+                             └─> cleanup-staging   删掉中间的单架构 tag
 ```
 
-`checks` 与 `build` **不互为依赖**，并行跑：`build` 自己负责在推送前验证镜像，
-`checks` 只管纯静态检查。
+另有一个手动入口 `cleanup-versions`（`workflow_dispatch`），用来清理 GHCR 上的历史
+标签；它要求 `confirm == 'DELETE'` 才会执行，且删除前有安全闸门（见 §11.6）。
 
-### 11.2 镜像只构建一次
+几个刻意的分工：
 
-早期版本是 `checks` 用 `load: true` 构建一遍镜像跑冒烟、`build` 再构建一遍推送 ——
-**同一个镜像构建两次**，白花一倍时间。
+* **`checks` 与镜像构建互不依赖**，各管各的。
+* **推 main 不构建镜像** —— 多平台构建是整条流水线里最重的一块（几分钟），而日常推
+  main 多数时候并不需要新镜像。要镜像就打镜像 tag。
+* **两类 tag 各司其职**：`v*` 是 dshm 自己的发布 tag（发 release、跑一致性校验）；
+  镜像 tag 以数字开头（构建并推送镜像）。两者的触发条件在 workflow 里显式区分 ——
+  注意 GitHub 事件里 tag 推送的 `head_branch` **就是 tag 名**，所以只写
+  `refs/tags/*` 会把两类混在一起。
+* **`checks` 必须显式包含 PR**：PR 的 `github.ref` 是 `refs/pull/<N>/merge`，只判
+  `refs/heads/main` 会让 PR 永远没有检查（这个洞真存在过）。
 
-现在改成「一次构建 + 只改引用」：
+### 11.2 镜像为什么要按架构拆开构建
 
-1. 构建多平台镜像，推到**待检 tag**（`staging-<run id>`）
-2. 从仓库**拉回 amd64** 那份，跑冒烟
-3. 通过后用 `docker buildx imagetools create` 从同一个 digest 派生正式 tag（不重新构建）
-4. `if: always()` 清理待检 tag
+早期是「一台 runner 上构建多平台」——`docker buildx build --platform linux/amd64,linux/arm64`。
+问题是 **arm64 在 x86 runner 上走 QEMU 模拟**，实测整个多平台构建 369 秒，占流水线
+总耗时的 97%。
 
-关键收益不只是省时间：**跑冒烟的就是将要发布的那个 digest**，不存在「测的是一份、
-推的是另一份」的风险。待检 tag 带 run id，并发 run 之间互不干扰。
+现在拆成两个作业，各跑在**原生 runner** 上（public 仓库的 `ubuntu-24.04-arm` 免费），
+并行执行，最后用一个作业合并 manifest：
 
+1. `build-amd64` 构建 → **先 `--load` 到本地跑冒烟** → 通过后才推 `:amd64-<run id>`
+2. `build-arm64` 构建并推 `:arm64-<run id>`
+3. `merge-manifests` 用 `docker buildx imagetools create` 把两个单架构 manifest
+   合成多平台 manifest，**只改引用、不重新构建**
+4. `cleanup-staging`（`needs: merge-manifests` + `if: result == 'success'`）删掉中间 tag
+
+**为什么冒烟放在推正式镜像之前**：冒烟没过就不该产出可用于部署的镜像。
+amd64 那份先 `--load` 到本地（这一步不推任何东西），过了才推单架构 tag；
+正式的多平台 tag 由 `merge-manifests` 统一生成。
+
+**中间 tag 为什么带 `run id` 而不是 commit SHA**：`concurrency.group` 按 `github.ref`
+分组，而**同一个提交可以推多个 tag**（那是不同的 ref）→ 两个 run 属于不同并发组、
+会同时跑。按 SHA 命名时它们会推同一个 `amd64-<sha>`，先完成的那个 run 执行
+`cleanup-staging` 就把另一个正要用的 manifest 删了。带 run id 后互不重叠。
+
+**为什么冒烟用本地 `--load` 而不是「推一个待检 tag 再拉回来」**：`docker buildx
+imagetools` **只有 `create` 和 `inspect`，没有 `rm`** —— 待检 tag 推上去就删不掉，
+会永久堆积。这条路试过，放弃了。
 ### 11.3 只改文档就跳过硬活
 
 `changes` 作业用 `git diff --name-only` 判断改动范围，纯文档/License 改动跳过
@@ -397,3 +426,29 @@ changes ──> checks         (静态/离线：测试、面板 go test、可执
 生成发布包时留下的**目录** `dshm-<tag>/`，`gh` 会试图把目录当附件上传并失败（报错是
 `read dshm-<tag>: is a directory`，完全不会让人联想到通配符）。上传前还会清掉
 `latest` 里的历史包，否则每发一版就多留一份旧包。
+
+### 11.6 清理 GHCR 标签：两道闸门（都是踩坑后加的）
+
+`cleanup-versions` 用来清理历史标签（`sha-*` 之类）。它有过一次**破坏性事故**：
+为了删掉堆积的 92 个 `sha-*`，一次操作把整个包的镜像版本删光了 ——
+`tags/list` 返回 null、所有 manifest 都是 unknown。
+
+原因是两条叠加：
+
+* **Registry 的 tag 与 version 是多对一的**：同一个 manifest 可以同时挂
+  `latest` + `0.2.0-rc.2-2026.10.01-5` + `sha-a7810ba`；
+* Delete version API **会连同该 version 的所有 tag 一起删**。
+
+原来的筛选只看「tag 列表里**含** `sha-*`」，于是把那些同时带版本 tag 的 version
+整条删走了。**更根本的问题是我没确认"删一个会带走什么"就执行了不可逆的批量操作。**
+
+现在有两道闸门，缺一不可：
+
+1. **安全闸门（脚本层）**：删除前**逐一看过该 version 的全部 tag**，只要有一个不属于
+   「允许删」的集合（精确名单里的名字，或匹配给定前缀），就整条 `SKIP` 并打印
+   「还挂着哪个 tag」。按这个逻辑重放那次事故，**93 个全会被跳过、一个都不会删**。
+2. **确认闸门（流程层）**：`workflow_dispatch` 的 `confirm` 输入必须手打 `DELETE`，
+   否则作业连跑都不跑。不可逆的批量删除不该是"点一下就跑"。
+
+另外 `type=sha` 已经从构建配置里去掉了 —— 那个 tag 每次构建新增一个、从不回收
+（实测堆到 92 个，占全部 tag 的 92%），而它的用途已被主 tag 覆盖。

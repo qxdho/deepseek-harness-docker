@@ -194,24 +194,64 @@ config_summary() {
 
 # 写回一个键。值通过环境变量传给 awk —— 用 `awk -v v=...` 会把值里的
 # 反斜杠序列当转义处理（`a\b` 会写成退格符），密码里带 \ 就再也登不进去。
+# 原子地重写 .env，并保住权限与符号链接。
+#
+# 直接 `mktemp`（落在 /tmp）再 `mv` 有三个问题，都已实测：
+#   1. 跨文件系统时 mv 退化成"复制+删除"，非原子，中途失败会留下截断的 .env；
+#   2. mktemp 的 0600 会被带过来，原来 640 的 .env 被改成 600 —— root 跑过一次
+#      install.sh 的项目目录里，普通用户之后就读不到了；
+#   3. .env 若是符号链接（指向别处的真实配置），mv 会用普通文件**替换掉软链**，
+#      真实文件仍是旧内容 —— secrets 被静默断开。
+#
+# 做法：临时文件放在 .env 同目录（同文件系统，mv 是原子 rename），解析软链后写真实
+# 路径，并把原权限/属主带到新文件上。
+#
+# 注意过滤器的传参方式：本函数接收**命令与它的参数**（如 awk '程序'），
+# 不能用 `"$filter"` 把整串当一个命令 —— 那样 awk 会把程序文本当成文件名而报 Usage。
+rewrite_env_atomic() { # <命令> [参数…]
+	local target dir tmp mode owner
+	target="$ENV_FILE"
+	if [ -L "$target" ]; then
+		local link
+		link="$(readlink -f "$target" 2>/dev/null || true)"
+		[ -n "$link" ] && target="$link"
+	fi
+	dir="$(dirname "$target")"
+	# 先记权限/属主，必须在建临时文件之前读，否则读到的是 mktemp 的 600
+	if [ -e "$target" ]; then
+		mode="$(stat -c '%a' "$target" 2>/dev/null || echo 600)"
+		owner="$(stat -c '%u:%g' "$target" 2>/dev/null || true)"
+	else
+		mode=600
+		owner=""
+	fi
+	tmp="$(mktemp "${dir}/.env.tmp.XXXXXX" 2>/dev/null)" || return 1
+	if ! cat "$target" 2>/dev/null | "$@" >"$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	chmod "$mode" "$tmp" 2>/dev/null || true
+	[ -n "$owner" ] && chown "$owner" "$tmp" 2>/dev/null || true
+	if ! mv "$tmp" "$target"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	return 0
+}
+
 set_env() {
-	local k="$1" v="$2" tmp
-	tmp="$(mktemp)"
-	K="$k" V="$v" awk '
+	local k="$1" v="$2"
+	K="$k" V="$v" rewrite_env_atomic awk '
 		BEGIN { d=0; k=ENVIRON["K"]; v=ENVIRON["V"] }
 		$0 ~ ("^" k "=") { print k "=" v; d=1; next }
 		{ print }
 		END { if (!d) print k "=" v }
-	' "$ENV_FILE" >"$tmp"
-	mv "$tmp" "$ENV_FILE"
+	'
 }
 
-# 删除一个键（连同它的整行）
 unset_env() {
-	local k="$1" tmp
-	tmp="$(mktemp)"
-	K="$k" awk '$0 !~ ("^" ENVIRON["K"] "=")' "$ENV_FILE" >"$tmp"
-	mv "$tmp" "$ENV_FILE"
+	local k="$1"
+	K="$k" rewrite_env_atomic awk '$0 !~ ("^" ENVIRON["K"] "=")'
 }
 
 # 示例文件里的占位符等同于「未配置」

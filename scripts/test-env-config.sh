@@ -288,5 +288,63 @@ call_wait 'true unhealthy' 2
 rm -rf "$stub"
 
 echo
+
+echo "== 14. set_env/unset_env 原子且不破坏权限与符号链接 =="
+# 原来用 mktemp（落在 /tmp）再 mv，实测三个副作用：
+#   ① 跨文件系统时 mv 退化成"复制+删除"，非原子，失败留下截断的 .env；
+#   ② mktemp 的 0600 被带过来：640 的 .env 变成 600，root 跑过 install.sh 的项目
+#      目录里普通用户之后读不到；
+#   ③ .env 是符号链接时被普通文件替换掉，真实配置仍是旧值 —— secrets 静默断开。
+ln_dir="$sandbox/ln"
+mkdir -p "$ln_dir"
+printf 'A=1\nB=2\n' >"$ln_dir/real.env"
+chmod 640 "$ln_dir/real.env"
+ln -sf real.env "$ln_dir/.env"
+ENV_FILE="$ln_dir/.env"
+set_env A 9
+if [ -L "$ENV_FILE" ]; then
+	pass "set_env 不会把 .env 符号链接替换成普通文件"
+else
+	fail "set_env 把 .env 符号链接换成了普通文件（真实配置被静默断开）"
+fi
+if [ "$(tr '\n' ' ' <"$ln_dir/real.env")" = "A=9 B=2 " ]; then
+	pass "set_env 写进了软链指向的真实文件"
+else
+	fail "软链指向的文件没被更新：$(tr '\n' ' ' <"$ln_dir/real.env")"
+fi
+if [ "$(stat -c '%a' "$ln_dir/real.env")" = "640" ]; then
+	pass "set_env 保住了原权限（640）"
+else
+	fail "权限被改成 $(stat -c '%a' "$ln_dir/real.env")（原 640）"
+fi
+
+# 普通文件：改已有键 + 追加新键，权限不变，且不留临时文件
+ENV_FILE="$sandbox/.env2"
+printf 'A=1\n' >"$ENV_FILE"
+chmod 644 "$ENV_FILE"
+set_env A 7
+set_env NEW 3
+if [ "$(tr '\n' ' ' <"$ENV_FILE")" = "A=7 NEW=3 " ]; then
+	pass "set_env 改已有键并追加新键"
+else
+	fail "内容不对：$(tr '\n' ' ' <"$ENV_FILE")"
+fi
+if [ "$(stat -c '%a' "$ENV_FILE")" = "644" ]; then
+	pass "追加新键后权限仍是 644"
+else
+	fail "权限变成 $(stat -c '%a' "$ENV_FILE")"
+fi
+unset_env A
+if [ "$(tr '\n' ' ' <"$ENV_FILE")" = "NEW=3 " ]; then
+	pass "unset_env 只删指定键"
+else
+	fail "unset_env 结果不对：$(tr '\n' ' ' <"$ENV_FILE")"
+fi
+if [ "$(find "$sandbox" -maxdepth 1 -name '.env*.tmp.*' 2>/dev/null | wc -l)" = "0" ]; then
+	pass "重写后没有残留临时文件"
+else
+	fail "残留了临时文件"
+fi
+ENV_FILE="$sandbox/.env"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

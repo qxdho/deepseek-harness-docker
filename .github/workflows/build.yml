@@ -105,6 +105,37 @@ jobs:
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
+      # 镜像 tag = <dsh版本>-<日期>-<序号>，例如 0.2.0-rc.2-2026.09.30-1
+      #   * 带 dsh 版本 → 一眼看出镜像里是哪个 dsh
+      #   * 带日期      → 看出是哪天的构建
+      #   * 带序号      → 同一天多次构建互不覆盖，旧镜像仍可回退
+      # 为什么必须有序号：tag 一旦被同名覆盖，旧镜像就失去引用、可能被回收，回退就没了。
+      # 这正是原先那个「纯 dsh 版本 tag」的坑，所以它被移除了。
+      - name: 计算镜像 tag
+        id: tag
+        run: |
+          set -euo pipefail
+          dsh="${{ steps.ver.outputs.dsh }}"
+          day="$(date -u +%Y.%m.%d)"
+          n=0
+          # 用 GHCR 的**匿名** pull token 列已有 tag —— 不需要任何密钥，
+          # 只读取公开包的 tag 列表。
+          if token="$(curl -fsSL --max-time 20 \
+              "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" \
+              | grep -oE '"token":"[^"]+"' | cut -d'"' -f4)" && [ -n "$token" ]; then
+            existing="$(curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/${IMAGE_NAME}/tags/list" 2>/dev/null || true)"
+            n="$(printf '%s' "$existing" |
+              sed -n 's/.*"tags":\[\(.*\)\]}.*/\1/p' | tr ',' '\n' |
+              grep -cE "^${dsh}-${day}-[0-9]+$" || true)"
+          else
+            echo "::warning::列不到已有 tag，序号从 1 开始（可能覆盖同名 tag）"
+          fi
+          [ -n "$n" ] || n=0
+          img_tag="${dsh}-${day}-$((n + 1))"
+          echo "tag=${img_tag}" >> "$GITHUB_OUTPUT"
+          echo "镜像 tag：${img_tag}（当天该 dsh 版本已有 ${n} 个构建）"
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -120,8 +151,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.ver.outputs.dsh }}
-            type=ref,event=tag
+            # 主 tag：<dsh版本>-<日期>-<序号>，唯一、不覆盖旧镜像（可回退）
+            type=raw,value=${{ steps.tag.outputs.tag }},enable={{is_default_branch}}
+            # 精确到提交，便于排查；同一提交重复构建内容可能不同，故不作为版本依据
             type=sha,format=short
 
       - uses: docker/build-push-action@v6
@@ -285,14 +317,12 @@ jobs:
         working-directory: admin
         run: |
           set -eux
-          # 把版本号注入二进制，供 `dsh-admin -version` 与面板「自身版本」显示使用。
-          # tag 推送时用 tag 名，main 推送时用短 SHA —— 两者都能追溯到具体提交。
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            VER="${GITHUB_REF_NAME}"
-          else
-            VER="main-$(git rev-parse --short HEAD)"
-          fi
-          echo "注入版本：$VER"
+          # 版本号从仓库根的 VERSION 读 —— 那是 dshm 与面板的**唯一真源**，
+          # 所以「面板是 dshm 的附属功能、两者同版本」由机制保证，不靠人记。
+          # 在仓库根执行时 tag 名形如 v2026.09.30，这里加上 v 前缀保持一致。
+          VER="v$(tr -d ' \t\r\n' < ../VERSION)"
+          [ -n "$VER" ] && [ "$VER" != "v" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          echo "注入版本：$VER（供 dsh-admin -version 与面板「自身版本」使用）"
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
               go build -trimpath -ldflags="-s -w -X main.adminVersion=${VER}" \

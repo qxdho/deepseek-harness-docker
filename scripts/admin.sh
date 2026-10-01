@@ -67,13 +67,36 @@ admin_locate_bin() {
 	fi
 	arch="$(admin_arch)"
 	if [ "$arch" != "unknown" ] && command -v curl >/dev/null 2>&1; then
-		url="https://github.com/qxdho/deepseek-harness-docker/releases/latest/download/dsh-admin-linux-${arch}"
+		# 优先从**最新版本 tag** 的 release 拉，与 dshm 自身的更新规则一致
+		# （dshm 只认 tag、不跟随 main）。这样「面板与 dshm 同版本」才是真的：
+		# 拿到的二进制就是那个 tag 构建出来的。
+		#
+		# 还没有任何 tag 时退回 releases/latest —— 早期兜底路径（仓库刚建、
+		# 一次都还没发布过时用）。
+		local ver
+		ver="$(dshm_latest_tag 2>/dev/null || true)"
+		if [ -n "$ver" ]; then
+			url="https://github.com/qxdho/deepseek-harness-docker/releases/download/v${ver}/dsh-admin-linux-${arch}"
+		else
+			url="https://github.com/qxdho/deepseek-harness-docker/releases/latest/download/dsh-admin-linux-${arch}"
+		fi
 		info "从 Releases 下载 ${url}" >&2
 		if curl -fsSL -o "$candidate" "$url" && chmod +x "$candidate"; then
 			printf '%s' "$candidate"
 			return 0
 		fi
 		rm -f "$candidate"
+
+		# 该 tag 的 release 里可能还没有该架构产物（CI 尚未发布完），退回 latest
+		if [ -n "$ver" ]; then
+			warn "v${ver} 的 release 里没有 ${arch} 产物，改从 latest 尝试" >&2
+			url="https://github.com/qxdho/deepseek-harness-docker/releases/latest/download/dsh-admin-linux-${arch}"
+			if curl -fsSL -o "$candidate" "$url" && chmod +x "$candidate"; then
+				printf '%s' "$candidate"
+				return 0
+			fi
+			rm -f "$candidate"
+		fi
 	fi
 	return 1
 }

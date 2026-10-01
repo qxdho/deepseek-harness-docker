@@ -74,16 +74,46 @@ DSHM_REPO_URL="${DSHM_REPO:-https://github.com/qxdho/deepseek-harness-docker}"
 DSHM_VERSION_RAW="${DSHM_VERSION:-__VERSION__}"
 
 dshm_version() {
-	# 占位符没被替换（不在仓库也没走发布流程）时，尽量从仓库读
-	if [ "$DSHM_VERSION_RAW" = "__VERSION__" ]; then
+	# 1) 发布版：CI 已把占位符替换成实际版本，直接用
+	if [ "$DSHM_VERSION_RAW" != "__VERSION__" ]; then
+		printf '%s' "$DSHM_VERSION_RAW"
+		return
+	fi
+
+	# 2) 在 git 工作区：用 `git describe` 如实反映**手上的代码**
+	#    不能在 main 上直接读 VERSION 文件：VERSION 会在「准备发布」的那个提交里
+	#    先被 bump，而 tag 可能还没打；那时读文件会声称自己是那个版本，实际手上的
+	#    代码并没有对应的发布 tag。用 describe 判断才准：
+	#      * HEAD 正好有 tag        → 报该 tag 的版本（与那次发布完全一致）
+	#      * 在 tag 之后又有新提交   → <VERSION>-<提交数>-g<短SHA>，明确表示「领先」
+	#      * main 上还没有任何 tag   → dev + 短 SHA
+	if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1 &&
+		git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+		local desc sha
+		sha="$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+		desc="$(git -C "$PROJECT_DIR" describe --tags --match 'v[0-9]*' 2>/dev/null || true)"
+		if [ -n "$desc" ]; then
+			# v2026.09.30 或 v2026.09.30-3-gabc1234 → 去掉 v，保留「领先几个提交」的后缀
+			printf '%s' "${desc#v}"
+			return
+		fi
 		if [ -f "$PROJECT_DIR/VERSION" ]; then
-			tr -d ' \t\r\n' <"$PROJECT_DIR/VERSION"
+			# 有 VERSION 说明「准备发这个版本」，但还没 tag —— 说清楚，别冒充已发布
+			printf '%s-dev' "$(tr -d ' \t\r\n' <"$PROJECT_DIR/VERSION")"
+		elif [ -n "$sha" ]; then
+			printf 'dev-%s' "$sha"
 		else
 			printf 'dev'
 		fi
 		return
 	fi
-	printf '%s' "$DSHM_VERSION_RAW"
+
+	# 3) 既不是发布版，也没有 git 仓库
+	if [ -f "$PROJECT_DIR/VERSION" ]; then
+		tr -d ' \t\r\n' <"$PROJECT_DIR/VERSION"
+	else
+		printf 'dev'
+	fi
 }
 
 # ── 发布 tag（dshm 的版本只认 tag）─────────────────────────────────────────

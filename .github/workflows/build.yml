@@ -329,6 +329,54 @@ jobs:
               -o "dsh-admin-linux-${arch}" .
             sha256sum "dsh-admin-linux-${arch}" > "dsh-admin-linux-${arch}.sha256"
           done
+      # 生成发布包（dshm 的完整运行目录），作为 release 产物。
+      #
+      # 为什么要打包而不是只发一个 dshm 文件：dshm 会 source 同目录下的
+      # scripts/env-config.sh、scripts/migrate-home.sh、scripts/admin.sh —— 单独一个
+      # 脚本文件在任何地方都跑不起来。而 `dshm dshm update` 面向的是没保留 git 仓库的
+      # 部署机，它没有这些文件，所以必须交付完整目录。
+      #
+      # 同时把版本号写死：仓库里的 dshm 用 __VERSION__ 占位符，靠 git / VERSION 文件
+      # 推断版本；部署机两者都没有，不替换的话版本号会退化成 dev。
+      #
+      # 注意要替换**两处**：赋值，以及 dshm_version() 里判断「占位符还在不在」的比较。
+      # 只替换赋值会让那个判断永远为真，绕过版本号去走 git / VERSION 分支。
+      - name: 生成发布包
+        run: |
+          set -eu
+          VER="v$(tr -d ' \t\r\n' < VERSION)"
+          [ -n "$VER" ] && [ "$VER" != "v" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          NUM="${VER#v}"
+          pkg="dshm-${VER}"
+          rm -rf "$pkg"
+          mkdir -p "$pkg/scripts"
+          sed -e "s|^DSHM_VERSION_RAW=.*|DSHM_VERSION_RAW=\"\${DSHM_VERSION:-${NUM}}\"|" \
+              -e "s|^\(\s*\)if \[ \"\$DSHM_VERSION_RAW\" != \"__VERSION__\" \]; then|\1if true; then|" \
+            dshm > "$pkg/dshm"
+          # 校验：赋值行已写死版本号，且「占位符还在不在」的判断已被改成恒真，
+          # 让 dshm_version 直接返回这个版本号（发布版没有 git 也没有 VERSION 文件，
+          # 一旦落到后面的推断分支就会显示成 dev）
+          grep -q "DSHM_VERSION_RAW=\"\${DSHM_VERSION:-${NUM}}\"" "$pkg/dshm" \
+            || { echo "::error::赋值行未替换" >&2; exit 1; }
+          grep -q 'if true; then' "$pkg/dshm" \
+            || { echo "::error::版本判断未替换（脚本会把自己当未发布版）" >&2; exit 1; }
+          bash -n "$pkg/dshm" || { echo "::error::替换后语法有误" >&2; exit 1; }
+          # dshm 运行所需的同目录文件，缺一不可
+          cp scripts/env-config.sh scripts/migrate-home.sh scripts/admin.sh "$pkg/scripts/"
+          # 不带 VERSION 文件：版本号已写死在脚本里，留着反而多一个会过期的来源
+          chmod +x "$pkg/dshm"
+          tar -czf "${pkg}.tar.gz" "$pkg"
+          # 解包自检：确认包内容完整、脚本语法正确
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          tar -xzf "${pkg}.tar.gz" -C /tmp/verify
+          for f in dshm scripts/env-config.sh scripts/migrate-home.sh scripts/admin.sh; do
+            [ -f "/tmp/verify/${pkg}/${f}" ] || { echo "::error::发布包缺少 ${f}" >&2; exit 1; }
+          done
+          bash -n "/tmp/verify/${pkg}/dshm"
+          rm -rf /tmp/verify
+          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          echo "已生成 ${pkg}.tar.gz（$(wc -c < "${pkg}.tar.gz") 字节，版本 ${NUM}）"
+
       # tag 推送：每个版本一个 release（softprops 会按 tag 创建）
       - name: 发布到该 tag 的 release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -339,6 +387,8 @@ jobs:
             admin/dsh-admin-linux-amd64.sha256
             admin/dsh-admin-linux-arm64
             admin/dsh-admin-linux-arm64.sha256
+            dshm-v*.tar.gz
+            dshm-v*.tar.gz.sha256
       # main 推送：更新固定的 latest release。
       # 不能用 softprops 直接对 latest 做（并发会 422），先用 gh release create 保证它
       # 存在（已存在则忽略），再 --clobber 覆盖附件。一个步骤里循环重试，避免并发下
@@ -360,6 +410,7 @@ jobs:
                  admin/dsh-admin-linux-amd64.sha256 \
                  admin/dsh-admin-linux-arm64 \
                  admin/dsh-admin-linux-arm64.sha256 \
+                 dshm-* \
                  --clobber; then
               echo "已将面板二进制更新到 latest release"
               exit 0

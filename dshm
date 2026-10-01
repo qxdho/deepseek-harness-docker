@@ -156,6 +156,15 @@ dshm_raw_url() {
 	printf 'https://raw.githubusercontent.com/qxdho/deepseek-harness-docker/v%s/%s' "$ver" "$CLI_NAME"
 }
 
+# 该 tag 的 release **发布包**（dshm 的完整运行目录，版本号已由 CI 写死）。
+# 这是首选下载地址：自更新的目标机器通常既没有 git 仓库也没有 VERSION 文件，
+# 用仓库里的原始文件不但版本号会退化成 dev，而且单独一个脚本根本跑不起来 ——
+# dshm 会 source 同目录的 scripts/env-config.sh 等文件。
+dshm_release_url() {
+	local ver="$1"
+	printf 'https://github.com/qxdho/deepseek-harness-docker/releases/download/v%s/dshm-v%s.tar.gz' "$ver" "$ver"
+}
+
 # 放系统命令的目录：优先 /usr/local/bin（可写 / root / 免密 sudo），否则 ~/.local/bin。
 # 只认免密 sudo，避免 `sudo -n false` 时卡在密码提示上。
 cli_dir() {
@@ -304,54 +313,89 @@ self_update() {
       确认要继续：./dshm dshm update --to ${target} --allow-stale"
 	fi
 
-	local url tmp
-	url="$(dshm_raw_url "$target")"
-	tmp="$(mktemp "${TMPDIR:-/tmp}/dshm.XXXXXX")"
+	# 从该 tag 的 **release 包**下载。包里是 dshm 的完整运行目录：
+	#   dshm                                        脚本本身（版本号已被 CI 写死）
+	#   scripts/{env-config,migrate-home,admin}.sh  它 source 的依赖
+	#
+	# 为什么必须整包：dshm 会 source 同目录下的这几个文件，单独一个脚本在任何地方都
+	# 跑不起来。而本命令面向的是没保留 git 仓库的部署机，它没有这些文件。
+	#
+	# 为什么用 release 而不是仓库原始文件：仓库里的 dshm 带 __VERSION__ 占位符，靠
+	# git / VERSION 文件推断版本；部署机两者都没有，不替换的话版本号会退化成 dev。
+	local tgz_url sha_url
+	tgz_url="$(dshm_release_url "$target")"
+	sha_url="${tgz_url}.sha256"
 
-	info "下载 $url"
-	if ! curl -fsSL -o "$tmp" "$url"; then
-		rm -f "$tmp"
-		die "下载失败：$url
-      tag v${target} 可能还没有附带 dshm 脚本（CI 尚未发布完成）。
-      也可用镜像地址：DSHM_REPO 指向你的 fork/内网镜像"
+	local tgz workdir
+	tgz="$(mktemp "${TMPDIR:-/tmp}/dshm.XXXXXX.tgz")"
+	workdir="$(mktemp -d "${TMPDIR:-/tmp}/dshm.XXXXXX")"
+	# 任何提前 return / die 都清掉临时物；安装成功后再显式清空
+	trap 'rm -rf "$tgz" "$workdir" 2>/dev/null || true' RETURN
+
+	info "下载 $tgz_url"
+	if ! curl -fsSL -o "$tgz" "$tgz_url"; then
+		rm -f "$tgz"
+		die "下载失败：$tgz_url
+      tag v${target} 的 release 里可能还没有 dshm 发布包（CI 尚未发布完成）。
+      也可用镜像地址：DSHM_REPO 指向你的 fork / 内网镜像"
 	fi
 
+	# 校验 sha256（CI 会一并发布 .sha256）。取不到校验文件只警告不阻断 ——
+	# 可能是较早的发布没有附带，但仍然值得装。
+	local want got
+	want="$(curl -fsSL --max-time 30 "$sha_url" 2>/dev/null | awk 'NR==1{print $1}')"
+	if [ -n "$want" ]; then
+		got="$(sha256sum "$tgz" | cut -d' ' -f1)"
+		if [ "$want" != "$got" ]; then
+			die "下载包校验失败（期望 ${want}，实际 ${got}），已放弃安装（现有文件未改动）"
+		fi
+		ok "校验通过（sha256 ${got%"${got#???????}"}…）"
+	else
+		warn "该版本没有附带 .sha256 校验文件，跳过完整性校验"
+	fi
+
+	# 先在临时目录解包并**全部**验证完，任何一步不过都不碰现有文件
+	tar -xzf "$tgz" -C "$workdir" || die "解包失败（文件可能损坏）"
+	local src="$workdir/dshm-v${target}"
+	[ -f "$src/dshm" ] || die "发布包里缺少 dshm（包结构异常）"
+	local f
+	for f in scripts/env-config.sh scripts/migrate-home.sh scripts/admin.sh; do
+		[ -f "$src/$f" ] || die "发布包里缺少 $f（包结构异常）"
+	done
 	# 语法自检：宁可继续用旧版本，也不能换成跑不起来的脚本
-	if ! bash -n "$tmp" 2>/dev/null; then
-		rm -f "$tmp"
-		die "下载到的 dshm 未通过语法检查，已放弃替换（原文件未改动）"
-	fi
-
-	# 内容自检：确认下到的确实是本项目脚本，而不是错误页 / 代理返回的 HTML
-	if ! grep -q 'dshm dshm' "$tmp"; then
-		rm -f "$tmp"
-		die "下载到的内容不像 dshm（缺少预期特征），已放弃替换"
-	fi
+	bash -n "$src/dshm" 2>/dev/null || die "下载到的 dshm 未通过语法检查，已放弃替换（原文件未改动）"
+	# 内容自检：确认确实是本项目脚本，而不是错误页 / 代理返回的 HTML
+	grep -q 'dshm dshm' "$src/dshm" || die "下载到的内容不像 dshm（缺少预期特征），已放弃替换"
 
 	local curfile="$PROJECT_DIR/$CLI_NAME"
+	local mode
+	mode="$(stat -c '%a' "$curfile" 2>/dev/null || echo 755)"
+	# 是否需要用 sudo 安装（只判断一次，后面所有文件共用）
+	local use_sudo=0
+	if [ ! -w "$curfile" ] && [ ! -w "$PROJECT_DIR" ]; then
+		command -v sudo >/dev/null 2>&1 || die "无法写入 $PROJECT_DIR（需要它可写，或用 sudo）"
+		use_sudo=1
+	fi
+
 	if [ "$force" != "1" ] && [ -f "$curfile" ] \
-		&& [ "$(sha256sum "$curfile" 2>/dev/null | cut -d' ' -f1)" = "$(sha256sum "$tmp" 2>/dev/null | cut -d' ' -f1)" ]; then
+		&& [ "$(sha256sum "$curfile" | cut -d' ' -f1)" = "$(sha256sum "$src/dshm" | cut -d' ' -f1)" ]; then
 		ok "脚本内容与该版本一致，无需更新"
-		rm -f "$tmp"
+		info "如确实要重新安装整个包，加 --force"
 		return 0
 	fi
 
-	local mode
-	mode="$(stat -c '%a' "$curfile" 2>/dev/null || echo 755)"
-	if [ -w "$curfile" ] || [ -w "$PROJECT_DIR" ]; then
-		install -m "$mode" "$tmp" "$curfile"
-	elif command -v sudo >/dev/null 2>&1; then
-		sudo install -m "$mode" "$tmp" "$curfile"
+	# 安装：脚本 + 依赖，全部来自刚验证过的 $src，不改动其它文件
+	mkdir -p "$PROJECT_DIR/scripts"
+	if [ "$use_sudo" = "1" ]; then
+		sudo install -m "$mode" "$src/dshm" "$curfile" &&
+			sudo cp "$src/scripts/"*.sh "$PROJECT_DIR/scripts/" ||
+			die "安装失败（sudo 出错）"
 	else
-		die "无法写入 $curfile（需要它可写，或用 sudo）"
+		install -m "$mode" "$src/dshm" "$curfile" &&
+			cp "$src/scripts/"*.sh "$PROJECT_DIR/scripts/" ||
+			die "安装失败"
 	fi
-	rm -f "$tmp"
-	if [ -x "$curfile" ]; then
-		ok "已更新到 v${target}：$curfile"
-	else
-		chmod +x "$curfile" 2>/dev/null || true
-		ok "已更新到 v${target}：$curfile（已补可执行位）"
-	fi
+	ok "已更新到 v${target}：$curfile（含 scripts/ 依赖）"
 	[ "$cur" != "$target" ] && info "版本：v${cur} → v${target}"
 	info "仓库：$DSHM_REPO_URL"
 }

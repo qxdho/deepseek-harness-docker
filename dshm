@@ -33,15 +33,9 @@ dsh_home_host() { env_value DSH_HOME_HOST /dsh; }
 cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" "$(dsh_home_in_container)"; }
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-	B=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; RED=$'\033[31m'; YEL=$'\033[33m'; RST=$'\033[0m'
-else
-	B=; DIM=; GRN=; RED=; YEL=; RST=
-fi
-hdr() { printf '\n%s==> %s%s\n' "$B" "$*" "$RST"; }
-info() { printf '    %s\n' "$*"; }
-ok() { printf '    %s✓%s %s\n' "$GRN" "$RST" "$*"; }
-die() { printf '\n%s错误：%s%s\n\n' "$RED" "$*" "$RST" >&2; exit 1; }
+# 与 scripts/release.sh 共用同一份实现，避免两处颜色/格式慢慢跑偏。
+# shellcheck source=scripts/log.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/log.sh"
 
 require_docker() {
 	command -v docker >/dev/null 2>&1 || die "未找到 docker"
@@ -60,7 +54,6 @@ require_running() {
 . ./scripts/migrate-home.sh
 
 # ── 注册为系统命令 ──────────────────────────────────────────────────────────
-warn() { printf '    %s!%s %s\n' "$YEL" "$RST" "$*"; }
 is_root() { [ "$(id -u)" = "0" ]; }
 
 # dshm 自身从哪更新。可用 DSHM_REPO 覆盖（fork 或内网镜像）。

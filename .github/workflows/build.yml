@@ -157,14 +157,19 @@ jobs:
       - name: 冒烟测试
         run: ./scripts/smoke-test.sh dsh-test:smoke
 
-      # 冒烟通过后才推。**只推单架构 tag**（带 commit），正式 tag 由 merge 作业统一生成，
+      # 冒烟通过后才推。**只推单架构 tag**，正式 tag 由 merge 作业统一生成 ——
       # 这样正式 tag 只会指向多平台 manifest，不会先出现一份「单架构的同名镜像」。
+      #
+      # 中间 tag 带 **run id**（不是 commit SHA）：concurrency.group 按 github.ref 分组，
+      # 而同一个提交可以推多个 tag（v2026.10.01-3 与 0.2.0-rc.2-2026.10.01-4 是不同 ref）
+      # → 两个 run 属于不同并发组、会同时跑。按 SHA 命名时它们会推同一个 `amd64-<sha>`，
+      # 先完成的那个 run 执行 cleanup-staging 就把另一个正要用的 manifest 删了。
       - name: 推送单架构镜像（供合并）
         run: |
           docker buildx build \
             --platform linux/amd64 \
             --push \
-            --tag "${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_SHA::7}" \
+            --tag "${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_RUN_ID}" \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
             --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
             --cache-from type=gha,scope=amd64 \
@@ -211,7 +216,7 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --push \
-            --tag "${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_SHA::7}" \
+            --tag "${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_RUN_ID}" \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
             --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
             --cache-from type=gha,scope=arm64 \
@@ -291,8 +296,9 @@ jobs:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          amd="${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_SHA::7}"
-          arm="${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_SHA::7}"
+          # 中间 tag 带 run id（与 build-* 作业一致），避免并发 run 互相覆盖
+          amd="${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_RUN_ID}"
+          arm="${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_RUN_ID}"
           echo "合并 $amd + $arm"
           # imagetools create 从两个单架构 manifest 派生多平台 manifest，只改引用不重建。
           # 多个正式 tag 一次生成（--tag 可重复）。
@@ -320,8 +326,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          sha="${GITHUB_SHA::7}"
-          for name in "amd64-${sha}" "arm64-${sha}"; do
+          # 用 run id 拼中间 tag，与 build-* / merge-manifests 三处一致
+          for name in "amd64-${GITHUB_RUN_ID}" "arm64-${GITHUB_RUN_ID}"; do
             # 先按 tag 名找到对应的 package version，再删该 version。
             # 这里用 CI 自带的 GITHUB_TOKEN（带 packages: write），不需要个人 token。
             vid="$(gh api \

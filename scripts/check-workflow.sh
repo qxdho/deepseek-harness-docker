@@ -53,6 +53,16 @@ extract() {
 			cur = n
 			next
 		}
+		# 单行形态：`run: <命令>`。**也要抽** —— 以前只认 `run: |`，于是单行 run 里的
+		# shell 问题（语法错误、孤儿片段）从来没被本地检查过（当前有 4 处）。
+		/^[[:space:]]*run: [^|]/ {
+			match($0, /^[[:space:]]*/); n++
+			cmd = $0
+			sub(/^[[:space:]]*run: /, "", cmd)
+			print cmd > (od "/b" n)
+			cur = 0
+			next
+		}
 		cur == 0 { next }
 		{
 			if ($0 ~ /^[[:space:]]*$/) { print "" > (od "/b" cur); next }

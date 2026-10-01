@@ -362,7 +362,11 @@ fix_private_files() {
 
 	# 顶层还有别的条目属主不对时，dsh 读写同样会失败；这里只提示，不擅自整目录 chown
 	local foreign
-	foreign="$(find "$home" -maxdepth 1 -mindepth 1 ! -user "$cu" 2>/dev/null | head -5)"
+	# 末尾的 `|| true` 必需：`head` 提前关闭管道会让 find 收到 SIGPIPE（退出码 141），
+	# 而 preflight 顶部开了 `set -o pipefail` —— 顶层直接调用这个函数时整脚本会**静默
+	# 退出且没有任何输出**（实测）。当前所有调用点都在 `if`/`||` 上下文里，bash 会屏蔽
+	# 函数体内的 errexit，所以暂时不会触发；但谁把它当普通语句调一次就中招。
+	foreign="$(find "$home" -maxdepth 1 -mindepth 1 ! -user "$cu" 2>/dev/null | head -5 || true)"
 	if [ -n "$foreign" ]; then
 		printf '    警告：数据目录里还有不属于容器 uid %s 的条目，容器可能读写失败：\n' "$cu"
 		printf '%s\n' "$foreign" | sed 's/^/      /'

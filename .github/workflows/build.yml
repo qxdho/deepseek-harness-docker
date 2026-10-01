@@ -3,7 +3,11 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    # 两类 tag 都要匹配，否则镜像 tag 连 workflow 都不会触发：
+    #   v*          dshm 自己的发布 tag（v2026.10.01-2）
+    #   [0-9]*      镜像 tag（0.2.0-rc.2-2026.10.01-2）—— 以 dsh 版本号开头
+    # 各作业再用 if 区分自己该不该跑（见下方 build-* / release-admin）。
+    tags: ['v*', '[0-9]*']
   pull_request:
     branches: [main]
   workflow_dispatch:

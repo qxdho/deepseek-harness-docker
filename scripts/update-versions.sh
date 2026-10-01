@@ -96,7 +96,9 @@ targets_of() {
 	case "$1" in
 	DSH_VERSION) printf 'dce' ;;
 	DSH_AUTH_GATE_VERSION) printf 'dce' ;;
-	PNPM_VERSION) printf 'dc' ;; # 只报告不写，这里仅用于一致性
+	PNPM_VERSION) printf 'd' ;; # 只在 Dockerfile（compose 与 .env.example 都没有它）；
+	# 且它在上面的表里标了 :skip，永远不会走到 apply_version —— 这里写 'd' 只是
+	# 让"目标文件"与实际相符，避免下次有人取消 skip 时照着错的清单改。
 	*) printf 'dce' ;;
 	esac
 }

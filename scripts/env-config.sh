@@ -237,6 +237,18 @@ rewrite_env_atomic() { # <命令> [参数…]
 		owner=""
 	fi
 	tmp="$(mktemp "${dir}/.env.tmp.XXXXXX" 2>/dev/null)" || return 1
+	# **显式**确认源文件可读，不能只靠调用方的 `set -o pipefail`。
+	#
+	# 原因：`cat "$target" | filter > tmp` 这个管道里，`cat` 失败（文件被 chmod 000、
+	# 或权限不足）时管道的退出码是**过滤器**的（成功），于是过滤器拿到空输入、合理地
+	# 认为"输入是空的"，输出一个只剩新增键的文件，`mv` 覆盖后**原文件被清空**。
+	# 实测：无 pipefail 时 set_env 返回 0 且 .env 被静默重写成只剩 DSH_UID=1111；
+	# 有 pipefail 时 rc=1、文件原样。本仓库调用方都带 pipefail，但 env-config 是被
+	# source 复用的库，不该依赖调用方的 shell 选项才能保证数据安全。
+	if [ -e "$target" ] && [ ! -r "$target" ]; then
+		rm -f "$tmp"
+		return 1
+	fi
 	if ! cat "$target" 2>/dev/null | "$@" >"$tmp"; then
 		rm -f "$tmp"
 		return 1

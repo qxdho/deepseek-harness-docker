@@ -15,7 +15,6 @@
 # 调用方（dshm）需已提供：hdr/info/ok/warn/die、env_value、is_root、
 # PROJECT_DIR/CONTAINER；read_secret/SECRET 由 scripts/env-config.sh 提供。
 
-ADMIN_SERVICE=dsh-admin
 
 admin_help() {
 	cat <<EOF
@@ -93,7 +92,7 @@ admin_locate_bin() {
 
 		# 该 tag 的 release 里可能还没有该架构产物（CI 尚未发布完），退回 latest
 		if [ -n "$ver" ]; then
-			warn "v${ver} 的 release 里没有 ${arch} 产物，改从 latest 尝试" >&2
+			warn "${ver} 的 release 里没有 ${arch} 产物，改从 latest 尝试" >&2
 			url="https://github.com/qxdho/deepseek-harness-docker/releases/latest/download/dsh-admin-linux-${arch}"
 			if curl -fsSL -o "$candidate" "$url" && chmod +x "$candidate"; then
 				printf '%s' "$candidate"

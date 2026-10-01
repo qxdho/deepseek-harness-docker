@@ -47,6 +47,12 @@ for s in "${scripts[@]}"; do
 	filtered+=("$s")
 done
 
+# **面板的测试也一起跑**。它不是 scripts/test-*.sh（在 admin/ 下、依赖 go 现场构建），
+# 所以不会被上面的通配符发现 —— 结果本地从来不跑它，只有 CI 单独跑（盲区：
+# 本地全绿但 CI 在面板测试上红）。它无 go 时自己会打印提示并以 0 退出，安全。
+if [ -f "$root/admin/test-admin.sh" ]; then
+	filtered+=("$root/admin/test-admin.sh")
+fi
 if [ "${#filtered[@]}" = "0" ]; then
 	echo "没有找到任何测试脚本（scripts/test-*.sh）" >&2
 	exit 1

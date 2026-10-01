@@ -41,9 +41,10 @@ require_docker() {
 	docker compose version >/dev/null 2>&1 || die "未找到 docker compose v2"
 }
 require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env，请先运行 ./install.sh"; }
-# 容器是否在运行。**只有这一个实现** —— 之前散在三处（require_running、disk 分支、
-# current_dsh_version 里各写一遍 `docker inspect … | grep -q true`），改判断条件时
-# 要记得改三处。
+# 容器是否在运行。**dshm 侧只有这一个实现** —— 之前散在三处（require_running、disk
+# 分支、current_dsh_version）各写一遍 `docker inspect … | grep -q true`，改判断条件时
+# 要记得改三处。（scripts/smoke-*.sh 里另有几处，那是独立的自检脚本、有自己的变量名，
+# 不共享 dshm 的函数；它们不随 dshm 一起演进，所以不强行合并。）
 container_running() {
 	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true
 }
@@ -639,12 +640,18 @@ ${py_body}" 2>/dev/null
 	fi
 	return 1
 }
-# 从 registry JSON 里抽出「每行一个版本，按 semver 升序」
+# 从 registry JSON 里抽出「每行一个版本，按 semver 升序」。
+#
+# **显式检查查询是否失败**，不靠调用方的 `set -o pipefail`：`json_query … | sort -V`
+# 里管道的退出码是 `sort` 的（成功），所以三个解释器全缺时本函数会"成功返回空"
+# —— 是否报错取决于调用方开没开 pipefail。本仓库调用方都带 pipefail，但这种
+# "契约随环境变化"的函数不该存在：谁在别处调用一次就中招。
 dsh_versions_sorted() {
-	local json="$1"
-	printf '%s' "$json" | json_query '.versions | keys[]' \
+	local json="$1" out
+	out="$(printf '%s' "$json" | json_query '.versions | keys[]' \
 		'Object.keys(d.versions||{}).forEach(v=>console.log(v))' \
-		'print("\n".join(d.get("versions",{}).keys()))' | sort -V
+		'print("\n".join(d.get("versions",{}).keys()))')" || return 1
+	printf '%s\n' "$out" | sort -V
 }
 
 dsh_dist_tags() {
@@ -721,7 +728,7 @@ show_dsh_versions() {
 	[ -n "$all" ] || die "registry 响应里没有版本信息"
 
 	cur="$(current_dsh_version)"
-	tags="$(dsh_dist_tags "$json")"
+	tags="$(dsh_dist_tags "$json" 2>/dev/null || true)"
 	latest="$(printf '%s\n' "$all" | tail -1)"
 	total="$(printf '%s\n' "$all" | wc -l | tr -d ' ')"
 

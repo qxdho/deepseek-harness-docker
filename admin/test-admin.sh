@@ -28,7 +28,22 @@ if [ -z "$BIN" ]; then
 		echo "需要 go，或设置 DSH_ADMIN_BIN 指向已构建的 dsh-admin"
 		exit 1
 	fi
-	(cd "$HERE" && go build -trimpath -ldflags='-s -w' -o "$tmp/dsh-admin" .)
+	# 本地工具链版本低于 go.mod 要求时（本地旧 Go / CI 用匹配版本），go 会直接报
+	#   go: go.mod requires go >= 1.27 (running go 1.24.5; GOTOOLCHAIN=local)
+	# 这不是代码问题 —— 明确**跳过**（exit 0，不是 exit 1），否则本地每次跑
+	# test-all.sh 都会因为这一条而失败，久而久之就没人看了（test-go.sh 曾踩同一个坑：
+	# 那边是 vet 会跳过、test 却 FAIL 的不对称）。
+	# 注意要区分"版本不满足"与"真编译错误"：后者必须仍然失败。
+	build_log="$tmp/build.log"
+	if ! (cd "$HERE" && go build -trimpath -ldflags='-s -w' -o "$tmp/dsh-admin" .) >"$build_log" 2>&1; then
+		if grep -q 'go.mod requires go\|GOTOOLCHAIN=\|go: downloading go1\.' "$build_log" 2>/dev/null; then
+			echo "本地 go 工具链与 go.mod 不匹配，跳过面板离线测试（CI 里会跑）"
+			exit 0
+		fi
+		echo "面板构建失败："
+		head -20 "$build_log" | sed 's/^/  /'
+		exit 1
+	fi
 	BIN="$tmp/dsh-admin"
 fi
 command -v curl >/dev/null 2>&1 || { echo "需要 curl"; exit 1; }

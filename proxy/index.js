@@ -114,6 +114,66 @@ function peerAddress(req) {
 // 统一改写 Host/Origin。客户端自带的 X-Forwarded-* 一律丢掉：
 //   - X-Forwarded-For 由我们重算（dsh-auth-gate 的限流键取自它）；
 //   - X-Forwarded-Host/-Port/-Proto 不往上带，避免客户端伪造成任意值。
+//
+// **为什么直接改 req.headers，而不是用 proxyReq 钩子**：
+//   http-proxy 只在 `!proxyReq.getHeader('expect')` 时才 emit `proxyReq`
+//   （见 node_modules/http-proxy/lib/http-proxy/passes/web-incoming.js:131-134），
+//   而 setupOutgoing 是 `extend({}, req.headers)` —— 于是带 `Expect: 100-continue`
+//   的请求会**完整跳过**头改写，客户端伪造的 Host/Origin/XFF 原样到达上游。
+//   dsh-auth-gate 默认信任来自 127.0.0.1 的 X-Forwarded-For，所以这就等于把登录限流
+//   的 IP 键交给客户端，可以随意换 IP 绕过限流。
+//   在调用 proxy.web 之前改 req.headers 则与那条分支无关，一定生效。
+const HOP_BY_HOP = [
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+];
+
+function rewriteIncomingHeaders(req) {
+  const h = req.headers;
+  h.host = UPSTREAM_AUTHORITY;
+  h.origin = `http://${UPSTREAM_AUTHORITY}`;
+  // 注意：必须先算 clientAddress 再改写 XFF —— 它会读原值（TRUST_XFF 模式取最后一段）。
+  // 而我们算出来的就是"可信链的最后一跳"。
+  const client = clientAddress(req);
+  if (client !== undefined) {
+    h['x-forwarded-for'] = client;
+  } else {
+    delete h['x-forwarded-for'];
+  }
+  delete h['x-forwarded-host'];
+  delete h['x-forwarded-port'];
+  delete h['x-forwarded-proto'];
+  // 其它常被用来冒充客户端 IP 的头一并删掉：`.env.example` 允许用
+  // DSH_CLIENT_IP_HEADER 指定取值头，若那个头没被清理，改配置就等于把限流键交给客户端。
+  for (const name of Object.keys(h)) {
+    const lower = name.toLowerCase();
+    if (
+      lower === 'x-real-ip' ||
+      lower === 'cf-connecting-ip' ||
+      lower === 'x-client-ip' ||
+      lower === 'true-client-ip' ||
+      lower === 'forwarded' ||
+      lower === 'x-forwarded'
+    ) {
+      delete h[name];
+    }
+  }
+  // 删掉 Expect：否则 http-proxy 走的是"等上游 100"的分支，而我们已经把
+  // Content-Length 之类都定好了；同时避免上游 100-continue 与我们的改写竞争。
+  delete h.expect;
+  for (const name of HOP_BY_HOP) delete h[name];
+  // accept-encoding 固定为 identity：注入逻辑不做压缩，这样上游直接给明文
+  h['accept-encoding'] = 'identity';
+}
+
+// 兼容旧调用点（proxyReq 钩子仍保留，覆盖没有 Expect 的常规请求；
+// 两条路径写的是同一组头，幂等）。
 function setForwardHeaders(proxyReq, req) {
   proxyReq.setHeader('host', UPSTREAM_AUTHORITY);
   proxyReq.setHeader('origin', `http://${UPSTREAM_AUTHORITY}`);
@@ -256,9 +316,14 @@ proxy.on('error', (err, req, res) => {
 });
 
 const server = http.createServer((req, res) => {
+  // 先改写头再交给 http-proxy —— 不能依赖 proxyReq 钩子（带 Expect 时它不触发）
+  rewriteIncomingHeaders(req);
   proxy.web(req, res);
 });
-server.on('upgrade', (req, socket, head) => proxy.ws(req, socket, head));
+server.on('upgrade', (req, socket, head) => {
+  rewriteIncomingHeaders(req);
+  proxy.ws(req, socket, head);
+});
 
 server.listen(LISTEN_PORT, '0.0.0.0', () => {
   console.log(`[proxy] 0.0.0.0:${LISTEN_PORT} -> ${TARGET}（Host/Origin 改写为 ${UPSTREAM_AUTHORITY}${TRUST_XFF ? '，信任 X-Forwarded-For' : ''}）`);

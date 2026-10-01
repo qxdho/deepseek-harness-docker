@@ -206,6 +206,35 @@ const INJECT_ID = 'dsh-forward-inject';
     bad(`未伪造时 XFF 不正常：${plainXff}`);
   }
 
+
+  // 8b. `Expect: 100-continue` 不能绕过头改写
+  //
+  // 这里曾是真漏洞：http-proxy 只在 `!proxyReq.getHeader('expect')` 时才 emit
+  // `proxyReq` 事件（web-incoming.js:131-134），而它是 `extend({}, req.headers)`
+  // 把头带过去的。于是带 Expect 的请求**完整跳过**我们的 Host/Origin/XFF 改写，
+  // 客户端伪造的 X-Forwarded-For 原样抵达上游 —— 而 dsh-auth-gate 默认信任来自
+  // 127.0.0.1 的该头，等于把登录限流的 IP 键交给客户端，换个假 IP 就能绕过限流。
+  //
+  // 修法是直接改 req.headers（在 proxy.web 之前），与那条分支无关。
+  const expSpoof = await get(PROXY_PORT, '/echo-xff', {
+    'x-forwarded-for': '9.9.9.9',
+    expect: '100-continue',
+  });
+  let expXff = null;
+  try {
+    expXff = JSON.parse(expSpoof.body).xff;
+  } catch {
+    expXff = null;
+  }
+  if (expXff === null) {
+    bad('带 Expect 时上游没收到 XFF（无法判断客户端 IP）');
+  } else if (expXff.includes('9.9.9.9')) {
+    bad(`带 Expect 时伪造的 XFF 被转发到上游：${expXff}（限流可被绕过）`);
+  } else if (/127\.0\.0\.1|::1|::ffff:127\.0\.0\.1/.test(expXff)) {
+    ok(`带 Expect: 100-continue 时 XFF 仍被重算为真实 peer（${expXff}）`);
+  } else {
+    bad(`带 Expect 时 XFF 不可识别：${expXff}`);
+  }
   // 9. 注入里不应再有「重启 DSH」按钮 / 重启接口（已移除，重启改走管理面板命令台）
   if (!normal.body.includes('/__dsh_restart') && !normal.body.includes('dsh-restart-button')) {
     ok('不再注入重启按钮与重启接口');

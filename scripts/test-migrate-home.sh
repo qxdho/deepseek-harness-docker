@@ -314,5 +314,58 @@ reset_fake only_dsh-home
 rc=0
 migrate_legacy_home auto || rc=$?
 [ "$rc" = "0" ] && pass "只有一个候选时照常自动迁移" || fail "单候选应能迁移，实际 rc=$rc"
+
+# ── 8. 落位与属主：两个"报了成功但其实是坏的"路径 ─────────────────────────────
+echo "== 8. 落位失败与属主改写失败都必须明确失败 =="
+
+# 这两条用例专门验"报错路径"的**用户可见输出**，所以临时把 warn/info 改成会打印的
+# （测试顶部把它们定义成 `:` 是为了让其它用例的输出干净——这里必须看到内容）。
+warn() { printf 'WARN %s\n' "$*"; }
+info() { printf 'INFO %s\n' "$*"; }
+# ⚠ 说明局限：本机无法构造"**顶层** chown 成功、深层失败"的场景（当前进程不是 root，
+# chown 整体就失败了），所以旧实现（`chown -R … || true` + 只校验顶层）在这里也会
+# 因为最后那道 owner_ok 兜底而返回 3 —— **这条用例区分不出新旧实现**。
+# 它仍有价值：钉住"属主改不了时必须返回非 0 且给出修复命令"这个对外行为。
+# 真正修掉的是那种"顶层对了、深层还是 root"的安静成功，需要 root 环境才能复现。
+# 8a. chown 报错时不能报「迁移成功」
+# 原来两处 `chown -R … || true` 吞掉失败，然后只校验**顶层**目录的属主 ——
+# "顶层对了、深层还是 root"也会打印成功，而深层写不进去一样让容器起不来。
+new_case chown-fails
+# 故意要一个不等于当前进程的 uid，这样 owner_ok 为假、必然走 chown 分支
+printf 'DSH_HOME_HOST=%s\nDSH_UID=4242\nDSH_GID=4242\n' "$(dst_of)" >"$ENV_FILE"
+reset_fake old_dsh-home
+printf 'data\n' >"$FAKE/src/settings.yaml"
+# 覆盖 chown 让它必然失败（模拟"部分文件改不动"）
+chown() { return 1; }
+rc=0
+out8a="$(migrate_legacy_home explicit 2>&1)" || rc=$?
+unset -f chown
+[ "$rc" != "0" ] && pass "chown 失败时返回非 0（rc=$rc）" || fail "chown 失败却报成功"
+case "$out8a" in
+*"sudo chown -R"*) pass "提示里给出了要手工执行的 chown 命令" ;;
+*) fail "没有给出 chown 修复命令：$(printf '%s' "$out8a" | tail -3 | tr '\n' ' ')" ;;
+esac
+
+# 8b. rmdir 失败时不得把临时目录塞进目标里一层
+# `rmdir` 只在空目录上成功；失败说明它非空或不可删。此时 `mv tmp dest` 不替换 dest，
+# 而是把 tmp 塞进 dest 里一层 —— 数据落错位置却走成功路径。
+new_case rmdir-fails
+set_dest
+reset_fake old2_dsh-home
+printf 'data\n' >"$FAKE/src/settings.yaml"
+# 让目标目录存在且非空（dest_is_empty 会因此返回"非空"）→ 走不到落位；
+# 所以这里改为让目标存在但"看起来空"、再让 rmdir 必然失败
+mkdir -p "$(dst_of)"
+rmdir() { return 1; }
+rc=0
+out8b="$(migrate_legacy_home explicit 2>&1)" || rc=$?
+unset -f rmdir
+# 无论走哪条分支，都不能出现"目标里套着一层临时目录"的形态
+if find "$(dst_of)" -maxdepth 1 -name '.migrating.*' 2>/dev/null | grep -q .; then
+	fail "临时目录被塞进了目标里：$(ls -A "$(dst_of)" | tr '\n' ' ')"
+else
+	pass "没有把临时目录塞进目标目录"
+fi
+[ "$rc" != "0" ] && pass "rmdir 失败时返回非 0（rc=$rc）" || pass "该场景由 dest_is_empty 提前拦下（rc=$rc），无嵌套残留"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

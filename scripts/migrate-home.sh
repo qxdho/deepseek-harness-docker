@@ -91,7 +91,7 @@ stop_own_containers_using_volume() {
 #   3 = auto 模式下放弃（旧卷被别的容器占用 / 建不了目录 / 复制失败）
 # explicit 模式下，上述失败原因一律 die（命令是用户主动敲的，要给出明确结论）。
 migrate_legacy_home() {
-	local mode="${1:-auto}" dest vol cu cg
+	local mode="${1:-auto}" dest vol cu cg n_vol chown_ok
 	dest="$(env_value DSH_HOME_HOST /dsh)"
 	vol="$(legacy_dsh_home_volume)"
 	[ -n "$vol" ] || return 1
@@ -161,9 +161,18 @@ $(printf '%s\n' "$vol" | sed 's/^/          /')
 		warn "迁移失败（源卷 ${vol}）；原数据与目标目录均未改动，可重试 ./dshm migrate"
 		return 3
 	fi
-	# 目标此刻被 dest_is_empty 保证过是空的（或不存在），改名是原子的
+	# 目标此刻被 dest_is_empty 保证过是空的（或不存在）。
+	#
+	# `rmdir` 失败时必须**明确失败**：`rmdir` 只在"空目录"上成功，失败说明它不空或
+	# 不可删（挂载点等）。此时 `mv tmp dest` 不会替换 dest，而是把 tmp **塞进 dest
+	# 里一层**（`dest/<basename tmp>`）—— 数据落错位置，脚本却走成功路径。
 	if [ -e "$dest" ]; then
-		rmdir "$dest" 2>/dev/null || true
+		if ! rmdir "$dest" 2>/dev/null; then
+			rm -rf "$tmp_dest" 2>/dev/null || true
+			[ "$mode" = "explicit" ] && die "无法清空 ${dest}（非空或不可删）就位失败；原数据未改动"
+			warn "无法清空 ${dest}（非空或不可删），已放弃落位；原数据未改动"
+			return 3
+		fi
 	fi
 	if ! mv "$tmp_dest" "$dest" 2>/dev/null; then
 		rm -rf "$tmp_dest" 2>/dev/null || true
@@ -186,14 +195,24 @@ $(printf '%s\n' "$vol" | sed 's/^/          /')
 		[ "$o" = "${cu}:${cg}" ]
 	}
 	if ! owner_ok "$dest"; then
+		# **不要** `|| true`：`chown -R` 在部分文件上失败时仍会返回非 0，原来吞掉它
+		# 之后只校验顶层，于是"顶层对了、深层还是 root"也报「迁移成功」——
+		# 而深层属主不对一样会让容器写不进去。（校验深层全部条目代价太高，
+		# 直接看 chown 自己的退出码更准。）
+		chown_ok=0
 		if [ "$(id -u)" = "0" ]; then
-			chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+			chown -R "${cu}:${cg}" "$dest" 2>/dev/null && chown_ok=1
 		elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-			sudo -n chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+			sudo -n chown -R "${cu}:${cg}" "$dest" 2>/dev/null && chown_ok=1
 		else
 			warn "数据已迁移，但无法把 ${dest} 的属主改成 ${cu}:${cg}（需要 root 或免密 sudo）。"
 			info "请手工执行：sudo chown -R ${cu}:${cg} ${dest}"
 			info "属主不对的话容器会因无法写入而反复重启。"
+			return 3
+		fi
+		if [ "$chown_ok" != "1" ]; then
+			warn "改属主时 chown 报错（可能有文件没改成），${dest} 的部分内容属主仍不是 ${cu}:${cg}。"
+			info "请手工执行：sudo chown -R ${cu}:${cg} ${dest}"
 			return 3
 		fi
 		if ! owner_ok "$dest"; then

@@ -158,29 +158,31 @@ jobs:
       # **跑冒烟的就是将要发布的那个 digest** —— 不存在「测的是一份、推的是另一份」的风险。
       #
       # 待检 tag 带 run id，并发 run 之间互不干扰，用完即删。
-      - name: 构建并推送到待检 tag
-        id: stage
+      # 先本地构建一份用于冒烟，再构建多平台推送到 GHCR。
+      #
+      # 为什么要构建两次：buildx **无法把多平台镜像 load 进本地 docker**（单平台才行），
+      # 所以「先构建再推送同一个 digest」这条路走不通。曾试过「推一个待检 tag → 拉回来
+      # 测 → 通过后 imagetools create 派生正式 tag」，但 `docker buildx imagetools`
+      # **没有 rm 子命令**（只有 create / inspect），待检 tag 删不掉，会永久堆积。
+      #
+      # 第二次构建**完全命中 GHA 缓存**（下面两个步骤共用 cache-from/cache-to），
+      # 只组装 manifest，实测只多几秒 —— 相比「多留一堆删不掉的 tag」，这个代价可以接受。
+      - name: 本地构建（仅 amd64，用于冒烟）
         run: |
-          set -euo pipefail
-          staging="${REGISTRY}/${IMAGE_NAME}:staging-${GITHUB_RUN_ID}"
-          echo "staging=${staging}" >> "$GITHUB_OUTPUT"
           docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --push \
-            --tag "$staging" \
+            --platform linux/amd64 \
+            --load \
+            --tag dsh-test:smoke \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
             --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             .
-          echo "已推送待检镜像：${staging}"
 
-      - name: 拉取待检镜像（amd64）并跑冒烟
+      - name: 冒烟测试
         run: |
           set -euo pipefail
-          # 冒烟脚本要求镜像已在本地（只在镜像不存在时它才会自己构建）
-          docker pull --platform linux/amd64 "${{ steps.stage.outputs.staging }}"
-          ./scripts/smoke-test.sh "${{ steps.stage.outputs.staging }}"
+          ./scripts/smoke-test.sh dsh-test:smoke
 
       - id: meta
         uses: docker/metadata-action@v5
@@ -193,33 +195,19 @@ jobs:
             # 精确到提交，便于排查；同一提交重复构建内容可能不同，故不作为版本依据
             type=sha,format=short
 
-      - name: 打正式 tag（只改引用，不重新构建）
+      - name: 构建多平台并推送
         run: |
-          set -euo pipefail
-          staging="${{ steps.stage.outputs.staging }}"
-          while IFS= read -r t; do
-            [ -n "$t" ] || continue
-            echo "  ${staging}  →  ${t}"
-            docker buildx imagetools create --tag "$t" "$staging"
-          done <<TAGS
-          ${{ steps.meta.outputs.tags }}
-          TAGS
-
-      - name: 清理待检 tag
-        if: always()
-        run: |
-          # 用完即删。tag 里带 run id，不会动到并发 run 正在用的那份。
-          #
-          # 用 if/else 而不是 `A && echo ok || echo fail`：后者不是 if-then-else ——
-          # 当 A 成功但第一个 echo 失败时，第二个 echo 也会执行（shellcheck SC2015）。
-          if docker buildx imagetools rm "${{ steps.stage.outputs.staging }}" 2>/dev/null; then
-            echo "已清理待检 tag"
-          else
-            echo "待检 tag 已不存在或无法删除（无碍：它只是临时引用）"
-          fi
-  # 静态检查与离线测试 —— 不需要 docker、也不构建镜像。
-  #
-  # 与 build 作业并行：build 负责「构建镜像 → 推送前跑冒烟 → 打正式 tag」，
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            --tag "${{ steps.meta.outputs.tags }}" \
+            --label "${{ steps.meta.outputs.labels }}" \
+            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+          echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
   # 本作业只管纯静态/离线检查，两者互不依赖。
   checks:
     needs: changes
@@ -252,6 +240,14 @@ jobs:
             "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz"
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
           /tmp/actionlint -color .github/workflows/*.yml
+
+      # 再跑一遍不依赖 shellcheck 的内嵌脚本检查。
+      #
+      # actionlint 的 shellcheck 部分**依赖 runner 装了 shellcheck**；本地往往没装，
+      # 于是 actionlint「静默通过」而 CI 报错 —— 这个坑踩过两次。本脚本用 bash -n 与
+      # 形态扫描覆盖语法层面，任何环境都能跑。
+      - name: 校验 workflow 内嵌脚本
+        run: ./scripts/check-workflow.sh
 
       - name: 离线测试（自动发现 scripts/test-*.sh）
         run: ./scripts/test-all.sh -v
@@ -348,7 +344,13 @@ jobs:
           # 所以「面板是 dshm 的附属功能、两者同版本」由机制保证，不靠人记。
           # 在仓库根执行时 tag 名形如 v2026.09.30，这里加上 v 前缀保持一致。
           VER="v$(tr -d ' \t\r\n' < ../VERSION)"
-          [ -n "$VER" ] && [ "$VER" != "v" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          # 用 if 而不是「与运算接或运算」的简写（shellcheck SC2015）：那种写法不是
+          # if-then-else —— 前半成立但中间那条命令本身失败时，兜底分支也会执行，
+          # 于是「读到了 VERSION」却被报成「读不到」。
+          if [ -z "$VER" ] || [ "$VER" = "v" ]; then
+            echo "读不到 VERSION" >&2
+            exit 1
+          fi
           echo "注入版本：$VER（供 dsh-admin -version 与面板「自身版本」使用）"
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
@@ -433,7 +435,13 @@ jobs:
           #   read dshm-v<版本>: is a directory
           # 然后重试三次全败、整个 job 变红。这个坑很难从报错本身看出来。
           VER="v$(tr -d ' \t\r\n' < VERSION)"
-          [ -n "$VER" ] && [ "$VER" != "v" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          # 用 if 而不是「与运算接或运算」的简写（shellcheck SC2015）：那种写法不是
+          # if-then-else —— 前半成立但中间那条命令本身失败时，兜底分支也会执行，
+          # 于是「读到了 VERSION」却被报成「读不到」。
+          if [ -z "$VER" ] || [ "$VER" = "v" ]; then
+            echo "读不到 VERSION" >&2
+            exit 1
+          fi
           PKG="dshm-${VER}.tar.gz"
           [ -f "$PKG" ] || { echo "::error::找不到 $PKG" >&2; exit 1; }
           [ -f "${PKG}.sha256" ] || { echo "::error::找不到 ${PKG}.sha256" >&2; exit 1; }

@@ -105,8 +105,10 @@ $(git status --short | sed 's/^/      /')"
 ok "工作区干净"
 
 if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+	# 提示里不要写死 "${want}-$((0))" —— 那永远显示 -0，是条错误建议。
 	die "tag ${tag} 已存在。
-      同一天重发请换序号（下一个：${want}-$((0)) 之类），或先确认是不是重复执行。"
+      若是同一天重发，换个序号即可（不带参数运行本脚本会自动取下一个可用号）；
+      想先看看当天已有哪些：git tag -l 'v${day}*'"
 fi
 ok "tag ${tag} 尚未占用"
 

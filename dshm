@@ -462,7 +462,27 @@ prepare_workspace() {
 img_base() {
 	# 默认值写在这里（而不是顶层常量）：函数一定在变量赋值之后才被调用，
 	# 把默认值放在函数体内就不存在「常量定义没被执行」的风险。
-	printf '%s' "${DSH_IMAGE_BASE:-ghcr.io/qxdho/deepseek-harness-docker}"
+	#
+	# 但**不能只认 DSH_IMAGE_BASE**：.env.example 里并没有这一项，用户能配的是
+	# DSH_IMAGE（如指向私有 registry 的镜像）。若只认前者，`version update` 会把
+	# 用户配好的 DSH_IMAGE 覆盖回默认 registry —— 配置被静默改掉。
+	# 所以：显式的 DSH_IMAGE_BASE 优先，其次从现有 DSH_IMAGE 里取仓库部分，最后才是默认值。
+	local base
+	if [ -n "${DSH_IMAGE_BASE:-}" ]; then
+		printf '%s' "$DSH_IMAGE_BASE"
+		return
+	fi
+	base="$(env_value DSH_IMAGE "")"
+	if [ -n "$base" ]; then
+		# 去掉 :tag 部分（顺带处理 host:port 形式：只在最后一段冒号后不含 / 时才当 tag）
+		case "$base" in
+		*:*/*) printf '%s' "${base%:*}" ;; # host:port/...:tag
+		*:*) printf '%s' "${base%%:*}" ;;   # repo:tag
+		*) printf '%s' "$base" ;;
+		esac
+		return
+	fi
+	printf '%s' "ghcr.io/qxdho/deepseek-harness-docker"
 }
 
 # GHCR 的匿名 pull token（只读，列 tag 不需要登录）

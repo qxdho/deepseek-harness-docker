@@ -335,11 +335,18 @@ new_case chown-fails
 printf 'DSH_HOME_HOST=%s\nDSH_UID=4242\nDSH_GID=4242\n' "$(dst_of)" >"$ENV_FILE"
 reset_fake old_dsh-home
 printf 'data\n' >"$FAKE/src/settings.yaml"
-# 覆盖 chown 让它必然失败（模拟"部分文件改不动"）
+# 让"改属主"这两条路径**两种环境下都必然失败**：
+#   * 非 root 分支：sudo -n 必须失败（否则会真的去 chown），用一个必然返回非 0 的
+#     sudo 替身钉住；
+#   * root 分支：chown 替身必然失败。
+# 这条用例原先只在"当前进程不是 root"时成立 —— CI 以 root 跑，`chown -R` 直接成功、
+# 脚本返回 0，测试就红了。**测试不能依赖运行者身份**。
+chown() { return 1; }
+sudo() { return 1; }
 chown() { return 1; }
 rc=0
 out8a="$(migrate_legacy_home explicit 2>&1)" || rc=$?
-unset -f chown
+unset -f chown sudo
 [ "$rc" != "0" ] && pass "chown 失败时返回非 0（rc=$rc）" || fail "chown 失败却报成功"
 case "$out8a" in
 *"sudo chown -R"*) pass "提示里给出了要手工执行的 chown 命令" ;;

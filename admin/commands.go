@@ -14,76 +14,96 @@ import (
 // （面板本身已经持有 docker.sock，本来就是高权限组件；这里只是把"顺手提权"
 // 的最小阻力去掉。）
 
-// 需要交互输入的命令，命令台无法非交互执行，明确拒绝而不是让用户干等。
-// 只需要列 allowedPaths 里确实存在的那些（其余属于"不在白名单"）。
-var interactivePaths = map[string]bool{
-	"service shell": true,
-	"auth password": true,
-	"auth user add": true,
+// 命令表：**这是唯一的一份**。
+//
+// 原来这里是三张手工平行的表 —— allowedPaths（白名单）、commandCatalog（按钮 +
+// 描述）、interactivePaths（不可非交互执行）—— 靠注释维持一致。它们确实漂移过：
+// 白名单里有但按钮列表里没有（能执行却找不到入口），以及 `version update` 的参数
+// 形式只在描述里写对、白名单里写错。
+//
+// 现在合并成一张：
+//   - `path`        命令路径（token 级前缀匹配；后面可以跟参数）
+//   - `desc`        UI 上的说明；空串表示**不列进按钮**（例如 help 类、纯交互类）
+//   - `interactive` 需要交互输入，命令台无法执行 → 明确拒绝而不是让用户干等
+//
+// allowedPaths / commandCatalog / interactivePaths 都由它派生，见下面的 init()。
+// 这样"加了白名单却忘了加按钮"这类漂移在结构上就不可能发生。
+type commandSpec struct {
+	path        []string
+	desc        string
+	interactive bool
 }
 
-// 允许执行的完整命令路径（token 级前缀匹配；后面可以跟参数）。
-// 与 dshm 的分组结构一一对应：service / version / auth / dshm / admin。
-var allowedPaths = [][]string{
-	{"service", "up"},
-	{"service", "down"},
-	{"service", "restart"},
-	{"service", "status"},
-	{"service", "logs"},
-	{"service", "shell"},
-	{"service", "url"},
-	{"service", "help"},
-	{"version", "show"},
-	{"version", "list"},
-	{"version", "update"},
-	{"version", "help"},
-	{"auth", "help"},
-	{"auth", "password"},
-	{"auth", "user", "list"},
-	{"auth", "user", "add"},
-	{"auth", "user", "disable"},
-	{"auth", "totp", "enable"},
-	{"auth", "totp", "disable"},
-	{"dshm", "install"},
-	{"dshm", "uninstall"},
-	{"dshm", "update"},
-	{"dshm", "help"},
-	{"admin", "help"},
-	{"admin", "status"},
-	{"admin", "logs"},
-	{"admin", "url"},
-	{"disk"},
-	{"help"},
+var commandTable = []commandSpec{
+	// ── 容器生命周期 ──
+	{path: []string{"service", "up"}, desc: "启动 / 应用 .env 改动"},
+	{path: []string{"service", "restart"}, desc: "重启 dsh"},
+	{path: []string{"service", "down"}, desc: "停止（数据保留）"},
+	{path: []string{"service", "status"}, desc: "健康 / 端口 / 登录用户"},
+	{path: []string{"service", "logs"}, desc: "查看 dsh 日志"},
+	{path: []string{"service", "url"}, desc: "一次性 launch URL"},
+	{path: []string{"service", "shell"}, interactive: true},
+	{path: []string{"service", "help"}},
+
+	// ── dsh 版本 ──
+	{path: []string{"version", "show"}, desc: "看全四个 dsh 版本"},
+	{path: []string{"version", "list"}, desc: "列出可装的 dsh 版本（npm）"},
+	{path: []string{"version", "update"}, desc: "升级（默认拉已构建镜像；--build 本地构建）"},
+	{path: []string{"version", "help"}},
+
+	// ── 登录凭据 ──
+	{path: []string{"auth", "user", "list"}, desc: "列出登录用户"},
+	{path: []string{"auth", "user", "add"}, interactive: true},
+	{path: []string{"auth", "user", "disable"}, desc: "禁用用户（跟用户名）"},
+	{path: []string{"auth", "totp", "enable"}, desc: "开启两步验证（跟用户名）"},
+	{path: []string{"auth", "totp", "disable"}, desc: "关闭两步验证（跟用户名）"},
+	{path: []string{"auth", "password"}, interactive: true},
+	{path: []string{"auth", "help"}},
+
+	// ── dshm 自身 ──
+	{path: []string{"dshm", "install"}, desc: "把 dshm 注册为系统命令"},
+	{path: []string{"dshm", "uninstall"}, desc: "移除系统命令"},
+	{path: []string{"dshm", "update"}, desc: "更新 dshm 自身（从 GitHub 拉取）"},
+	{path: []string{"dshm", "help"}},
+
+	// ── 管理面板 ──
+	{path: []string{"admin", "status"}, desc: "面板运行状态"},
+	{path: []string{"admin", "logs"}, desc: "面板日志"},
+	{path: []string{"admin", "url"}, desc: "面板地址"},
+	{path: []string{"admin", "help"}, desc: "面板命令帮助"},
+
+	// ── 顶层 ──
+	{path: []string{"disk"}, desc: "磁盘占用"},
+	{path: []string{"help"}},
 }
 
+// 命令台里一个按钮的信息（JSON 输出给前端）。
 type CommandInfo struct {
 	Path []string `json:"path"`
 	Desc string   `json:"desc"`
 }
 
-// 命令台里列出来的按钮（去掉需要交互的，以及 help 这类没人会点的）。
-var commandCatalog = []CommandInfo{
-	{Path: []string{"service", "up"}, Desc: "启动 / 应用 .env 改动"},
-	{Path: []string{"service", "restart"}, Desc: "重启 dsh"},
-	{Path: []string{"service", "down"}, Desc: "停止（数据保留）"},
-	{Path: []string{"service", "status"}, Desc: "健康 / 端口 / 登录用户"},
-	{Path: []string{"service", "logs"}, Desc: "查看 dsh 日志"},
-	{Path: []string{"version", "show"}, Desc: "看全四个 dsh 版本"},
-	{Path: []string{"version", "list"}, Desc: "列出可装的 dsh 版本（npm）"},
-	{Path: []string{"version", "update"}, Desc: "升级（默认拉已构建镜像；--build 本地构建）"},
-	{Path: []string{"service", "url"}, Desc: "一次性 launch URL"},
-	{Path: []string{"disk"}, Desc: "磁盘占用"},
-	{Path: []string{"auth", "user", "list"}, Desc: "列出登录用户"},
-	{Path: []string{"auth", "user", "disable"}, Desc: "禁用用户（跟用户名）"},
-	{Path: []string{"auth", "totp", "enable"}, Desc: "开启两步验证（跟用户名）"},
-	{Path: []string{"auth", "totp", "disable"}, Desc: "关闭两步验证（跟用户名）"},
-	{Path: []string{"dshm", "install"}, Desc: "把 dshm 注册为系统命令"},
-	{Path: []string{"dshm", "uninstall"}, Desc: "移除系统命令"},
-	{Path: []string{"dshm", "update"}, Desc: "更新 dshm 自身（从 GitHub 拉取）"},
-	{Path: []string{"admin", "status"}, Desc: "面板运行状态"},
-	{Path: []string{"admin", "logs"}, Desc: "面板日志"},
-	{Path: []string{"admin", "url"}, Desc: "面板地址"},
-	{Path: []string{"admin", "help"}, Desc: "面板命令帮助"},
+// 由 commandTable 派生的三份视图。**不要手工维护这三个**。
+var (
+	allowedPaths     [][]string
+	commandCatalog   []CommandInfo
+	interactivePaths = map[string]bool{}
+)
+
+func init() {
+	// 容量按表大小预留，避免运行时扩容
+	allowedPaths = make([][]string, 0, len(commandTable))
+	commandCatalog = make([]CommandInfo, 0, len(commandTable))
+	for _, spec := range commandTable {
+		allowedPaths = append(allowedPaths, spec.path)
+		if spec.interactive {
+			interactivePaths[strings.Join(spec.path, " ")] = true
+		}
+		// desc 为空表示"能执行但不列进按钮"（help 类，以及纯交互类）
+		if spec.desc != "" {
+			commandCatalog = append(commandCatalog, CommandInfo{Path: spec.path, Desc: spec.desc})
+		}
+	}
 }
 
 // 注意：这里曾经有 groupAlias（svc/login/cli/panel）与 legacyAlias（up/pw …）两张

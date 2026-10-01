@@ -27,20 +27,29 @@ else
 	pass "gofmt 合规"
 fi
 
-# vet / test：只在能跑通时才算数。go.mod 声明的版本可能高于本地工具链
-# （本地是旧版 Go、CI 是匹配版本），那种情况下工具链会自己提示，这里当作跳过。
+# 本地工具链版本低于 go.mod 要求时（本地旧 Go / CI 用匹配版本），go 会直接报
+#   go: go.mod requires go >= 1.27 (running go 1.24.5; GOTOOLCHAIN=local)
+# 这不是代码问题，跳过而不是失败 —— 但**必须先判断再跑**：vet 与 test 都要判，
+# 否则会出现"vet 跳过了、test 却 FAIL"的自相矛盾（真踩到过）。
+toolchain_mismatch() { # <日志文件>
+	grep -q 'go.mod requires go\|GOTOOLCHAIN=\|go: downloading go1\.' "$1" 2>/dev/null
+}
+
 if go vet ./... >/tmp/test-go-vet.log 2>&1; then
 	pass "go vet"
+elif toolchain_mismatch /tmp/test-go-vet.log; then
+	skip "本地 go 工具链与 go.mod 不匹配，跳过 vet 与 test（CI 里会跑）"
+	rm -f /tmp/test-go-vet.log /tmp/test-go-test.log
+	run_tests
+	exit $?
 else
-	if grep -q 'go.mod requires go\|GOTOOLCHAIN\|go: downloading' /tmp/test-go-vet.log 2>/dev/null; then
-		skip "本地 go 工具链与 go.mod 不匹配，跳过 vet（CI 里会跑）"
-	else
-		fail "go vet 失败：$(head -3 /tmp/test-go-vet.log | tr '\n' ' ')"
-	fi
+	fail "go vet 失败：$(head -3 /tmp/test-go-vet.log | tr '\n' ' ')"
 fi
 
 if go test ./... >/tmp/test-go-test.log 2>&1; then
 	pass "go test"
+elif toolchain_mismatch /tmp/test-go-test.log; then
+	skip "本地 go 工具链与 go.mod 不匹配，跳过 test（CI 里会跑）"
 else
 	fail "go test 失败：$(grep -E '^(---|\s+---)? *(FAIL|ok)' /tmp/test-go-test.log | head -3 | tr '\n' ' ')"
 fi

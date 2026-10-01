@@ -13,7 +13,7 @@ root="$(cd "$here/.." && pwd)"
 
 # 把 dshm 里被测的几个函数抽出来（用 awk 按函数名取到闭合大括号）
 fnfile="$(mktemp)"
-for fn in dsh_npm_json dsh_versions_sorted dsh_dist_tags dsh_latest_version \
+for fn in json_query dsh_npm_json dsh_versions_sorted dsh_dist_tags dsh_latest_version \
 	current_dsh_version show_dsh_versions; do
 	awk "/^${fn}\\(\\)/,/^}/" "$root/dshm" >>"$fnfile"
 done

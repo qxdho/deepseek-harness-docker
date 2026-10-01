@@ -600,29 +600,45 @@ dsh_npm_json() {
 	curl -fsSL --max-time 20 "$DSH_NPM_REGISTRY/$DSH_NPM_NAME" 2>/dev/null
 }
 
+# 从 stdin 读 JSON，交给可用的解释器执行查询，结果打到 stdout。
+#
+# 为什么要有这个分发器：同一个「jq → node → python3 依次尝试」的级联原来在
+# dsh_versions_sorted / dsh_dist_tags / dsh_latest_version 里各抄了一遍
+# （6 份实现）。想改"多支持一个解释器"或"失败时怎么报"就得改六处，必然漂移。
+#
+# 参数：<jq 表达式> <node 程序体> <python3 程序体>
+#   * node 程序体里：`s` 是读到的原始字符串，`d` 是 JSON.parse 的结果；
+#   * python3 程序体里：`d` 是解析后的 dict。
+# 三个都不可用时返回 1（调用方自己决定怎么提示）。
+json_query() {
+	local jq_expr="$1" node_body="$2" py_body="$3"
+	if command -v jq >/dev/null 2>&1; then
+		jq -r "$jq_expr" 2>/dev/null
+		return $?
+	elif command -v node >/dev/null 2>&1; then
+		node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{try{const d=JSON.parse(s);${node_body}}catch(e){process.exit(1)}})" 2>/dev/null
+		return $?
+	elif command -v python3 >/dev/null 2>&1; then
+		python3 -c "import json,sys
+d=json.load(sys.stdin)
+${py_body}" 2>/dev/null
+		return $?
+	fi
+	return 1
+}
 # 从 registry JSON 里抽出「每行一个版本，按 semver 升序」
 dsh_versions_sorted() {
 	local json="$1"
-	if command -v jq >/dev/null 2>&1; then
-		printf '%s' "$json" | jq -r '.versions | keys[]' 2>/dev/null | sort -V
-	elif command -v node >/dev/null 2>&1; then
-		printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{Object.keys(JSON.parse(s).versions||{}).forEach(v=>console.log(v))}catch(e){process.exit(1)}})' 2>/dev/null | sort -V
-	elif command -v python3 >/dev/null 2>&1; then
-		printf '%s' "$json" | python3 -c 'import json,sys;print("\n".join(json.load(sys.stdin).get("versions",{}).keys()))' 2>/dev/null | sort -V
-	else
-		return 1
-	fi
+	printf '%s' "$json" | json_query '.versions | keys[]' \
+		'Object.keys(d.versions||{}).forEach(v=>console.log(v))' \
+		'print("\n".join(d.get("versions",{}).keys()))' | sort -V
 }
 
 dsh_dist_tags() {
 	local json="$1"
-	if command -v jq >/dev/null 2>&1; then
-		printf '%s' "$json" | jq -r '."dist-tags" | to_entries | map("\(.key)=\(.value)") | join("  ")' 2>/dev/null
-	elif command -v node >/dev/null 2>&1; then
-		printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=JSON.parse(s)["dist-tags"]||{};console.log(Object.entries(t).map(([k,v])=>k+"="+v).join("  "))}catch(e){process.exit(1)}})' 2>/dev/null
-	elif command -v python3 >/dev/null 2>&1; then
-		printf '%s' "$json" | python3 -c 'import json,sys;t=json.load(sys.stdin).get("dist-tags",{});print("  ".join(f"{k}={v}" for k,v in t.items()))' 2>/dev/null
-	fi
+	printf '%s' "$json" | json_query '."dist-tags" | to_entries | map("\(.key)=\(.value)") | join("  ")' \
+		'console.log(Object.entries(d["dist-tags"]||{}).map(([k,v])=>k+"="+v).join("  "))' \
+		'print("  ".join(f"{k}={v}" for k,v in d.get("dist-tags",{}).items()))'
 }
 
 # 当前生效的 dsh 版本：优先问运行中的容器（最准），容器没起就退回 .env / Dockerfile
@@ -674,15 +690,9 @@ img_tag_exists() {
 dsh_latest_version() {
 	local json tags
 	json="$(dsh_npm_json)" || return 1
-	if command -v jq >/dev/null 2>&1; then
-		tags="$(printf '%s' "$json" | jq -r '."dist-tags".latest // empty' 2>/dev/null)"
-	elif command -v node >/dev/null 2>&1; then
-		tags="$(printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)["dist-tags"].latest||""))}catch(e){process.exit(1)}})' 2>/dev/null)"
-	elif command -v python3 >/dev/null 2>&1; then
-		tags="$(printf '%s' "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("dist-tags",{}).get("latest",""))' 2>/dev/null)"
-	else
-		return 1
-	fi
+	tags="$(printf '%s' "$json" | json_query '."dist-tags".latest // empty' \
+		'process.stdout.write(String(d["dist-tags"].latest||""))' \
+		'sys.stdout.write(str(d.get("dist-tags",{}).get("latest","")))' || true)"
 	[ -n "$tags" ] || return 1
 	printf '%s' "$tags"
 }

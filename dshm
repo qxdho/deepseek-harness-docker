@@ -502,19 +502,39 @@ img_base() {
 	# DSH_IMAGE（如指向私有 registry 的镜像）。若只认前者，`version update` 会把
 	# 用户配好的 DSH_IMAGE 覆盖回默认 registry —— 配置被静默改掉。
 	# 所以：显式的 DSH_IMAGE_BASE 优先，其次从现有 DSH_IMAGE 里取仓库部分，最后才是默认值。
-	local base
+	local base repo part
 	if [ -n "${DSH_IMAGE_BASE:-}" ]; then
 		printf '%s' "$DSH_IMAGE_BASE"
 		return
 	fi
 	base="$(env_value DSH_IMAGE "")"
 	if [ -n "$base" ]; then
-		# 去掉 :tag 部分（顺带处理 host:port 形式：只在最后一段冒号后不含 / 时才当 tag）
+		# 去掉 :tag，只认**最后一个 `/` 之后**的冒号是标签分隔符。
+		#
+		# 早先用 `case *:*/*` 判断，会把这些情况弄错：
+		#   registry.local:5000        （没有路径）→ 被截成 `registry.local`
+		#   repo@sha256:abc123         （digest）    → 被截成 `repo@sha256`
+		# 截断后 dshm 会把这个错值 set_env 回 .env，用户配的仓库/digest 被悄悄改掉，
+		# 直到下次 compose pull 才炸。
+		repo="${base##*/}" # 最后一个 / 之后的部分
 		case "$base" in
-		*:*/*) printf '%s' "${base%:*}" ;; # host:port/...:tag
-		*:*) printf '%s' "${base%%:*}" ;;   # repo:tag
-		*) printf '%s' "$base" ;;
+		*/*) ;;
+		*) repo="$base" ;;
 		esac
+		part="${repo##*:}"
+		if [ "$part" != "$repo" ]; then
+			# 只有当冒号后那段不是纯数字时才算 tag：`host:5000` 的 5000 是端口。
+			case "$part" in
+			*[!0-9]*)
+				# digest 形如 repo@sha256:...，`@` 之前没有 tag 语义，原样保留
+				case "$base" in
+				*@*) : ;;
+				*) base="${base%:*}" ;;
+				esac
+				;;
+			esac
+		fi
+		printf '%s' "$base"
 		return
 	fi
 	printf '%s' "ghcr.io/qxdho/deepseek-harness-docker"
@@ -535,14 +555,20 @@ ghcr_token() {
 # 响应形如 {"name":"...","tags":[...]}：直接按引号切会把 name 也切出来，
 # 所以先定位 "tags":[ 这一段再拆。
 img_tags() {
-	local img token host repo
+	local img token host repo raw
 	img="$(img_base)"
 	token="$(ghcr_token "$img")" || return 1
 	[ -n "$token" ] || return 1
 	host="${img%%/*}"
 	repo="${img#"$host"/}"
-	curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
-		"https://${host}/v2/${repo}/tags/list" 2>/dev/null |
+	# 先整段取回再解析，而不是直接接管道 —— 这样能区分「查不动」与「确实没有 tag」。
+	# 以前末尾那个 `|| true` 把 curl 失败也吞成"成功但输出为空"，于是：
+	#   * img_tag_exists 恒为假 → `version update --to <正确的 tag>` 报「无效的镜像 tag」，
+	#     回退路径在仓库抖动（500/429/网络中断）时被彻底堵死，且诊断是误导性的；
+	#   * version list 走"还没有构建"那个分支，永远看不到真正的网络错误。
+	raw="$(curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
+		"https://${host}/v2/${repo}/tags/list" 2>/dev/null)" || return 1
+	printf '%s' "$raw" |
 		sed -n 's/.*"tags":\[\(.*\)\]}.*/\1/p' |
 		tr ',' '\n' | sed 's/^"//; s/"$//' | grep -v '^$' || true
 }

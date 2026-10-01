@@ -95,7 +95,7 @@ current_pin() {
 targets_of() {
 	case "$1" in
 	DSH_VERSION) printf 'dce' ;;
-	DSH_AUTH_GATE_VERSION) printf 'dc' ;;
+	DSH_AUTH_GATE_VERSION) printf 'dce' ;;
 	PNPM_VERSION) printf 'dc' ;; # 只报告不写，这里仅用于一致性
 	*) printf 'dce' ;;
 	esac

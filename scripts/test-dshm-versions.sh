@@ -191,4 +191,45 @@ case "$out" in
 esac
 rm -f "$vfile"
 
+
+# ── img_base：从 DSH_IMAGE 推导镜像仓库时必须保住端口与 digest ──────────────
+# 这里曾有 bug：用 `case *:*/*` 判断「冒号后面有没有路径」，于是
+#   myregistry:5000            → 被截成 myregistry
+#   repo@sha256:abc123         → 被截成 repo@sha256
+# 而 dshm 会把这个错值 set_env 回 .env（version update 路径），用户配好的私有
+# registry / digest 被悄悄改掉，直到下次 compose pull 才炸。
+#
+# 单独抽 img_base，用可注入的 env_value 控制 DSH_IMAGE。
+ib_fn="$(mktemp)"
+awk '/^img_base\(\)/,/^}/' "$root/dshm" >"$ib_fn"
+ib_case() { # <DSH_IMAGE> <DSH_IMAGE_BASE> → 打印 img_base 结果
+	# 必须 export：bash -c 起的是子进程，同行的赋值只存在于当前 shell 的局部环境
+	export DSH_IMAGE_BASE="$2"
+	DSH_IMG="$1" bash -c '
+		env_value() { printf "%s" "$DSH_IMG"; }
+		# shellcheck source=/dev/null
+		. "'"$ib_fn"'"
+		img_base
+	'
+}
+check_ib() { # <描述> <DSH_IMAGE> <期望>
+	got="$(ib_case "$2" "")"
+	if [ "$got" = "$3" ]; then
+		pass "img_base：$1 → $got"
+	else
+		fail "img_base：$1 期望「$3」实际「$got」"
+	fi
+}
+check_ib "未配 DSH_IMAGE 时用默认" "" "ghcr.io/qxdho/deepseek-harness-docker"
+check_ib "普通 repo:tag 去掉 tag" "ghcr.io/mine/repo:latest" "ghcr.io/mine/repo"
+check_ib "带端口的 registry（无 tag）原样保留" "myregistry:5000/team/dsh" "myregistry:5000/team/dsh"
+check_ib "带端口的 registry + tag 只去 tag" "myregistry:5000/team/dsh:v1" "myregistry:5000/team/dsh"
+check_ib "裸 host:port（无路径）不被截断" "myregistry:5000" "myregistry:5000"
+check_ib "digest 引用原样保留" "repo@sha256:abc123" "repo@sha256:abc123"
+if [ "$(ib_case 'ghcr.io/x/y:tag' 'mirror.example.com/proj')" = "mirror.example.com/proj" ]; then
+	pass "img_base：显式 DSH_IMAGE_BASE 优先"
+else
+	fail "img_base：显式 DSH_IMAGE_BASE 没有被优先采用"
+fi
+rm -f "$ib_fn"
 run_tests

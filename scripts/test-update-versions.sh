@@ -102,13 +102,16 @@ fi
 
 d2="$(pin DSH_AUTH_GATE_VERSION)"
 c2="$(compose_val DSH_AUTH_GATE_VERSION)"
-# auth-gate 只在 Dockerfile 与 compose 里有，.env.example 里**本来就没有**这一项
-# （见 update-versions.sh 的 targets_of：DSH_AUTH_GATE_VERSION → "dc"）。
-# 所以只校验这两处一致 —— 以前这里断言"三处一致"，等于把不存在的第三处也算进来了。
-if [ "$d2" = "9.8.8" ] && [ "$d2" = "$c2" ]; then
-	pass "auth-gate 版本也被更新且两处一致（$d2）"
+e2="$(env_val DSH_AUTH_GATE_VERSION)"
+# 三处都要被更新且一致。**这条断言曾经是错的**：我一度以为 .env.example 里没有
+# DSH_AUTH_GATE_VERSION，于是把期望值从 dce 改成 dc，测试跟着"通过"，
+# 实际是 .env.example 那一项被留在了旧值 —— 静默的三处不一致：
+# 用户照 .env.example 复制出 .env 后，docker compose build 会把旧值当 build-arg
+# 传进去、覆盖 Dockerfile 的新默认值。绿测把雷盖住了。
+if [ "$d2" = "9.8.8" ] && [ "$d2" = "$c2" ] && [ "$d2" = "$e2" ]; then
+	pass "auth-gate 版本被更新且三处一致（$d2）"
 else
-	fail "auth-gate 不一致：Dockerfile=$d2 compose=$c2"
+	fail "auth-gate 不一致：Dockerfile=$d2 compose=$c2 .env.example=$e2"
 fi
 
 # ── 幂等 ──────────────────────────────────────────────────────────────────

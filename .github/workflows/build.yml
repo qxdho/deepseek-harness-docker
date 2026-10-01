@@ -473,12 +473,13 @@ jobs:
     # 复用同一个 code 输出：纯文档改动不重发（二进制与上一次代码推送时完全一致，
     # 已在 latest release 里，跳过不影响安装）。
     #
-    # **只认 dshm 发布 tag（v*）**，不认镜像 tag：本作业里有「tag 必须等于 v+VERSION」
-    # 的校验，而镜像 tag（<dsh版本>-<日期>-<序号>）与 VERSION 无关，若也触发就必然失败。
-    #
+    # 触发条件覆盖两类 tag：
+    #   * dshm 发布 tag（v*）              → 发该 tag 的 release（dshm 包 + 面板二进制）
+    #   * 镜像 tag（<dsh版本>-<日期>-<序号>）→ 也发 release，这样
+    #     `dshm dshm update --to <镜像tag>` 能拿到 dshm 包（否则那个 tag 下只有镜像，会 404）
     # 推 main 时也发一次，只为刷新固定的 latest release（供没打 tag 的部署机装面板）。
     if: |
-      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/') ||
       (github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
     permissions:
@@ -493,14 +494,28 @@ jobs:
       - name: 校验 tag 与 VERSION 一致
         run: |
           set -eu
+          # 只对 **dshm 发布 tag（v*）** 校验：那类 tag 的名字就是 VERSION 的内容。
+          # 镜像 tag（<dsh版本>-<日期>-<序号>）与 VERSION 无关，跳过 —— 否则它一触发
+          # 本作业就必然失败（这也正是早先把它排除在外的原因）。
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            echo "非 tag 推送，跳过一致性校验"
+            exit 0
+          fi
+          case "${GITHUB_REF_NAME}" in
+          v*) ;;
+          *)
+            echo "镜像 tag（${GITHUB_REF_NAME}）不参与 VERSION 一致性校验"
+            exit 0
+            ;;
+          esac
           NUM="$(tr -d ' \t\r\n' < VERSION)"
           [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${NUM}" ]; then
+          if [ "${GITHUB_REF_NAME}" != "v${NUM}" ]; then
             echo "::error::tag 与 VERSION 不一致：tag=${GITHUB_REF_NAME}，VERSION=${NUM}（应为 v${NUM}）" >&2
             echo "  发布流程：先改 VERSION 并提交，再打同名 tag。" >&2
             exit 1
           fi
-          echo "版本一致性 OK（VERSION=${NUM}，ref=${GITHUB_REF_NAME:-$GITHUB_REF_TYPE}）"
+          echo "版本一致性 OK（VERSION=${NUM}，ref=${GITHUB_REF_NAME}）"
 
       - uses: actions/setup-go@v5
         with:
@@ -546,7 +561,12 @@ jobs:
           [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
           VER="v${NUM}"
           # 一致性已在作业开头校验过（那样能在编译 Go 之前就失败），这里不再重复。
-          pkg="dshm-${VER}"
+          # 包名从**本次推送的 tag 名**派生，而不是按 VERSION 拼 `v${NUM}`：
+          # 镜像 tag（0.2.0-rc.2-2026.10.01-3）不带 v 前缀，按 VERSION 拼会得到另一个名字，
+          # 于是 `dshm dshm update --to <镜像tag>` 永远 404。
+          # 统一规则：包名 = dshm-<tag>.tar.gz —— tag 名是唯一标识。
+          # 一致性已在作业开头校验过（那样能在编译 Go 之前就失败），这里不再重复。
+          pkg="dshm-${GITHUB_REF_NAME}"
           rm -rf "$pkg"
           mkdir -p "$pkg/scripts"
           sed -e "s|^DSHM_VERSION_RAW=.*|DSHM_VERSION_RAW=\"\${DSHM_VERSION:-${NUM}}\"|" \
@@ -577,8 +597,12 @@ jobs:
           echo "已生成 ${pkg}.tar.gz（$(wc -c < "${pkg}.tar.gz") 字节，版本 ${NUM}）"
 
       # tag 推送：每个版本一个 release（softprops 会按 tag 创建）
+      # 打 tag 时发布该 tag 的 release（dshm 包 + 面板二进制）。
+      # 包名的两种形态：dshm tag → dshm-v<版本>.tar.gz；镜像 tag → dshm-<tag>.tar.gz。
+      # 用 `dshm-*.tar.gz` 而不是 `dshm-*`：后者会把生成发布包时留下的**目录**
+      # dshm-<tag>/ 也算进去，gh 会试图上传目录并报 "is a directory"。
       - name: 发布到该 tag 的 release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -586,8 +610,8 @@ jobs:
             admin/dsh-admin-linux-amd64.sha256
             admin/dsh-admin-linux-arm64
             admin/dsh-admin-linux-arm64.sha256
-            dshm-v*.tar.gz
-            dshm-v*.tar.gz.sha256
+            dshm-*.tar.gz
+            dshm-*.tar.gz.sha256
       # main 推送：更新固定的 latest release。
       # 不能用 softprops 直接对 latest 做（并发会 422），先用 gh release create 保证它
       # 存在（已存在则忽略），再 --clobber 覆盖附件。一个步骤里循环重试，避免并发下

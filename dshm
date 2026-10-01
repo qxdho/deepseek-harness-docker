@@ -152,9 +152,14 @@ dshm_raw_url() {
 # 这是首选下载地址：自更新的目标机器通常既没有 git 仓库也没有 VERSION 文件，
 # 用仓库里的原始文件不但版本号会退化成 dev，而且单独一个脚本根本跑不起来 ——
 # dshm 会 source 同目录的 scripts/env-config.sh 等文件。
+# 给定一个**完整 tag 名**（含 v 前缀，如 v2026.10.01-2），返回该 tag 的 release 包地址。
+#
+# 统一规则：包名 = dshm-<tag>.tar.gz。以前这里把版本拼成 `v%s`，于是对镜像 tag
+# （0.2.0-rc.2-2026.10.01-3，不带 v）会拼出 v0.2.0-... 而 404 —— 现在直接用 tag 名，
+# 两类 tag 都能对上。
 dshm_release_url() {
-	local ver="$1"
-	printf 'https://github.com/qxdho/deepseek-harness-docker/releases/download/v%s/dshm-v%s.tar.gz' "$ver" "$ver"
+	local tag="$1"
+	printf 'https://github.com/qxdho/deepseek-harness-docker/releases/download/%s/dshm-%s.tar.gz' "$tag" "$tag"
 }
 
 # 放系统命令的目录：优先 /usr/local/bin（可写 / root / 免密 sudo），否则 ~/.local/bin。

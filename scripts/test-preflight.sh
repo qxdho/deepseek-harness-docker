@@ -748,5 +748,71 @@ if [ "$left9c" = "0" ]; then
 else
 	bad "播种失败残留了 $left9c 个 .seeding 临时目录"
 fi
+
+# ── 10. entrypoint 的停止语义与日志保留 ─────────────────────────────────────
+# 两个都曾出错：
+#   * 收到 SIGTERM（docker stop）时 `wait -n` 返回 143，代码把它当成"dsh 崩溃"并打印
+#     日志尾部 —— 每次正常停止都留下一个假的崩溃现场。
+#   * 每次启动 `: >"$WEB_LOG"` 截断日志，于是"带着现场重来"永远只能看到本次的输出。
+echo "== 10. entrypoint 的停止语义与日志保留 =="
+ep="$ENTRYPOINT"
+# 10a. SIGTERM 必须走"按要求停止"分支并以 0 退出
+if grep -qE '^on_signal\(\) \{' "$ep" && grep -qE '^\s*stopping=1' "$ep" && grep -qE '^\s*exit 0' "$ep"; then
+	ok "SIGTERM 有专门的 on_signal：标记 stopping 并以 0 退出"
+else
+	bad "缺少 on_signal 的停止处理（正常停止会被当成崩溃）"
+fi
+if grep -qE 'trap on_signal INT TERM' "$ep"; then
+	ok "INT/TERM 绑定到 on_signal（而不是直接走 cleanup）"
+else
+	bad "INT/TERM 没有绑定 on_signal"
+fi
+if grep -qE '\[ "\$stopping" = "1" \]' "$ep"; then
+	ok "退出判定会先检查 stopping，不把正常停止报成崩溃"
+else
+	bad "退出判定没有区分正常停止"
+fi
+# 10b. 日志必须是追加，不能截断
+if grep -qE '^\s*: >"\$WEB_LOG"$' "$ep"; then
+	bad "启动时仍会截断 \$WEB_LOG（上次的崩溃现场会被丢掉）"
+else
+	ok "启动时不再截断 \$WEB_LOG"
+fi
+if grep -qE '>>"\$WEB_LOG"' "$ep" && grep -qE 'tail -F -n 0 "\$WEB_LOG"' "$ep"; then
+	ok "dsh 输出追加写、tail 只看新增（历史留在文件里）"
+else
+	bad "日志追加或 tail 偏移写法不对"
+fi
+# 10c. 真跑一次：两次启动的日志都要留在文件里
+home10="$sandbox/ep10-home"
+seed10="$sandbox/ep10-seed"
+rm -rf "$home10" "$seed10"
+mkdir -p "$seed10/profiles/web/node_modules/dsh-auth-gate/lib"
+printf '{}\n' >"$seed10/profiles/web/package.json"
+printf '//x\n' >"$seed10/profiles/web/node_modules/dsh-auth-gate/lib/cli.js"
+stage10="$sandbox/ep10"
+rm -rf "$stage10"; mkdir -p "$stage10"
+cp "$ep" "$stage10/entrypoint.sh"
+sed -i "s#^SEED=.*#SEED=$seed10#" "$stage10/entrypoint.sh"
+mkdir -p "$home10/profiles/web/node_modules/dsh-auth-gate/lib"
+printf '{}\n' >"$home10/profiles/web/package.json"
+printf '//x\n' >"$home10/profiles/web/node_modules/dsh-auth-gate/lib/cli.js"
+for round in 1 2; do
+	DSH_HOME="$home10" DSH_AUTH_PASSWORD=x DSH_WORKSPACE_STRICT=1 \
+		timeout 4 bash "$stage10/entrypoint.sh" >/dev/null 2>&1 || true
+done
+logfile="$home10/logs/web.log"
+# 日志路径可能不同，兜底找一下
+[ -f "$logfile" ] || logfile="$(find "$home10" -name 'web.log' 2>/dev/null | head -1)"
+if [ -n "$logfile" ] && [ -f "$logfile" ]; then
+	nstart="$(grep -c '启动（pid' "$logfile" 2>/dev/null || echo 0)"
+	if [ "$nstart" -ge 2 ]; then
+		ok "两次启动的日志都留在文件里（找到 $nstart 条启动标记）"
+	else
+		bad "日志被截断了：只找到 $nstart 条启动标记"
+	fi
+else
+	skip "没找到 web.log，跳过日志保留的行为验证"
+fi
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

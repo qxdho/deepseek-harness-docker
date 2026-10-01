@@ -300,21 +300,46 @@ tighten "$DSH_HOME/auth/users.yaml" "登录用户文件"
 chmod 700 "$DSH_HOME/auth" 2>/dev/null || true
 
 # ── 4. 启动 dsh（仅回环）────────────────────────────────────────────────────
-: >"$WEB_LOG"
+# 日志**追加**而不是截断：截断的话每次重启都把上一次的崩溃现场丢掉了，
+# 而下面特意"带着现场重来"（打印日志尾部）就永远只能看到本次的。
+# 用一个分隔行标出本次启动的边界，便于区分。
+{
+  printf '\n===== %s 启动（pid $$）=====\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+} >>"$WEB_LOG" 2>/dev/null || true
 log "启动 dsh: dsh --profile web --host $DSH_HOST --port $DSH_PORT --no-open"
-dsh --profile web --host "$DSH_HOST" --port "$DSH_PORT" --no-open >"$WEB_LOG" 2>&1 &
+# tail 从文件末尾开始跟随本次输出；用 -n 0 只看新内容，历史留在文件里供排查
+dsh --profile web --host "$DSH_HOST" --port "$DSH_PORT" --no-open >>"$WEB_LOG" 2>&1 &
 DSH_PID=$!
-tail -F "$WEB_LOG" >&2 &
+tail -F -n 0 "$WEB_LOG" >&2 &
 TAIL_PID=$!
 
+# stopping=1 表示"这次退出是我们主动要求的"（docker stop 发的 SIGTERM/SIGINT）。
+# 没有这个标志的话，trap 收到 SIGTERM 会让 wait -n 返回 143，下面的分支就把一次
+# **正常停止**报成「dsh 已退出（status 143）」并打印日志尾部 —— 每次 docker stop
+# 都留下一个假的崩溃现场，掩盖真正的死因。
+stopping=0
+
 cleanup() {
-  log "退出中，停止子进程"
+  # trap 可能因 EXIT 与 TERM 各触发一次，这里让第二次直接返回
+  [ "${cleaning:-0}" = "1" ] && return 0
+  cleaning=1
+  if [ "${stopping:-0}" = "1" ]; then
+    log "收到停止信号，退出中…"
+  else
+    log "退出中，停止子进程"
+  fi
   # 代理是最后启动的，先停它，避免它继续对外转发一个正在关闭的后端。
   [ -n "${PROXY_PID:-}" ] && kill "$PROXY_PID" 2>/dev/null || true
   kill "$DSH_PID" "$TAIL_PID" 2>/dev/null || true
   wait "$DSH_PID" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+on_signal() {
+  stopping=1
+  # 以 0 退出：这是被要求的停止，不是故障。150 这类特殊码会让编排层误判。
+  exit 0
+}
+trap cleanup EXIT
+trap on_signal INT TERM
 
 log "等待 dsh 就绪…"
 for i in $(seq 1 180); do
@@ -363,10 +388,16 @@ set +e
 wait -n "$DSH_PID" "$PROXY_PID"
 status=$?
 set -e
+if [ "$stopping" = "1" ]; then
+  # 正常停止：不要打印"崩溃现场"，也不要传播 143
+  log "已按要求停止"
+  exit 0
+fi
 if ! kill -0 "$DSH_PID" 2>/dev/null; then
   log "dsh 已退出（status $status），dsh 日志尾部："
   tail -n 30 "$WEB_LOG" >&2 || true
 else
   log "代理已退出（status $status），停止容器"
 fi
+exit "$status"
 exit "$status"

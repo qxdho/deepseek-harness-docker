@@ -234,35 +234,25 @@ jobs:
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
-      # 镜像 tag = <dsh版本>-<日期>-<序号>，例如 0.2.0-rc.2-2026.10.01-1
-      #   * 带 dsh 版本 → 一眼看出镜像里是哪个 dsh
-      #   * 带日期      → 看出是哪天的构建
-      #   * 带序号      → 同一天多次构建互不覆盖，旧镜像仍可回退
-      # 为什么必须有序号：tag 一旦被同名覆盖，旧镜像就失去引用、可能被回收，回退就没了。
-      - name: 计算镜像 tag
+      # 镜像 tag **直接用你推送的那个 tag**，不再重新算序号。
+      #
+      # 为什么不重算：本作业正是被「镜像 tag」推送触发的（条件是 refs/tags/ 且非 v*），
+      # 那个 tag 名本身就是本次镜像的版本号。再按「当天已有几个」去算会得到别的值，
+      # 而且 metadata 的 enable={{is_default_branch}} 在 tag ref 上不成立 —— 实测推
+      # 0.2.0-rc.2-2026.10.01-2 时，正式版本 tag 压根没生成（只有 latest 与 sha）。
+      - name: 取镜像 tag（即本次推送的 tag）
         id: tag
         run: |
           set -euo pipefail
-          dsh="${{ steps.ver.outputs.dsh }}"
-          day="$(date -u +%Y.%m.%d)"
-          n=0
-          # 用 GHCR 的**匿名** pull token 列已有 tag —— 不需要任何密钥。
-          if token="$(curl -fsSL --max-time 20 \
-              "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" \
-              | grep -oE '"token":"[^"]+"' | cut -d'"' -f4)" && [ -n "$token" ]; then
-            existing="$(curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
-              "https://ghcr.io/v2/${IMAGE_NAME}/tags/list" 2>/dev/null || true)"
-            n="$(printf '%s' "$existing" |
-              sed -n 's/.*"tags":\[\(.*\)\]}.*/\1/p' | tr ',' '\n' |
-              grep -cE "^${dsh}-${day}-[0-9]+$" || true)"
-          else
-            echo "::warning::列不到已有 tag，序号从 1 开始（可能覆盖同名 tag）"
+          tag="${GITHUB_REF_NAME}"
+          [ -n "$tag" ] || { echo "取不到 tag 名" >&2; exit 1; }
+          # 防御性检查：v* 是 dshm 的发布 tag，不该走到这里（作业条件已排除）。
+          if [ "${tag#v}" != "$tag" ]; then
+            echo "镜像 tag 不应以 v 开头（那是 dshm 的发布 tag，由 release-admin 处理）" >&2
+            exit 1
           fi
-          [ -n "$n" ] || n=0
-          img_tag="${dsh}-${day}-$((n + 1))"
-          echo "tag=${img_tag}" >> "$GITHUB_OUTPUT"
-          echo "镜像 tag：${img_tag}（当天该 dsh 版本已有 ${n} 个构建）"
-
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "镜像 tag：${tag}"
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -276,9 +266,12 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            # 主 tag：<dsh版本>-<日期>-<序号>，唯一、不覆盖旧镜像（可回退）
-            type=raw,value=${{ steps.tag.outputs.tag }},enable={{is_default_branch}}
+            # latest：让 `dshm version update` 与 `--to` 之外的路径能拿到最新镜像。
+            # **不要**加 enable={{is_default_branch}} —— 本作业只在 tag 上运行，
+            # 那个条件在 tag ref 上恒假，会导致 tag 一个都不生成。
+            type=raw,value=latest
+            # 主 tag：就是你推送的那个镜像 tag
+            type=raw,value=${{ steps.tag.outputs.tag }}
             # 精确到提交，便于排查
             type=sha,format=short
 
@@ -299,9 +292,46 @@ jobs:
             fi
           done <<< "$TAGS"
           echo "多平台 manifest 已生成"
+
+  # 清理合并用的单架构 tag（:amd64-<sha> / :arm64-<sha>）。
+  #
+  # 单独一个作业、并用 needs 保证**只在合并成功后**才删：合并失败时留着这些 tag
+  # 还能手动排查/补救；成功后它们就没用了，留着会每次构建多堆两个。
+  cleanup-staging:
+    needs: [merge-manifests]
+    if: needs.merge-manifests.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: 删除单架构 tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA::7}"
+          for name in "amd64-${sha}" "arm64-${sha}"; do
+            # 先按 tag 名找到对应的 package version，再删该 version。
+            # 这里用 CI 自带的 GITHUB_TOKEN（带 packages: write），不需要个人 token。
+            vid="$(gh api \
+              "users/qxdho/packages/container/deepseek-harness-docker/versions?per_page=100" \
+              --jq ".[] | select(.metadata.container.tags | index(\"${name}\")) | .id" 2>/dev/null | head -1 || true)"
+            if [ -n "$vid" ]; then
+              gh api -X DELETE \
+                "users/qxdho/packages/container/deepseek-harness-docker/versions/${vid}" \
+                >/dev/null 2>&1 && echo "已删除 ${name}（version ${vid}）" \
+                || echo "::warning::删除 ${name} 失败（不影响发布）"
+            else
+              echo "未找到 ${name}，跳过"
+            fi
+          done
   checks:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # 只在推 main 与 PR 上跑，**tag 推送时跳过**：tag 通常正指向刚推过的那个提交，
+    # 同一份代码的检查在 main 那次已经跑过了，再跑一遍纯属重复（约 50 秒）。
+    if: |
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

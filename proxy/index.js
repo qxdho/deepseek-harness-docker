@@ -190,11 +190,18 @@ function setForwardHeaders(proxyReq, req) {
 
 const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 
+// 上游响应超时（毫秒）。没有它的话：dsh 卡住或半死不活（接了 TCP 但不回包）时，
+// 客户端会一直挂着 —— 浏览器的转圈永远不停，nginx 那边的 60s 也只能回 504，
+// 而代理自己一直占着连接与 socket。给一个明确上限，超时就回 504。
+const PROXY_TIMEOUT_MS = Number(process.env.DSH_PROXY_TIMEOUT_MS || 120000);
+
 const proxy = httpProxy.createProxyServer({
   target: TARGET,
   ws: true,
   agent: keepAliveAgent,
   selfHandleResponse: true,
+  proxyTimeout: PROXY_TIMEOUT_MS,
+  timeout: PROXY_TIMEOUT_MS,
 });
 
 proxy.on('proxyReq', (proxyReq, req) => {
@@ -259,6 +266,24 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
         // 解压不了就原样转发（含原来的 content-encoding），只失去注入
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         res.end(raw);
+        return;
+      }
+      // **只在 charset 是 UTF-8（或没声明）时才注入**。
+      //
+      // 原来的写法是 `decoded.toString('utf8')` 再 `Buffer.from(..., 'utf8')` ——
+      // 对 iso-8859-1 / gbk 这类页面，非 ASCII 字节会被替换成 U+FFFD 再编码回去，
+      // 整页内容被改坏（实测 `é` 变成 EF BF BD），长度一变还会带偏 content-length。
+      // 注入只是「加一段脚本」，不值得为它破坏正文 —— 认不出编码就原样转发。
+      const ctype = String(proxyRes.headers['content-type'] || '');
+      const csMatch = /charset\s*=\s*"?([A-Za-z0-9_-]+)"?/i.exec(ctype);
+      const charset = csMatch ? csMatch[1].toLowerCase() : '';
+      if (!(charset === '' || charset === 'utf-8' || charset === 'utf8')) {
+        const asIs = Object.assign({}, proxyRes.headers);
+        delete asIs['content-encoding'];
+        delete asIs['transfer-encoding'];
+        asIs['content-length'] = String(decoded.length);
+        res.writeHead(proxyRes.statusCode, asIs);
+        res.end(decoded);
         return;
       }
       const body = Buffer.from(injectHead(decoded.toString('utf8')), 'utf8');

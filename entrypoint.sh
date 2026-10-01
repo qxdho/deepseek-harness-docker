@@ -323,7 +323,11 @@ for i in $(seq 1 180); do
     tail -n 30 "$WEB_LOG" >&2 || true
     exit 1
   fi
-  code="$(curl -s -o /dev/null -w '%{http_code}' "http://${DSH_HOST}:${DSH_PORT}/" || true)"
+  # 探测必须带超时：curl 默认**不设超时**，若 dsh 只接受 TCP 连接却不回包，
+  # 这一次 curl 就会一直挂在那里，`|| true` 也帮不上忙 —— 上面 180 次的预算形同虚设，
+  # entrypoint 永久卡住（容器既不就绪也不退出）。
+  code="$(curl -s --connect-timeout 2 --max-time 3 -o /dev/null -w '%{http_code}' \
+    "http://${DSH_HOST}:${DSH_PORT}/" 2>/dev/null || true)"
   case "$code" in 200 | 302 | 401) break ;; esac
   if [ "$i" = "180" ]; then
     log "dsh 180 秒内未就绪，日志尾部："

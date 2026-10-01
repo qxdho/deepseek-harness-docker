@@ -41,6 +41,17 @@ const upstream = http.createServer((req, res) => {
     res.end(JSON.stringify({ xff: req.headers['x-forwarded-for'] ?? null }));
     return;
   }
+  if (req.url.startsWith('/latin1')) {
+    // 非 UTF-8 页面：iso-8859-1 里的 "é" 是单字节 0xE9。
+    // 代理若按 UTF-8 解码再编码，会变成 EF BF BD（U+FFFD）—— 整页内容被改坏。
+    const buf = Buffer.from('<html><head><title>caf\xe9</title></head><body>caf\xe9</body></html>', 'latin1');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=iso-8859-1',
+      'content-length': String(buf.length),
+    });
+    res.end(buf);
+    return;
+  }
   if (req.url.startsWith('/gzip')) {
     // 上游无视 accept-encoding: identity，坚持返回 gzip 的 HTML
     const html = '<!doctype html><html><head><title>t</title></head><body>gz</body></html>';
@@ -80,7 +91,11 @@ function get(port, p, extraHeaders) {
     const req = http.get({ host: '127.0.0.1', port, path: p, headers: extraHeaders || {} }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        // raw 保留原始字节：非 UTF-8 的页面只有按字节比对才能发现编码被破坏
+        resolve({ status: res.statusCode, headers: res.headers, body: raw.toString('utf8'), raw });
+      });
     });
     req.on('error', reject);
   });
@@ -234,6 +249,22 @@ const INJECT_ID = 'dsh-forward-inject';
     ok(`带 Expect: 100-continue 时 XFF 仍被重算为真实 peer（${expXff}）`);
   } else {
     bad(`带 Expect 时 XFF 不可识别：${expXff}`);
+  }
+
+  // 17. 非 UTF-8 页面必须原样转发（不能按 UTF-8 解码再编码）
+  //
+  // 原来对**所有** HTML 都做 `decoded.toString('utf8')` → 注入 → `Buffer.from(…, 'utf8')`。
+  // 对 iso-8859-1 / gbk 这类页面，非 ASCII 字节会被替换成 U+FFFD，整页内容被改坏。
+  const latin = await get(PROXY_PORT, '/latin1');
+  // "café" 在 iso-8859-1 里是 63 61 66 E9。必须比**原始字节**：
+  // 若按 UTF-8 解码再编码，E9 会变成 EF BF BD（三字节），页面内容就坏了。
+  const latinBuf = latin.raw;
+  if (latinBuf.includes(Buffer.from([0xef, 0xbf, 0xbd]))) {
+    bad('非 UTF-8 页面出现了 U+FFFD 替换字符（UTF-8 解码破坏了编码）');
+  } else if (!latinBuf.includes(Buffer.from([0x63, 0x61, 0x66, 0xe9]))) {
+    bad('非 UTF-8 页面的字节被改坏了：' + latinBuf.toString('hex'));
+  } else {
+    ok('非 UTF-8 页面按原字节转发（没有被 UTF-8 解码破坏）');
   }
   // 9. 注入里不应再有「重启 DSH」按钮 / 重启接口（已移除，重启改走管理面板命令台）
   if (!normal.body.includes('/__dsh_restart') && !normal.body.includes('dsh-restart-button')) {

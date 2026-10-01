@@ -119,6 +119,19 @@ COPY --from=builder /usr/local/ /usr/local/
 # 预置 profile（含 dsh-auth-gate），供首启或空卷 seeding
 COPY --from=builder /opt/dsh-seed /opt/dsh-seed
 
+# 上面这条 COPY 会把 /opt/dsh-seed 的属主**重置成 root:root**（覆盖 builder 阶段的
+# chown，因为 COPY 默认以 root 身份复制），而且 profile 里带着 pnpm 以 600/700 建的
+# 文件（package.json 600、.plugin-manager 700）。两个后果：
+#   1. 容器以 node 运行时，entrypoint 的 `cp -a /opt/dsh-seed/profiles/web` 读不了那些
+#      600/700 的文件 —— 空数据目录首启会直接失败并**无限重启**。
+#   2. compose 与 README 都允许用 DSH_UID/DSH_GID 改成非 1000 的 uid（NAS、桌面发行版），
+#      那时连 node 的属主也帮不上忙，只能靠"对所有人可读"这个权限。
+# 所以这里显式恢复属主，并把 seed 目录里的文件改成对所有人可读（目录可进入）——
+# 这不会让 dsh 以别人身份写入（数据目录是另一份拷贝），只是让播种能读到。
+RUN chown -R node:node /opt/dsh-seed \
+    && chmod -R a+rX /opt/dsh-seed \
+    && if [ -d /tmp/npm-cache ]; then chown -R node:node /tmp/npm-cache; fi
+
 # dsh 启动需要 Node 的 --expose-internals（HMR 插件），npm 生成的软链不带该参数，
 # 这里用一层 wrapper 保证任何方式调用 dsh 都正确。先删掉 npm 的软链，避免 COPY
 # 顺着软链覆盖到 bin.js。

@@ -361,17 +361,24 @@ jobs:
   # GITHUB_TOKEN 在本仓库有 packages: write，可以删。
   # 清理 GHCR 上的历史标签（workflow_dispatch）。
   #
-  # 两种用法（输入框里二选一）：
+  # 两种用法（可单用可合用）：
   #   * delete_tags：删**指定名字**的标签（空格分隔）
-  #   * delete_prefix：删**所有以它开头**的标签，例如 `sha-` 或 `staging-`
+  #   * delete_prefix：删**以它开头**的标签，例如 `sha-` 或 `staging-`
   #
-  # 为什么要能按前缀删：`docker/metadata-action` 的 `type=sha` 每次构建都会新增一个
-  # `sha-<短SHA>`，而没有任何机制回收它 —— 实测堆到 92 个（占全部 tag 的 92%）。
-  # 已经在构建配置里去掉 `type=sha` 了，这个入口用来清理存量与其它遗留标签。
+  # 为什么要能按前缀删：`metadata-action` 的 `type=sha` 每次构建新增一个 `sha-<短SHA>`
+  # 且从不回收（实测堆到 92 个，占全部 tag 的 92%）。构建配置里已去掉 `type=sha`，
+  # 这个入口用来清理存量与其它遗留标签。
   #
-  # 为什么用这个作业而不是本地 curl：删除 package version 需要 token 有
-  # read/delete packages 权限，个人 PAT 常常没有（实测 403）；CI 自带的 GITHUB_TOKEN
-  # 在本仓库有 packages: write。
+  # 为什么用这个作业而不是本地 curl：删除 package version 需要 token 有 read/delete
+  # packages 权限，个人 PAT 实测 403；CI 自带的 GITHUB_TOKEN 在本仓库有 packages: write。
+  #
+  # ⚠ **安全闸门（务必保留）**：Registry 的一个 version 可以挂**多个** tag
+  # （同一个 manifest 同时打 `latest` + `0.2.0-rc.2-2026.10.01-5` + `sha-a7810ba`），
+  # 而 Delete version API 会把整条 version 连同它**所有** tag 一起删。
+  # 所以绝不能"tag 列表里含匹配项就删整条" —— 这样删 `sha-*` 会把 `latest` 与所有版本
+  # tag 一起带走，整个包的镜像版本归零（真踩过：`tags/list` 返回 null、所有 manifest
+  # 都是 unknown）。下面的 awk 会**逐一看过 version 的全部 tag**，只要有一个不在
+  # 「允许删」的集合里就整条跳过并打印 SKIP。
   cleanup-versions:
     if: |
       github.event_name == 'workflow_dispatch' &&
@@ -389,37 +396,62 @@ jobs:
           set -euo pipefail
           api="users/qxdho/packages/container/deepseek-harness-docker/versions"
 
-          # **必须翻页**：默认一页 100 条，而 sha-* 已经堆到 92 个，很快就不止一页；
-          # 只取第一页会静默漏删（表现为"跑过了但还剩一堆"）。
-          # 每条输成「id<TAB>逗号分隔的 tag 列表」。
-          matches="$(gh api "${api}?per_page=100" --paginate \
+          # **必须翻页**：默认一页 100 条，而 sha-* 曾堆到 92 个；只取第一页会静默漏删。
+          # 每条输出「id<TAB>逗号分隔的全部 tag」。
+          plan="$(gh api "${api}?per_page=100" --paginate \
             --jq '.[] | [.id, ((.metadata.container.tags // []) | join(","))] | @tsv' 2>/dev/null |
             awk -F'\t' -v want="$DELETE_TAGS" -v pre="$DELETE_PREFIX" '
               {
                 id = $1; tags = $2
-                hit = ""
                 n = split(want, arr, " ")
-                for (i = 1; i <= n; i++) {
-                  if (arr[i] == "") continue
-                  if (index("," tags ",", "," arr[i] ",") > 0) { hit = arr[i]; break }
+                m = split(tags, one, ",")
+
+                # ① 这条 version 有没有命中（精确名或前缀）
+                hit = ""
+                for (i = 1; i <= m; i++) {
+                  t = one[i]
+                  if (t == "") continue
+                  for (j = 1; j <= n; j++) if (arr[j] != "" && t == arr[j]) { hit = t; break }
+                  if (hit == "") continue
+                  break
                 }
                 if (hit == "" && pre != "") {
-                  m = split(tags, one, ",")
-                  for (i = 1; i <= m; i++) {
-                    if (index(one[i], pre) == 1) { hit = one[i]; break }
-                  }
+                  for (i = 1; i <= m; i++) if (one[i] != "" && index(one[i], pre) == 1) { hit = one[i]; break }
                 }
-                if (hit != "") printf "%s\t%s\n", id, hit
+                if (hit == "") next
+
+                # ② 安全闸门：它的**每个** tag 都必须属于「允许删」的集合
+                blocked = ""
+                for (i = 1; i <= m; i++) {
+                  t = one[i]
+                  if (t == "") continue
+                  ok = 0
+                  for (j = 1; j <= n; j++) if (arr[j] != "" && t == arr[j]) { ok = 1; break }
+                  if (!ok && pre != "" && index(t, pre) == 1) ok = 1
+                  if (!ok) { blocked = t; break }
+                }
+                if (blocked != "") { printf "SKIP\t%s\t%s\t%s\n", id, hit, blocked; next }
+                printf "DEL\t%s\t%s\n", id, hit
               }')"
 
-          if [ -z "$(printf '%s' "$matches" | tr -d '[:space:]')" ]; then
-            echo "没有匹配的标签（tags='${DELETE_TAGS}' prefix='${DELETE_PREFIX}'）"
+          dels="$(printf '%s\n' "$plan" | awk -F'\t' '$1 == "DEL"')"
+          skips="$(printf '%s\n' "$plan" | awk -F'\t' '$1 == "SKIP"')"
+
+          if [ -n "$skips" ]; then
+            echo "以下 version 虽然含匹配的标签，但它还挂着别的标签 —— 整条跳过（删 version 会带走那些标签）："
+            printf '%s\n' "$skips" | while IFS="$(printf '\t')" read -r _ id hit blocked; do
+              printf '  SKIP version %s（命中 %s，但还挂着 %s）\n' "$id" "$hit" "$blocked"
+            done
+          fi
+
+          if [ -z "$(printf '%s' "$dels" | tr -d '[:space:]')" ]; then
+            echo "没有可安全删除的 version（tags='${DELETE_TAGS}' prefix='${DELETE_PREFIX}'）"
             exit 0
           fi
 
           n=0
           fail=0
-          while IFS="$(printf '\t')" read -r vid t; do
+          while IFS="$(printf '\t')" read -r _ vid t; do
             [ -n "$vid" ] || continue
             if gh api -X DELETE "${api}/${vid}" >/dev/null 2>&1; then
               n=$((n + 1))
@@ -428,10 +460,9 @@ jobs:
               fail=$((fail + 1))
               printf '::warning::删除 %s（version %s）失败\n' "$t" "$vid"
             fi
-          done <<< "$matches"
-          echo "共删除 ${n} 个，失败 ${fail} 个"
+          done <<< "$dels"
+          echo "共删除 ${n} 个（跳过 ${skips:+$(printf '%s\n' "$skips" | grep -c .)} 个），失败 ${fail} 个"
           [ "$fail" = "0" ]
-          echo "共删除 ${n} 个"
   checks:
     needs: changes
     # 在**推 main 与 PR** 上跑；tag 推送时跳过（tag 通常正指向刚推过的那个提交，

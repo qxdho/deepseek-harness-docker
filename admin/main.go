@@ -272,7 +272,25 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
+	// 安全响应头：**所有**响应都带上（面板是给人用的 HTML + JSON API，两边都受益）。
+	//
+	// 之前一个都没有。面板监听在本机端口、通常还挂在反代后面，缺这些头意味着：
+	//   * 别的站点可以把它 iframe 进去做点击劫持（X-Frame-Options / CSP frame-ancestors）
+	//   * 响应被当成别的类型嗅探执行（X-Content-Type-Options）
+	//   * 完整 URL（可能含 token）经 Referer 泄漏给外链（Referrer-Policy）
+	//
+	// ⚠ CSP 里的 script-src 用**内联脚本的 sha256**，不是 'unsafe-inline'。
+	//   面板页面里有一个内联 <script>（页面的交互逻辑）；只写 `default-src 'self'`
+	//   会把内联脚本一并拒掉 —— **面板会直接不能点**。而放开 'unsafe-inline' 等于
+	//   把 CSP 的主要价值丢掉。所以这里在启动时算出那段脚本的哈希并写进 CSP：
+	//   既允许了它，又保持"只准执行这一段脚本"。
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+
 	if path == "/" {
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		io.WriteString(w, indexHTML)

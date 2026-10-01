@@ -1,7 +1,38 @@
 package main
 
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"strings"
+)
+
 // 内嵌的单页面板。刻意不用框架：静态二进制里塞一个 HTML，零外部资源。
 // 注意：这是 Go 的原始字符串，内部**不能出现反引号**，所以 JS 里不用模板字符串。
+
+// contentSecurityPolicy 在启动时算一次：把内联脚本的 sha256 放进 script-src。
+//
+// 为什么不用 'unsafe-inline'：那会让 CSP 在 XSS 面前基本失效。为什么不用外部文件：
+// 面板是刻意做成单个自包含 HTML 的（一个二进制就能跑，不用静态目录），所以内联是最
+// 自然的形式，hash 白名单是与之配套的正确做法。脚本改了哈希会跟着变，不会失配。
+var contentSecurityPolicy = func() string {
+	const base = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+	// 页面里只有一个内联 <script>…</script>
+	start := strings.Index(indexHTML, "<script>")
+	if start < 0 {
+		// 没有内联脚本：不需要 script-src，交给 default-src
+		return base
+	}
+	start += len("<script>")
+	end := strings.Index(indexHTML[start:], "</script>")
+	if end < 0 {
+		return base
+	}
+	sum := sha256.Sum256([]byte(indexHTML[start : start+end]))
+	// style-src 也放 'unsafe-inline'：内联 style 属性对 CSP 而言等同内联样式，
+	// 而面板大量使用 style="…"（禁用内联样式会直接让页面错版）。
+	return base + "; script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'; style-src 'self' 'unsafe-inline'"
+}()
+
 const indexHTML = `<!doctype html>
 <html lang="zh-CN">
 <head>

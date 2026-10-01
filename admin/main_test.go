@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"regexp"
+	"strings"
+	"testing"
+)
 
 // 回归：写坏的 password_hash 不能让任意密码通过。
 // 空摘要时 hex.DecodeString("") 返回空切片且不报错，pbkdf2(..., keyLen=0)
@@ -57,5 +63,44 @@ func TestSessionRoundTrip(t *testing.T) {
 	expired := signSession(secret, 1)
 	if verifySession(secret, expired) {
 		t.Fatal("过期会话通过了")
+	}
+}
+
+// 安全响应头 + CSP 的 script-src 哈希必须与内联脚本**逐字一致**。
+//
+// 这一条很关键：CSP 靠 sha256 白名单放行页面的内联脚本。脚本一改、哈希没跟着变，
+// 浏览器就会**静默拒绝执行**那段脚本 —— 面板打开是白板/点了没反应，而且服务端日志
+// 里什么都看不到（拒绝发生在浏览器侧）。所以必须钉住这个对应关系。
+func TestSecurityHeadersAndCSPHash(t *testing.T) {
+	// ① CSP 里必须真的带一个 sha256- 的 script-src
+	if !strings.Contains(contentSecurityPolicy, "script-src 'sha256-") {
+		t.Fatalf("CSP 缺少内联脚本的 sha256 白名单：%s", contentSecurityPolicy)
+	}
+	// ② 把 CSP 里那个哈希抠出来，和 indexHTML 里的内联脚本现算一遍对比
+	m := regexp.MustCompile(`script-src 'sha256-([A-Za-z0-9+/=]+)'`).FindStringSubmatch(contentSecurityPolicy)
+	if m == nil {
+		t.Fatalf("CSP 里的 sha256 格式不对：%s", contentSecurityPolicy)
+	}
+	start := strings.Index(indexHTML, "<script>")
+	if start < 0 {
+		t.Fatal("页面里没有内联 <script>，这个测试的前提不成立")
+	}
+	start += len("<script>")
+	end := strings.Index(indexHTML[start:], "</script>")
+	if end < 0 {
+		t.Fatal("内联 <script> 没有闭合标签")
+	}
+	sum := sha256.Sum256([]byte(indexHTML[start : start+end]))
+	want := base64.StdEncoding.EncodeToString(sum[:])
+	if m[1] != want {
+		t.Errorf("CSP 里的脚本哈希与页面实际内容不符：\n  CSP  = %s\n  实际 = %s\n"+
+			"（改了内联脚本就必须让 contentSecurityPolicy 重新计算 —— 它是 init 里算的，\n"+
+			"  如果这里失败说明有人把哈希写死成了常量）", m[1], want)
+	}
+	// ③ 关键指令必须在
+	for _, must := range []string{"frame-ancestors 'none'", "default-src 'self'"} {
+		if !strings.Contains(contentSecurityPolicy, must) {
+			t.Errorf("CSP 缺少 %q：%s", must, contentSecurityPolicy)
+		}
 	}
 }

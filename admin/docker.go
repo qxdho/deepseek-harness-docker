@@ -162,8 +162,7 @@ func demuxLogs(r io.Reader) string {
 	if err != nil && len(data) == 0 {
 		return ""
 	}
-	framed := len(data) >= 8 && data[0] <= 2 && data[1] == 0 && data[2] == 0 && data[3] == 0
-	if !framed {
+	if !looksFramed(data) {
 		return string(data)
 	}
 	var sb strings.Builder
@@ -178,6 +177,44 @@ func demuxLogs(r io.Reader) string {
 		off += n
 	}
 	return sb.String()
+}
+
+// looksFramed 判断这段字节是否真的是 docker 的复用帧流。
+//
+// 不能只看第一个帧头：TTY 容器的日志是**原始流**，正文第一段完全可能是
+// 0x01 0x00 0x00 0x00 这样的字节（例如以 \x01 开头的带色输出），那样用单帧判断
+// 会误判成"有帧头"，然后按错误长度切分 —— 输出变成乱码或直接被截断。
+//
+// 所以**连续校验若干帧**，并要求它们刚好铺满、或最后一帧只是被 8MB 截断
+// （允许"帧头在、负载不全"这一种收尾）。
+func looksFramed(data []byte) bool {
+	if len(data) < 8 {
+		return false
+	}
+	off := 0
+	frames := 0
+	for off+8 <= len(data) {
+		if data[off] > 2 || data[off+1] != 0 || data[off+2] != 0 || data[off+3] != 0 {
+			// 帧头不合法：只有一种情况可以接受 —— 这是被截断的第一帧之外的内容。
+			// 但此时 off==0 才是"完全不像帧"，否则说明中途对不上，判定为非帧。
+			return frames > 0
+		}
+		n := int(binary.BigEndian.Uint32(data[off+4 : off+8]))
+		off += 8
+		if n < 0 {
+			return false
+		}
+		if off+n > len(data) {
+			// 负载不全：只可能是读取时被 LimitReader 截断。但**至少要有两帧**
+			// 才认；否则一段恰好"首字节像帧头"的 TTY 原文就会被切碎。
+			return frames >= 2
+		}
+		off += n
+		frames++
+	}
+	// 走完说明帧刚好铺满，且至少两帧 —— 单帧不足以下结论（宁可当原始流，避免把
+	// TTY 原文按错误长度切碎）。
+	return frames >= 2 && off == len(data)
 }
 
 // ── 磁盘 ────────────────────────────────────────────────────────────────────

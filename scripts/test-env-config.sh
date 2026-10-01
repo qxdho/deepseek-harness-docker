@@ -10,8 +10,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$(dirname "$0")/test-lib.sh"
 
-sandbox="$(mktemp -d)"
-trap 'rm -rf "$sandbox"' EXIT
+# 临时目录放在脚本目录下而不是 /tmp：有些环境 /tmp 是 noexec，而我们会在里面
+# 放可执行的替身（假 docker / 假 curl），放 /tmp 会「命令存在但执行不了」。
+sandbox="$(mktemp -d "$HERE/.env-test-XXXXXX")"
+trap 'rm -rf "$sandbox" "$stub"' EXIT
 ENV_FILE="$sandbox/.env"
 
 # 库要求的输出函数（消息照常输出，断言用 pass/fail）
@@ -215,10 +217,21 @@ case "$out" in
 esac
 case "$out" in *"DSH_AUTH_PASSWORD=已设置"*) pass "密码只报已设置" ;; *) fail "密码状态未显示" ;; esac
 
+echo "== 20b. env_value 省略默认值不崩 =="
+# 调用方写 `env_value KEY`（不传第二个参数）时，必须按空串处理；否则 set -u 会报
+# "line N: $2: unbound variable"，报错点离真正的原因很远。
+printf 'K_ONLY=v\n' >"$ENV_FILE"
+out="$(env_value K_ONLY 2>&1)"
+[ "$out" = "v" ] && pass "有值时照常返回" || fail "返回值不对：$out"
+out="$(env_value K_MISSING 2>&1)"
+[ "$out" = "" ] && pass "缺键且未给默认值 → 空串（不报 unbound）" || fail "结果不对：$out"
+out="$(env_value_new K_MISSING 2>&1)"
+[ "$out" = "" ] && pass "env_value_new 同样容忍省略默认值" || fail "env_value_new 结果不对：$out"
+
 echo "== 21. wait_container_healthy =="
 # install.sh 与 dshm 共用这一份实现，行为必须被测住。用假 docker 控制 inspect 的
 # 输出序列；interval=0 让用例瞬间跑完。
-stub="$(mktemp -d)"
+stub="$(mktemp -d "$HERE/.env-test-XXXXXX")"
 cat >"$stub/docker" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1" = "inspect" ]; then

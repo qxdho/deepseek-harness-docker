@@ -18,6 +18,14 @@ fi
 
 cd "$root/admin"
 
+# TMPDIR 指到仓库内：有些环境 /tmp 是 noexec，而 admin 的自更新测试会把「下载到的
+# 二进制」写进 t.TempDir() 再执行它 —— 放 /tmp 就会 fork/exec permission denied，
+# 看起来像代码坏了，其实是挂载选项。t.TempDir() 认 TMPDIR，所以在这里统一改。
+gotmp="$root/.gotmp"
+mkdir -p "$gotmp"
+export TMPDIR="$gotmp"
+trap 'rm -rf "$gotmp"' EXIT
+
 # gofmt：格式不合规直接失败 —— 这是 CI 里最先卡住的一步。
 unformatted="$(gofmt -l .)"
 if [ -n "$unformatted" ]; then

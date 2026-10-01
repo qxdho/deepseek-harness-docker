@@ -45,7 +45,7 @@ env_value_new() {
 		old="$(legacy_key_of "$1")"
 		[ -z "$old" ] || v="$(get_env "$old")"
 	fi
-	printf '%s' "${v:-$2}"
+	printf '%s' "${v:-${2:-}}"
 }
 
 # 把 .env 里存在的旧键改名为新键（值不变）。新键已有值时以新键为准，并删掉旧键，
@@ -123,11 +123,13 @@ get_env() {
 	printf '%s' "$v"
 }
 
-# 读一个键，为空时返回默认值（dshm 里大量使用）
+# 读一个键，为空时返回默认值（dshm 里大量使用）。
+# 默认值可以省略 —— 调用方写 `env_value KEY` 时按空串处理，而不是让 `set -u` 直接
+# 报 "line N: $2: unbound variable"（这个崩法很难从报错联想到「少传了个参数」）。
 env_value() {
 	local v
 	v="$(get_env "$1")"
-	printf '%s' "${v:-$2}"
+	printf '%s' "${v:-${2:-}}"
 }
 
 # 把 .env 里的历史默认值对齐到当前默认值。install.sh 与 dshm service up 都会调用。

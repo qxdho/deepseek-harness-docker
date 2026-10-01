@@ -736,7 +736,7 @@ jobs:
           # REQUIRED_SCRIPTS 也用它，两处一起改。
           rm -rf /tmp/verify && mkdir -p /tmp/verify
           tar -xzf "${pkg}.tar.gz" -C /tmp/verify
-          required="dshm scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh scripts/preflight.sh scripts/admin.sh"
+          required="dshm scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh scripts/preflight.sh scripts/admin.sh scripts/doctor.sh"
           for f in $required; do
             [ -f "/tmp/verify/${pkg}/${f}" ] || { echo "::error::发布包缺少 ${f}（dshm 运行时会 source 它）" >&2; exit 1; }
           done

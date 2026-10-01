@@ -363,7 +363,9 @@ const server = http.createServer((req, res) => {
 });
 server.on('upgrade', (req, socket, head) => {
   rewriteIncomingHeaders(req);
-  proxy.ws(req, socket, head);
+  // 升级连接显式不用 keep-alive 连接池：池里的 socket 是给短请求复用的，
+  // 而 WebSocket 升级后这条连接会长期独占，混用只会让两边都出错。
+  proxy.ws(req, socket, head, { agent: false });
 });
 
 server.listen(LISTEN_PORT, '0.0.0.0', () => {

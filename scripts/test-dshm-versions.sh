@@ -30,7 +30,8 @@ env_value_new() { printf '%s' "0.1.7-rc.2"; }
 . "$fnfile"
 
 # ── 假 curl：把固定 JSON 当 registry 响应返回 ───────────────────────────────
-stub="$(mktemp -d)"
+# /tmp 可能是 noexec，假 curl 要放在脚本目录下才执行得起来
+stub="$(mktemp -d "$here/.versions-test-XXXXXX")"
 cat >"$stub/curl" <<'STUB'
 #!/usr/bin/env bash
 # 只认 -o 之外的 -fsSL；把 $FAKE_JSON 文件内容打到 stdout
@@ -232,4 +233,5 @@ else
 	fail "img_base：显式 DSH_IMAGE_BASE 没有被优先采用"
 fi
 rm -f "$ib_fn"
+rm -rf "$stub"
 run_tests

@@ -64,6 +64,9 @@ require_running() {
 # 旧命名卷 → 宿主目录的搬迁同样共用一份实现（install.sh 也会 source 它）
 # shellcheck source=scripts/migrate-home.sh
 . ./scripts/migrate-home.sh
+# 部署自检探针（WebSocket 逐跳握手）
+# shellcheck source=scripts/doctor.sh
+. ./scripts/doctor.sh
 
 # ── 注册为系统命令 ──────────────────────────────────────────────────────────
 is_root() { [ "$(id -u)" = "0" ]; }
@@ -412,7 +415,7 @@ self_update() {
 	# （`./dshm help` → line 37: scripts/log.sh: No such file or directory）。
 	local f
 	for f in scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh \
-		scripts/preflight.sh scripts/admin.sh; do
+		scripts/preflight.sh scripts/admin.sh scripts/doctor.sh; do
 		[ -f "$src/$f" ] || die "发布包里缺少 $f（dshm 运行时会 source 它，包结构异常）"
 	done
 	# 每个脚本都过语法检查，而不只是 dshm
@@ -812,6 +815,7 @@ ${B}服务${RST} — 容器生命周期与运维
   dshm service logs              日志
   dshm service shell             进容器
   dshm service url               一次性 launch URL（排障）
+  dshm service doctor [URL]      部署自检：容器 / 本机 HTTP / 实时通道，以及经反代的那一跳
 EOF
 }
 
@@ -985,8 +989,8 @@ service)
 	shift || true
 	case "$sub" in
 	help | -h | --help) cmd=help; set -- service ;;
-	up | down | restart | status | logs | shell | url) cmd="service-$sub" ;;
-	*) die "未知子命令：service $sub（支持 up / down / restart / status / logs / shell / url；运行 dshm service help）" ;;
+	up | down | restart | status | logs | shell | url | doctor | diagnose) cmd="service-$sub" ;;
+	*) die "未知子命令：service $sub（支持 up / down / restart / status / logs / shell / url / doctor；运行 dshm service help）" ;;
 	esac
 	;;
 version)
@@ -1175,6 +1179,64 @@ service-url)
 	require_docker; require_running
 	hdr "一次性 launch URL（排障用）"
 	docker exec "$CONTAINER" cat "$(dsh_home_in_container)/web-launch-url.txt" 2>/dev/null || info "（暂无）"
+	;;
+
+service-doctor | service-diagnose)
+	require_docker; require_env
+	hdr "部署自检"
+	doc_port="$(env_value_new DSH_HTTP_PORT 3080)"
+
+	# 1) 容器本身
+	doc_state="$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo 'missing')"
+	case "$doc_state" in
+	running/healthy) ok "容器状态：${doc_state}" ;;
+	*) warn "容器状态：${doc_state}（先解决它，否则下面几项没有意义）" ;;
+	esac
+
+	# 2) 本机 HTTP
+	doc_http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${doc_port}/" 2>/dev/null || true)"
+	case "$doc_http" in
+	200 | 302 | 401) ok "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
+	"") warn "本机 HTTP：连不上 127.0.0.1:${doc_port}（容器没起或端口没监听到）" ;;
+	*) warn "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
+	esac
+
+	# 3) 本机 WebSocket（直连本项目代理，绕过反代）
+	doc_line="$(ws_probe_tcp 127.0.0.1 "$doc_port" /api/remote.mux)"
+	case "$(doctor_classify "$doc_line")" in
+	upgraded) ok "本机实时通道：WebSocket 握手 → ${doc_line}" ;;
+	http-ok | http-redirect | http-denied)
+		ok "本机实时通道：代理转发正常（${doc_line}）—— 这次没带会话 Cookie，属预期"
+		;;
+	no-response)
+		warn "本机实时通道：127.0.0.1:${doc_port} 没有任何响应 —— 代理或 dsh 有问题"
+		info "看日志： ./dshm service logs | tail -50"
+		;;
+	*) warn "本机实时通道：握手结果异常（${doc_line}）" ;;
+	esac
+
+	# 4) 经反向代理（给了 URL 用 URL；否则用 DSH_PUBLIC_HOST 拼 https）
+	doc_base=""
+	if [ -n "${1:-}" ]; then
+		doc_base="${1%/}"
+	elif [ -n "$(env_value DSH_PUBLIC_HOST)" ]; then
+		doc_base="https://$(env_value DSH_PUBLIC_HOST)"
+	fi
+	if [ -z "$doc_base" ]; then
+		info "未提供公网地址（也没有 DSH_PUBLIC_HOST），跳过反代那一段"
+		info "要一起验： ./dshm service doctor https://你的域名"
+	else
+		doc_line="$(ws_probe_url "${doc_base}/api/remote.mux")"
+		case "$(doctor_classify "$doc_line")" in
+		upgraded) ok "经反代实时通道：${doc_base} → ${doc_line}" ;;
+		no-response) warn "经反代：${doc_base} 没有响应（DNS / 证书 / 反代本身）" ;;
+		*)
+			warn "经反代：${doc_base} 没拿到 101（${doc_line}）—— 浏览器里的实时通道会一直重连"
+			info "本机那一跳正常的话，问题就在反代没有转发 Upgrade/Connection 头"
+			doctor_proxy_hint
+			;;
+		esac
+	fi
 	;;
 
 service-shell)

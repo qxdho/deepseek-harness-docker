@@ -194,6 +194,7 @@ a system command so you can call `dshm` from any directory.
 ./dshm service down        # stop (data kept)
 ./dshm service status      # health / port / login user (and whether dsh has an update)
 ./dshm service logs        # logs
+./dshm service doctor      # deployment self-check: container / local HTTP / realtime channel (WebSocket) / proxy hop
 ./dshm service shell       # shell into the container
 
 # dsh versions
@@ -550,6 +551,42 @@ server {
 
 Check the logs: `./dshm service logs`. The first start takes a dozen seconds or so;
 `./dshm service up` prints progress while waiting.
+
+</details>
+
+<details>
+<summary><b>The browser console keeps repeating <code>WebSocket connection to 'wss://…/api/remote.mux' failed</code>.</b></summary>
+
+<br/>
+
+The page opens but the realtime channel (session stream, status pushes) keeps reconnecting: the
+WebSocket is not surviving the whole chain. It has to cross *browser → reverse proxy → this project's
+proxy → dsh*, and any hop that does not forward `Upgrade` / `Connection` breaks it while plain HTTP
+keeps working.
+
+```bash
+./dshm service doctor https://your-domain    # hop by hop: container → local HTTP → local WebSocket → proxy
+```
+
+If the local hop returns `101` and the proxied one does not, the reverse proxy is the problem. nginx
+needs:
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+location / {
+    proxy_pass http://127.0.0.1:3080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 3600s;      # the 60s default cuts idle realtime channels
+}
+```
+
+1Panel: Website → Reverse proxy → enable "WebSocket support"; BT Panel: add the same lines to the site
+config.
 
 </details>
 

@@ -156,7 +156,8 @@ which are the deployer's business.
 | Layer | What it covers | Needs Docker |
 |---|---|---|
 | `scripts/test-preflight.sh` | workspace ownership checks (paths, quoting, non-writable, deployer-vs-container UID, `DSH_UID` resolution), `dsh-home` volume name resolution, private-file mode repair (host and entrypoint), both entrypoint workspace paths | no |
-| `proxy/test-inject.js` | HTML injection point (including the `<header>` / `<headless-…>` false positive), `X-Forwarded-For` recomputation, header legality | no |
+| `proxy/test-inject.js` | HTML injection point (including the `<header>` / `<headless-…>` false positive), `X-Forwarded-For` recomputation, header legality, WebSocket upgrade forwarding (raw socket → 101) | no |
+| `scripts/test-doctor.sh` | `dshm service doctor`'s hop classification: 101 / 2xx / 3xx / 4xx / no response, plus real handshakes against a stub upstream | no |
 | `scripts/smoke-test.sh` | real container: health, unauthenticated redirect, login round-trip, session persistence, injection, unauthenticated `/api` rejection | yes |
 | `scripts/smoke-workspace.sh` | real container: unwritable workspace degrades (and exits under `DSH_WORKSPACE_STRICT=1`), writable workspace accepts writes | yes |
 

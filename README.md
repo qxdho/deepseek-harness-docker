@@ -190,6 +190,7 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 ./dshm service down        # 停止（数据保留）
 ./dshm service status      # 健康状态 / 端口 / 登录用户（附带提示 dsh 是否有新版本）
 ./dshm service logs        # 查看日志
+./dshm service doctor      # 部署自检：容器 / 本机 HTTP / 实时通道（WebSocket）/ 反代那一跳
 ./dshm service shell       # 进入容器
 
 # dsh 版本
@@ -525,6 +526,39 @@ server {
 <br/>
 
 先看日志：`./dshm service logs`。首次启动需要十几秒，`./dshm service up` 会打印等待进度。
+
+</details>
+
+<details>
+<summary><b>浏览器控制台一直刷 <code>WebSocket connection to 'wss://…/api/remote.mux' failed</code>？</b></summary>
+
+<br/>
+
+页面能打开、但实时通道（会话流、状态推送）反复重连，说明 WebSocket 没有穿过完整链路。
+它要走「浏览器 → 反向代理 → 本项目代理 → dsh」四段，任何一段没转发 `Upgrade` / `Connection`
+头都会是这个现象，而普通 HTTP 请求完全正常。
+
+```bash
+./dshm service doctor https://你的域名     # 逐跳验：容器 → 本机 HTTP → 本机 WebSocket → 反代
+```
+
+本机那一跳是 `101`、经反代不是 `101`，问题就在反代。nginx 需要：
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+location / {
+    proxy_pass http://127.0.0.1:3080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 3600s;      # 默认 60s 会把空闲的实时通道掐断
+}
+```
+
+1Panel：网站 → 反向代理 → 打开「WebSocket 支持」；宝塔：把上面几行加进站点配置。
 
 </details>
 

@@ -137,3 +137,73 @@ func TestPanelArch(t *testing.T) {
 		}
 	}
 }
+
+// 备份必须是**复制**出来的，不能在替换过程中让 target 消失。
+//
+// 早先的实现是 `os.Rename(target, backup)` 再 `os.Rename(tmp, target)` —— 两步之间
+// target **不存在**，此刻被 kill / 断电就会留下"没有可执行文件、只剩 .bak"的状态，
+// systemd 的 Restart=on-failure 也拉不起来。
+// 这里把第一次 rename 前的那一刻暴露出来做断言：备份已经存在（复制完成），
+// 而 target 仍然在位且内容还是旧的。
+func TestInstallBinaryNeverRemovesTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dsh-admin")
+	if err := os.WriteFile(target, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用 hook 在"备份完成、准备 rename 到位"之间插一次检查。
+	var sawBackupWithoutTarget bool
+	var backupContentWhileTargetGone string
+	hook = func() {
+		if _, err := os.Stat(target); err != nil {
+			sawBackupWithoutTarget = true
+			if b, err := os.ReadFile(target + ".bak"); err == nil {
+				backupContentWhileTargetGone = string(b)
+			}
+		}
+	}
+	defer func() { hook = nil }()
+
+	backup, err := installBinary(target, []byte("NEW"))
+	if err != nil {
+		t.Fatalf("installBinary 失败：%v", err)
+	}
+	if sawBackupWithoutTarget {
+		t.Errorf("替换过程中 target 一度不存在（此刻断电就没有可执行文件了），备份内容 = %q",
+			backupContentWhileTargetGone)
+	}
+	if backup == "" {
+		t.Fatal("应返回备份路径")
+	}
+	if b, _ := os.ReadFile(backup); string(b) != "OLD" {
+		t.Errorf("备份内容 = %q，期望 OLD", b)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "NEW" {
+		t.Errorf("target 内容 = %q，期望 NEW", got)
+	}
+}
+
+// 连续的两次自更新：第二次的备份必须是**第一次装上的那个版本**（旧内容），
+// 而不是被第一次覆盖掉。`os.Rename(target, backup)` 时 backup 会被原子替换，
+// 语义相同；改成复制后同样要保证这一点。
+func TestInstallBinaryBackupIsPreviousVersion(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dsh-admin")
+	if err := os.WriteFile(target, []byte("V1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installBinary(target, []byte("V2")); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := installBinary(target, []byte("V3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(backup); string(b) != "V2" {
+		t.Errorf("第二次自更新的备份 = %q，期望 V2（第一次装上那版，可用于回滚）", b)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "V3" {
+		t.Errorf("target = %q，期望 V3", got)
+	}
+}

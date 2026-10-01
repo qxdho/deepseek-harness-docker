@@ -163,6 +163,11 @@ func (s *server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// hook 在「备份已完成、准备 rename 到位」之间被调用（测试用它检查 target 是否仍在位）。
+// 生产路径下恒为 nil —— 这是为了能对一个**亚步骤级**的性质做断言：
+// 「替换过程中 target 从不消失」。没有这个钩子就只能靠读代码相信它。
+var hook func()
+
 // installBinary 把 payload 装到 target 位置，并把原文件备份为 target+".bak"。
 // 返回备份路径（备份失败时为空串）。
 //
@@ -184,6 +189,12 @@ func installBinary(target string, payload []byte) (string, error) {
 		tmp.Close()
 		return "", fmt.Errorf("写入临时文件失败：%w", err)
 	}
+	// 落盘再改名：rename 只保证"目录项替换"是原子的，不保证数据已经写到磁盘。
+	// 掉电时可能出现"名字换了、内容是空的"，所以先 Sync 再 rename。
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("临时文件落盘失败：%w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return "", fmt.Errorf("关闭临时文件失败：%w", err)
 	}
@@ -191,17 +202,25 @@ func installBinary(target string, payload []byte) (string, error) {
 		return "", fmt.Errorf("设置可执行位失败：%w", err)
 	}
 
+	// 备份现有文件。**必须是"复制"而不是"改名"**：
+	// 早先写的是 `os.Rename(target, backup)` —— 那让 target 在这一刻**不存在**，
+	// 若此时被 kill / 断电，面板就没有可执行文件了，systemd 的 Restart=on-failure
+	// 也拉不起来（找不到二进制）。改成先复制出备份，target 全程在位，
+	// 再用一次 rename 原子替换。复制失败不致命（例如 target 不是普通文件）。
 	backup := target + ".bak"
-	if err := os.Rename(target, backup); err != nil {
-		// 备份失败不致命（例如目标不是普通文件），置空让调用方提示用户
+	if old, err := os.ReadFile(target); err == nil {
+		if err := os.WriteFile(backup, old, 0o755); err != nil {
+			backup = ""
+		}
+	} else {
 		backup = ""
 	}
+	if hook != nil {
+		hook()
+	}
 	if err := os.Rename(tmpName, target); err != nil {
-		// 回滚：把备份放回去，避免面板没有可执行文件
-		if backup != "" {
-			_ = os.Rename(backup, target)
-		}
-		return "", fmt.Errorf("替换面板二进制失败（已尝试回滚）：%w", err)
+		// 单次 rename 失败时 target 仍是旧文件（rename 语义保证），无需回滚。
+		return "", fmt.Errorf("替换面板二进制失败（原文件未改动）：%w", err)
 	}
 	return backup, nil
 }

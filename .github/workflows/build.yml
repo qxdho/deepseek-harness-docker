@@ -413,19 +413,39 @@ jobs:
         run: |
           set -eu
           tag=latest
+          # 用**精确文件名**，不要用 dshm-* 通配：那个模式会匹配到生成发布包时留下的
+          # 目录 dshm-v<版本>/，gh 会试图把目录当附件上传，报
+          #   read dshm-v<版本>: is a directory
+          # 然后重试三次全败、整个 job 变红。这个坑很难从报错本身看出来。
+          VER="v$(tr -d ' \t\r\n' < VERSION)"
+          [ -n "$VER" ] && [ "$VER" != "v" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          PKG="dshm-${VER}.tar.gz"
+          [ -f "$PKG" ] || { echo "::error::找不到 $PKG" >&2; exit 1; }
+          [ -f "${PKG}.sha256" ] || { echo "::error::找不到 ${PKG}.sha256" >&2; exit 1; }
+
           for i in 1 2 3; do
             gh release view "$tag" >/dev/null 2>&1 \
               || gh release create "$tag" --title "latest（main 最新构建）" \
                    --notes "由 main 分支自动更新，供安装脚本从 releases/latest 拉取。" \
                    >/dev/null 2>&1 || true
+
+            # 先清掉 latest 里的历史发布包。否则每发一个版本就多留一份，latest 会一直
+            # 堆积；--clobber 只覆盖同名文件，管不了旧版本名。
+            gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null |
+              grep -E '^dshm-.*\.tar\.gz(\.sha256)?$' |
+              while read -r old; do
+                gh release delete-asset "$tag" "$old" --yes 2>/dev/null &&
+                  echo "已清理旧包：$old" || true
+              done
+
             if gh release upload "$tag" \
                  admin/dsh-admin-linux-amd64 \
                  admin/dsh-admin-linux-amd64.sha256 \
                  admin/dsh-admin-linux-arm64 \
                  admin/dsh-admin-linux-arm64.sha256 \
-                 dshm-* \
+                 "$PKG" "${PKG}.sha256" \
                  --clobber; then
-              echo "已将面板二进制更新到 latest release"
+              echo "已将面板二进制与 $PKG 更新到 latest release"
               exit 0
             fi
             echo "上传失败，第 $i 次重试…" >&2

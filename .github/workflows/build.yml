@@ -90,7 +90,7 @@ jobs:
     needs: changes
     if: |
       github.event_name != 'pull_request' &&
-      needs.changes.outputs.code == 'true' &&
+      needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -227,6 +227,20 @@ jobs:
       # 由 scripts/test-all.sh 自动发现并运行 scripts/test-*.sh —— 原来这里是 6 个
       # 逐字重复的步骤（各自 `chmod +x a.sh && ./b.sh`），新增测试还要记得加步骤。
       # 现在新增脚本会被自动跑到，CI 侧只有一个步骤。
+      # 先校验 workflow 本身。**YAML 合法 ≠ workflow 合法**：GitHub Actions 还有一整套
+      # 语义规则（表达式语法、needs 引用、step 键名……），光靠 yaml 解析器查不出来。
+      # 这个坑真踩过：删掉一行 `needs.smoke.result == 'success'` 后，`if:` 变成以 `&&`
+      # 结尾的悬空表达式 —— YAML 完全合法，动作全被 GitHub 拒绝执行（run 建了但 0 个作业，
+      # 报错只写「failure」，极难定位）。actionlint 一跑就指到了具体行。
+      - name: 校验 workflow（actionlint）
+        run: |
+          set -euo pipefail
+          VER=1.7.7
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -color .github/workflows/*.yml
+
       - name: 离线测试（自动发现 scripts/test-*.sh）
         run: ./scripts/test-all.sh -v
       - name: 管理面板离线测试

@@ -9,12 +9,16 @@
 set -euo pipefail
 # 定位脚本所在目录（不是 cwd），这样从任何地方调用都能找到同目录的 scripts/。
 here="$(cd "$(dirname "$0")" && pwd)"
-cd "$here" || die "无法进入脚本所在目录：$here"
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
 # 与 dshm、scripts/release.sh 共用同一份实现（scripts/log.sh）。
 # 以前这里逐字抄了一遍颜色与 hdr/info/ok/warn/die —— 改一处必然漏另一处。
+#
+# **必须先 source 再用 die**：source 之前 die 还不存在，cd 一旦失败会报
+# `die: command not found`（退出码 127），把真正的原因盖掉。
 . "$here/scripts/log.sh"
+
+cd "$here" || die "无法进入脚本所在目录：$here"
 
 command -v docker >/dev/null 2>&1 || die "未安装 docker"
 docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"

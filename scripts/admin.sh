@@ -197,6 +197,27 @@ admin_dir() {
 	printf '%s' "$d"
 }
 
+
+# 免密 sudo 守卫。
+#
+# 为什么必须显式判一次：本脚本里多处要 `sudo install` / `sudo systemctl`，而
+# `command -v sudo` 只说明"装了 sudo"，不说明"不用输密码"。需要密码时这些调用会**卡在
+# 密码提示上**（非交互调用直接挂住，TTY 下则让 install.sh 停住等人），而且失败还会被
+# 调用处的 `|| true` 吞掉，表现为"看起来执行了、其实没生效"。
+#
+# 用它替掉所有裸 sudo：探测失败时给出可复制的手工命令，而不是悬在那里等输入。
+need_sudo() { # <给用户看的操作说明>
+	if [ "$(id -u)" = "0" ]; then
+		return 0
+	fi
+	if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+		return 0
+	fi
+	die "这一步需要 root 权限，但当前既不是 root、也没有可用的免密 sudo。
+      请用 root 执行，或先配置免密 sudo（NOPASSWD），然后重跑。
+      需要做的事：$*
+      手工命令示例：sudo <上面这条命令>"
+}
 admin_has_systemd() {
 	command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
 }
@@ -233,7 +254,8 @@ admin_install() {
 	if [ -w "$dir" ]; then
 		install -m 0755 "$src" "$bin"
 	else
-		sudo install -m 0755 "$src" "$bin"
+		need_sudo "把面板二进制装到 ${bin}"
+		sudo -n install -m 0755 "$src" "$bin"
 	fi
 	ok "二进制：$bin"
 
@@ -246,7 +268,8 @@ admin_install() {
 		staging="$(mktemp)"
 		admin_write_config "$staging" "${bind}:${port}" /var/run/docker.sock "$CONTAINER" \
 			"$PROJECT_DIR" "$(admin_detect_compose_project)"
-		sudo install -m 0600 "$staging" "$cfg"
+		need_sudo "写入面板配置 ${cfg}"
+		sudo -n install -m 0600 "$staging" "$cfg"
 		rm -f "$staging"
 	fi
 	ok "配置：$cfg（权限 600）"
@@ -406,11 +429,21 @@ admin_password() {
 	else
 		staging="$(mktemp)"
 		_set "$staging"
-		sudo install -m 0600 "$staging" "$dir/config.json"
+		need_sudo "写入面板配置 ${dir}/config.json"
+		sudo -n install -m 0600 "$staging" "$dir/config.json"
 		rm -f "$staging"
 	fi
 	if admin_has_systemd && [ -f /etc/systemd/system/dsh-admin.service ]; then
-		systemctl restart dsh-admin 2>/dev/null || sudo systemctl restart dsh-admin 2>/dev/null || true
+		# 不要写 `sudo systemctl restart ... || true`：那是不带 -n 的 sudo，需要密码时
+		# 会卡在提示上，而失败又被 || true 吞掉（看起来重启了、其实没有）。
+		if is_root; then
+			systemctl restart dsh-admin 2>/dev/null || true
+		elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+			sudo -n systemctl restart dsh-admin 2>/dev/null || true
+		else
+			warn "配置已写入，但无法重启面板（需要 root 或免密 sudo）。"
+			info "请手工执行：sudo systemctl restart dsh-admin"
+		fi
 	elif [ -f "$dir/dsh-admin.pid" ]; then
 		kill "$(cat "$dir/dsh-admin.pid")" 2>/dev/null || true
 		setsid "$dir/dsh-admin" -config "$dir/config.json" >>"$dir/dsh-admin.log" 2>&1 &

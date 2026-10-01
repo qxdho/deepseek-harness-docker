@@ -119,12 +119,48 @@ for f in "${files[@]}"; do
 		ok "$name：$n 个内嵌脚本块语法正确"
 	fi
 
-	# SC2015 形态。只看非注释行：`A && B || C`（或反过来）。
-	sc_lines="$(grep -nE '^[[:space:]]*[^#[:space:]].*(&&.*\|\||\|\|.*&&)' "$f" 2>/dev/null || true)"
+	# SC2015 形态（`A && B || C` 不是 if-then-else）。**只扫抽出来的 run: 块**：
+	# 早先这里 grep 的是整个 workflow YAML，于是 GitHub Actions 的合法表达式
+	# `if: a && b || c` 会被判成问题并让本检查失败（假红）。YAML 里的 if: 是
+	# GH Actions 表达式语言，不是 shell，SC2015 根本不适用。
+	sc_lines=""
+	i=1
+	while [ "$i" -le "$n" ]; do
+		blk="$tmp/$name/b$i"
+		if [ -s "$blk" ]; then
+			found="$(grep -nE '^[[:space:]]*[^#[:space:]].*(&&.*\|\||\|\|.*&&)' "$blk" 2>/dev/null || true)"
+			if [ -n "$found" ]; then
+				sc_lines="${sc_lines}${sc_lines:+$'\n'}第 ${i} 块：${found}"
+			fi
+		fi
+		i=$((i + 1))
+	done
 	if [ -n "$sc_lines" ]; then
 		fails=$((fails + 1))
 		warn "$name：发现 SC2015 形态（与运算接或运算不是 if-then-else）"
 		printf '%s\n' "$sc_lines" | sed 's/^/        /'
+	fi
+done
+
+# ── 作业级 if 的语义检查（YAML 合法 ≠ 条件写对）────────────────────────────
+# 这个坑真踩过：`checks` 的条件写成 `github.ref == 'refs/heads/main'`，而注释声称
+# 「推 main 与 PR 上跑」。**PR 的 github.ref 是 `refs/pull/<N>/merge`**，所以 PR 永远
+# 跳过检查 —— 仓库当时没有 PR，一直没暴露。actionlint 也查不出这种语义错误。
+#
+# 这里做一条最小但有效的检查：本 workflow 显式声明了 `pull_request:` 触发器，就必须
+# 至少有一个作业会在 PR 上跑（否则触发器形同虚设）。
+for wf in "$root"/.github/workflows/*.yml; do
+	[ -f "$wf" ] || continue
+	name="$(basename "$wf")"
+	# 只有声明了 pull_request 触发器的 workflow 才适用
+	if ! grep -qE '^  pull_request:' "$wf"; then
+		continue
+	fi
+	# 找出所有「会在 PR 上跑」的作业条件：出现 pull_request 字样的 if
+	if ! grep -qE "github\.event_name == 'pull_request'|github\.event_name == \"pull_request\"" "$wf"; then
+		fails=$((fails + 1))
+		warn "$name：声明了 pull_request 触发器，但没有任何作业的条件包含 pull_request —— PR 上不会有检查跑"
+		printf '        修复：相关作业的 if 加上 `github.event_name == '"'"'pull_request'"'"'`（PR 的 github.ref 是 refs/pull/<N>/merge）\n'
 	fi
 done
 

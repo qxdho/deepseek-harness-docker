@@ -375,10 +375,14 @@ jobs:
           done
   checks:
     needs: changes
-    # 只在推 main 与 PR 上跑，**tag 推送时跳过**：tag 通常正指向刚推过的那个提交，
-    # 同一份代码的检查在 main 那次已经跑过了，再跑一遍纯属重复（约 50 秒）。
+    # 在**推 main 与 PR** 上跑；tag 推送时跳过（tag 通常正指向刚推过的那个提交，
+    # 同一份代码的检查在 main 那次已经跑过了，再跑一遍纯属重复，约 50 秒）。
+    #
+    # 注意不能只判 `github.ref == 'refs/heads/main'`：**PR 的 ref 是
+    # `refs/pull/<N>/merge`**，那样 PR 会永远跳过检查 —— 与这里注释声称的行为相反。
+    # 仓库此前没有 PR，所以这个洞一直没被踩到。
     if: |
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') &&
       needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:

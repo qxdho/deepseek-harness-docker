@@ -238,18 +238,23 @@ uninstall_self() {
 self_update() {
 	hdr "更新 dshm 自身"
 	local force=0 allow_stale=0 target=""
-	for a in "$@"; do
-		case "$a" in
+	# 必须用 while + shift，不能用 `for a in "$@"`：for 会**先展开整个参数列表**，
+	# 循环体里的 shift 只影响 $1、不影响已展开的迭代序列 —— 于是 `--to 2026.10.01`
+	# 在处理 --to 时正确取到版本号后，又会把同一个版本号当成新参数再走一遍，
+	# 报出莫名其妙的「未知参数：2026.10.01」。while 按语义逐个消费才正确。
+	while [ $# -gt 0 ]; do
+		case "$1" in
 		--force | -f) force=1 ;;
 		--allow-stale) allow_stale=1 ;;
 		--to)
+			target="${2:-}"
+			[ -n "$target" ] || die "--to 需要版本号（用法：./dshm dshm update --to 2026.10.01）"
 			shift
-			target="${1:-}"
-			[ -n "$target" ] || die "--to 需要版本号（用法：./dshm dshm update --to 2026.09.30）"
 			;;
-		--to=*) target="${a#--to=}" ;;
-		*) die "未知参数：$a（用法：./dshm dshm update [--to 版本] [--force] [--allow-stale]）" ;;
+		--to=*) target="${1#--to=}" ;;
+		*) die "未知参数：$1（用法：./dshm dshm update [--to 版本] [--force] [--allow-stale]）" ;;
 		esac
+		shift
 	done
 
 	command -v curl >/dev/null 2>&1 || die "需要 curl 才能自更新（或改用 git pull）"

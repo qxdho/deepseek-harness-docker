@@ -113,23 +113,39 @@ docker compose up -d     # 启动服务
 ### 升级
 
 ```bash
-./dshm version update --latest      # 推荐：向 npm 查最新 dsh 版本并本地构建
-./dshm version update               # 拉取 GHCR 上的新镜像（不在本地重建）
-./dshm version update --build       # 本地重建（改了仓库代码时）
-./dshm version update 0.2.0-rc.2 --build   # 指定 dsh 版本
-./dshm version list             # 列出 npm 上可装的 dsh 版本
+./dshm version list                        # 看有哪些可直接装的镜像，以及 npm 上可装的 dsh 版本
+./dshm version update                      # 拉取已构建的最新镜像（快，推荐）
+./dshm version update --to <镜像tag>        # 装指定构建，例如 0.2.0-rc.2-2026.10.01-1（回退用）
+./dshm version update --build              # 本地构建（慢）；不指定就用 npm 上的最新版
+./dshm version update --build --dsh 0.1.7-rc.2   # 本地构建并指定 dsh 版本
 ```
 
-镜像由 CI 构建并推送至 GHCR，本地重建既慢又不会带来新版本；仅在拉取失败或需要验证未发布的
-仓库改动时才使用 `--build`。两种方式都会等待容器进入健康状态，未健康则打印日志并以非 0 退出。
+**优先用已构建的镜像**：CI 每次推 main 都会构建镜像，`version update` 直接拉即可。
+只有需要验证未发布的仓库改动、或仓库还没构建过该版本时，才用 `--build` 本地构建。
+
+### 镜像 tag 是怎么编号的
+
+```
+0.2.0-rc.2-2026.10.01-1
+└────┬───┘ └────┬────┘ └┬┘
+   dsh 版本    构建日期   当天序号
+```
+
+| 部分 | 作用 |
+|---|---|
+| `0.2.0-rc.2` | 一眼看出镜像里装的是哪个 dsh |
+| `2026.10.01` | 你的构建日期 |
+| `-1` `-2` | **同一天的多次构建互不覆盖**，旧镜像仍可回退 |
 
 > [!IMPORTANT]
-> **`dsh` 在构建期由 npm 装入镜像**，所以换 dsh 版本需要**本地重建**，没有热切换。
-> 这是这类封装项目的通行做法（1Panel 应用商店、同类社区项目都如此）：好处是**断网也能起**，
-> 而且版本组合有问题会在**构建期**就失败，不会等到起容器才发现。
->
-> `Dockerfile` / `docker-compose.yml` / `.env.example` 里的 `DSH_VERSION` 是写死的具体版本，
-> 因此直接 `--build` 只会构建出那个版本。用 **`--latest`** 才会先向 npm 查最新版并写回 `.env`。
+> **序号是必需的。** 如果 tag 只是 `<dsh版本>`，那么同一天第二次构建会**同名覆盖**
+> 第一次 —— 旧镜像失去引用后可能被回收，你就再也退不回去了。所以本项目不使用
+> 纯版本号 tag。`latest` 指向最新构建，但**要精确复现某个构建必须用完整 tag**。
+
+> [!NOTE]
+> **`dsh` 在构建期由 npm 装入镜像**，所以换 dsh 版本要重建镜像，没有热切换。
+> 这是这类封装项目的通行做法（1Panel 应用商店、同类社区项目都如此）：好处是
+> **断网也能起**，且版本组合有问题会在**构建期**就失败，不会等起容器才发现。
 
 ### 不用惦记着查版本
 
@@ -147,14 +163,20 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 
 | 更新对象 | 权威来源 | 命令 |
 |---|---|---|
-| **`dsh` 本体** | **npm registry** | `./dshm version update --latest` |
-| **`dshm` 脚本自身** | **GitHub 仓库** | `./dshm dshm update` |
+| **`dsh` 本体（容器里跑的东西）** | **npm registry** | `./dshm version update` |
+| **`dshm` 工具（脚本 + 管理面板）** | **你打的 tag** | `./dshm dshm update` |
 
-- **dsh 的发布渠道是 npm**，不是 GitHub。`service versions` / `--latest` 都直接查 npm，
-  所以**即使 GitHub 仓库不是最新，你看到的 dsh 版本仍然是最新的**。
-- **`dshm` 是脚本，随仓库走**。`./dshm dshm update` 从 GitHub 拉取，适合没保留 git 仓库的
-  部署机。在 git 工作区里它会先检查本地是否落后于远端 `main`：落后则停下提醒你用 `git pull`，
-  不会静默覆盖你的本地改动（`--allow-stale` 可强制覆盖，`--force` 可重新下载）。
+这两个**完全独立**，谁都不影响谁：
+
+- **dsh 的发布渠道是 npm**，不是 GitHub。`version list` 直接查 npm，所以**即使本仓库
+  还没跟上，你看到的 dsh 版本仍然是最新的**。上游每几天发一版（实测 4 天 4 个），
+  跟不跟由你决定。
+- **`dshm` 只认 tag 更新，绝不跟随 main**。这是刻意的：跟随 main 就等于把「你还没
+  决定发布的某个中间提交」装到生产上。在 git 工作区里请用 `git pull`；非 git 部署
+  机用 `./dshm dshm update`，它只会拉已发布的 tag。
+
+> [!TIP]
+> 一句话记忆：**`dshm version` 管容器，`dshm dshm` 管工具自己。**
 
 ## 管理命令
 
@@ -193,10 +215,10 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 |---|---|---|
 | `service` | `up` / `down` / `restart` | 启动、停止、重启（`up` 与 `restart` 都会重读 `.env`） |
 | `service` | `status` / `logs` / `shell` / `url` | 状态、日志、进容器、一次性 launch URL（排障） |
-| `version` | `show`（默认）/ `list` / `update` | 看四个版本、列出 npm 可装版本、升级 |
+| `version` | `show`（默认）/ `list` / `update` | 看四个版本、列出已构建镜像与 npm 可装版本、升级 |
 | `auth` | `password` / `user` / `totp` | 改密码、增删禁用用户、两步验证 |
 | `admin` | `install` / `uninstall` / `url` / `password` / `status` / `logs` | 宿主机管理面板 |
-| `dshm` | `install` / `uninstall` / `update` | 管理 dshm 自身（对齐 `npm install npm` 的惯例） |
+| `dshm` | `version` / `list` / `install` / `uninstall` / `update` | 管理 dshm 自身（对齐 `npm install npm` 的惯例）；**只认 tag** |
 | （顶层） | `disk` / `migrate` / `help` | 磁盘占用、数据迁移、帮助 |
 
 > [!NOTE]
@@ -209,69 +231,98 @@ dsh 处于预览期、发布很密（实测 4 天发了 4 个版本），所以�
 > 错误：命令 'up' 已改为分组写法：dshm service up
 > ```
 
-### dsh 版本管理：完整做法
+### 版本管理：完整做法
 
-**先建立正确的心智模型**：这个项目里有**两个层次**的「版本」，它们的更新方式完全不同，
+**先建立正确的心智模型**：这个项目里有**两个版本域**，各自的更新方式完全不同。
 混起来就会觉得「明明升级了却没变」。
 
-| 层次 | 是什么 | 怎么更新 | 存在哪 |
+| 版本域 | 管什么 | 真源 | 命令 |
 |---|---|---|---|
-| **镜像里的 dsh** | 构建期由 npm 装进镜像的 dsh 本体 | `dshm version update` | 镜像层（**重建容器不会丢**） |
-| **profile 里的插件** | 数据目录中的插件（登录、市场等） | `dshm auth` / 容器内 `dsh plugin` / 插件市场 | 数据目录（持久） |
+| **dsh** | 容器里跑的 DeepSeek Harness | **npm registry** | `dshm version …` |
+| **dshm**（含管理面板） | 部署管理工具本身 | **你打的 tag** | `dshm dshm …` |
 
-**注意**：如果你用插件（例如 `dsh-plugin-console`）在容器内就地升级 dsh 本身，
-那次升级只改容器里的文件 —— **容器一重建就回到镜像里的版本**。要长期保持某个 dsh
-版本，必须通过镜像（也就是下面的命令）。
+两者**互不影响**：上游发了新 dsh，不代表 dshm 要跟着动；改了 dshm，也不代表 dsh 要升级。
 
-#### 1. 查：现在是什么版本、有没有新版
+> [!NOTE]
+> **管理面板是 dshm 的附属功能，与 dshm 同版本。** 面板二进制的版本号由 CI 从仓库根的
+> `VERSION` 文件注入，与 dshm 脚本同源 —— 这是机制保证的，不靠人记。
 
-```bash
-./dshm service status      # 当前版本 + 是否有新版（会主动提示）
-./dshm version show     # 只问容器内的 dsh 版本
-./dshm version list     # 列出 npm 上所有可装版本，标出「当前」与「最新」
-```
-
-`service status` 的输出长这样：
-
-```
-dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
-升级：./dshm version update --latest
-```
-
-离线环境可设 `DSHM_SKIP_UPDATE_CHECK=1` 跳过这一步。
-
-#### 2. 升：三种方式，按场景选
+#### 查
 
 ```bash
-./dshm version update             # 拉 GHCR 上 CI 构建好的镜像（最快，推荐日常用）
-./dshm version update --latest    # 向 npm 查最新版 → 写回 .env → 本地构建（最慢）
-./dshm version update 0.2.0-rc.2 --build   # 指定版本本地构建
+./dshm version              # 一次看全四个版本（见下）
+./dshm version list         # 已构建的镜像 + npm 上可装的 dsh 版本
+./dshm service status       # 健康状态（顺带提示 dsh 是否有新版）
+
+./dshm dshm version         # dshm 自己的版本 + 面板是否已装 + 是否有新版（只比 tag）
+./dshm dshm list            # 列出全部已发布的 dshm 版本
 ```
 
-| 你想要 | 用哪个 | 耗时 |
+`dshm version` 会列出**四个**可能互不相同的版本：
+
+```
+配置里钉的版本：  0.2.0-rc.2      ← 下次构建会得到什么
+镜像：            ghcr.io/…:latest ← 拉的哪个镜像
+容器内实际运行：  0.2.0-rc.2      ← 真在跑什么
+npm 最新：        0.2.0-rc.2      ← 可以要什么
+```
+
+**「配置 ≠ 实际运行」时会告警** —— 改了 `.env` 却没 `up` 时就是这种状态，此时
+`./dshm service up` 即可应用。
+
+离线环境可设 `DSHM_SKIP_UPDATE_CHECK=1` 跳过联网查询。
+
+#### 升 dsh（容器）
+
+```bash
+./dshm version update              # 拉取已构建的最新镜像（快，优先）
+./dshm version update --to <镜像tag>  # 装指定构建（回退用）
+./dshm version update --build      # 本地构建（慢）；不指定就用 npm 最新版
+./dshm version update --build --dsh 0.1.7-rc.2   # 本地构建并指定 dsh 版本
+```
+
+| 你的目的 | 用哪个 | 耗时 |
 |---|---|---|
-| 跟上最新（且仓库 CI 已构建） | `update` | 快（拉镜像） |
-| 确保拿到 npm 最新版 | `update --latest` | 慢（本地构建） |
-| 装某个特定版本 | `update <版本> --build` | 慢（本地构建） |
+| 跟上最新（CI 已构建） | `version update` | 快（拉镜像） |
+| 精确装/回退到某次构建 | `version update --to <镜像tag>` | 快（拉镜像） |
+| 用 npm 最新版 / 指定版本 | `version update --build [--dsh v]` | 慢（本地构建） |
 
-**为什么换版本要重建镜像**：dsh 是在**构建期**由 npm 装进镜像的，这是本项目（以及
-1Panel 应用商店、同类项目）的通行做法 —— 好处是**断网也能起**，而且版本组合有问题
-会在**构建期**就失败，不会等到起容器才发现。
+**为什么换 dsh 版本要重建镜像**：dsh 是**构建期**由 npm 装进镜像的，这是本项目
+（以及 1Panel 应用商店、同类项目）的通行做法 —— **断网也能起**，且版本组合有问题会在
+**构建期**就失败，不会等起容器才发现。
 
-#### 3. 回退：装回旧版本
+**回退不会丢数据**：会话、插件、凭据都在 bind mount 的数据目录里。
+
+#### 升 dshm（工具 + 面板）
 
 ```bash
-./dshm version list              # 先看有哪些版本可选
-./dshm version update 0.1.7-rc.2 --build
+./dshm dshm update                 # 装最新已发布版本
+./dshm dshm update --to <版本>      # 装/回退到指定版本，如 --to 2026.10.01
 ```
 
-数据目录不受影响（会话、插件、凭据都在 bind mount 里），所以回退不会丢数据。
+**只认 tag，绝不跟随 main** —— 以免装到你还没决定发布的中间提交。在 git 工作区里请用
+`git pull`；`dshm dshm update` 面向的是没保留 git 仓库的部署机（它默认会在 git 工作区
+停下，`--allow-stale` 才继续覆盖）。
 
-#### 4. 仓库自己别落后
+**回退到旧版本：`--to` 必须配合 tag 才有意义** —— 所以发布流程是刻意保留给维护者的。
 
-`DSH_VERSION` 写在 `Dockerfile` / `docker-compose.yml` / `.env.example` 三处。
-CI 每周查一次上游，有新版本就**开一个 PR**，你 review 后合并即可（见
-`.github/workflows/update-versions.yml`）。所以正常情况你不需要手工改这三个文件。
+#### 维护者：怎么发布
+
+```bash
+# 1. 改 VERSION 文件（唯一真源），提交
+git commit -am "chore(release): v2026.10.01" && git push
+
+# 2. 打 tag 并推送 —— CI 会构建面板二进制并发布 release
+git tag v2026.10.01 && git push origin v2026.10.01
+```
+
+**镜像不用手动打 tag**：每次推 main，CI 自动构建并以
+`<dsh版本>-<日期>-<序号>`（如 `0.2.0-rc.2-2026.10.01-1`）推送到 GHCR，序号保证
+同一天多次构建**互不覆盖**。
+
+**仓库自己也不会落后**：CI 每周查一次上游 dsh 版本，有新版本就**开 PR**（见
+`.github/workflows/update-versions.yml`），你 review 后合并即可，不必手工改
+`Dockerfile` / `docker-compose.yml` / `.env.example` 里的 `DSH_VERSION`。
 
 ## 管理面板
 

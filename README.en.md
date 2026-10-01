@@ -121,27 +121,42 @@ docker compose up -d     # start the service
 ### Upgrading
 
 ```bash
-./dshm version update --latest      # recommended: resolve npm latest and build locally
-./dshm version update               # pull the new image from GHCR (no local rebuild)
-./dshm version update --build       # local rebuild (when you changed repo code)
-./dshm version update 0.2.0-rc.2 --build   # build a specific dsh version
-./dshm version list             # list every installable version on npm
+./dshm version list                        # images already built, plus dsh versions on npm
+./dshm version update                      # pull the newest built image (fast, preferred)
+./dshm version update --to <image tag>     # install a specific build, e.g. 0.2.0-rc.2-2026.10.01-1
+./dshm version update --build              # build locally (slow); npm latest by default
+./dshm version update --build --dsh 0.1.7-rc.2   # build locally with a chosen dsh version
 ```
 
-Images are built by CI and pushed to GHCR; a local rebuild is slow and yields nothing newer. Use
-`--build` only when the pull fails or you need to validate uncommitted repository changes. Both paths
-wait for the container to become healthy and exit non-zero with logs if it does not.
+**Prefer an already-built image**: CI builds one on every push to `main`, so `version update`
+just pulls it. Only reach for `--build` when you need to validate uncommitted repository changes,
+or no image exists for the version you want.
+
+### How image tags are numbered
+
+```
+0.2.0-rc.2-2026.10.01-1
+└────┬───┘ └────┬────┘ └┬┘
+ dsh version   build date  sequence
+```
+
+| Part | Purpose |
+|---|---|
+| `0.2.0-rc.2` | which dsh is inside the image |
+| `2026.10.01` | the day you built it |
+| `-1` `-2` | **multiple builds on the same day never overwrite each other** — old images stay pullable |
 
 > [!IMPORTANT]
-> **dsh is npm-installed into the image at build time**, so changing the dsh version requires a
-> **local rebuild** — there is no hot swap. This is the common approach for packaging projects like
-> this one (1Panel's app store and comparable community projects do the same): the upside is that the
-> container **works offline**, and a bad version combination fails at **build time** rather than
-> after the container starts.
->
-> `DSH_VERSION` in `Dockerfile` / `docker-compose.yml` / `.env.example` pins one concrete version, so
-> a bare `--build` only ever produces that version. Use **`--latest`** to resolve npm's latest and
-> write it back to `.env` first.
+> **The sequence number is not decoration.** With a plain `<dsh version>` tag, a second build on
+> the same day would **overwrite** the first: the old image loses its tag, may be garbage-collected,
+> and you can never roll back to it. That is why this project does not use plain version tags.
+> `latest` points at the newest build, but **reproducing a specific build requires the full tag**.
+
+> [!NOTE]
+> **dsh is npm-installed into the image at build time**, so changing the dsh version means rebuilding
+> — there is no hot swap. That is the common approach for packaging projects like this one (1Panel's
+> app store and comparable community projects do the same): the container **works offline**, and a bad
+> version combination fails at **build time** rather than after the container starts.
 
 ### No need to keep checking for versions
 
@@ -160,15 +175,20 @@ This trips people up, so keep them apart:
 
 | What | Source of truth | Command |
 |---|---|---|
-| **dsh itself** | **npm registry** | `./dshm version update --latest` |
-| **the `dshm` script** | **the GitHub repository** | `./dshm dshm update` |
+| **dsh itself** (what runs in the container) | **npm registry** | `./dshm version update` |
+| **the `dshm` tool** (script + admin panel) | **tags you push** | `./dshm dshm update` |
 
-- **dsh is published to npm**, not GitHub. `service versions` / `--latest` query npm directly, so
-  **even if the GitHub repository is behind, the dsh versions you see are current**.
-- **`dshm` is a script that ships with the repository.** `./dshm dshm update` pulls it from GitHub,
-  which suits deployments that never kept a git checkout. Inside a git working tree it first checks
-  whether your checkout is behind `main`: if so it **stops** and tells you to `git pull` instead of
-  silently overwriting your local changes (`--allow-stale` forces it, `--force` re-downloads).
+The two are **completely independent** — neither affects the other:
+
+- **dsh is published to npm**, not GitHub. `version list` queries npm directly, so **even if this
+  repository has not caught up, the dsh versions you see are current**. Upstream ships every few
+  days (four releases in four days, measured); whether to follow is your call.
+- **`dshm` updates from tags only, never `main`.** That is deliberate: following `main` would mean
+  installing a commit you have not decided to release. Inside a git working tree use `git pull`;
+  deployments without a checkout use `./dshm dshm update`, which only pulls published tags.
+
+> [!TIP]
+> One line to remember: **`dshm version` manages the container, `dshm dshm` manages the tooling.**
 
 ## Management CLI
 
@@ -207,10 +227,10 @@ a system command so you can call `dshm` from any directory.
 |---|---|---|
 | `service` | `up` / `down` / `restart` | Start, stop, restart (`up` and `restart` both re-read `.env`) |
 | `service` | `status` / `logs` / `shell` / `url` | Status, logs, shell, one-time launch URL (troubleshooting) |
-| `version` | `show` (default) / `list` / `update` | Show four versions, list npm versions, upgrade |
+| `version` | `show` (default) / `list` / `update` | Show four versions, list built images and npm versions, upgrade |
 | `auth` | `password` / `user` / `totp` | Password, user management, two-factor auth |
 | `admin` | `install` / `uninstall` / `url` / `password` / `status` / `logs` | Host-side admin panel |
-| `dshm` | `install` / `uninstall` / `update` | Manage dshm itself (mirrors `npm install npm`) |
+| `dshm` | `version` / `list` / `install` / `uninstall` / `update` | Manage dshm itself (mirrors `npm install npm`); **tags only** |
 | (top level) | `disk` / `migrate` / `help` | Disk usage, data migration, help |
 
 > [!NOTE]
@@ -223,68 +243,101 @@ a system command so you can call `dshm` from any directory.
 > 错误：命令 'up' 已改为分组写法：dshm service up
 > ```
 
-### dsh version management: the complete picture
+### Version management: the complete picture
 
-**Get the mental model right first.** There are **two layers** of "version" in this project, and
-they update in completely different ways — mixing them up is why "I upgraded it but nothing
+**Get the mental model right first.** There are **two version domains** in this project, and
+they update in completely different ways. Mixing them up is why "I upgraded it but nothing
 changed" happens.
 
-| Layer | What it is | How to update | Where it lives |
+| Domain | What it covers | Source of truth | Commands |
 |---|---|---|---|
-| **dsh in the image** | the dsh runtime npm-installed at build time | `dshm version update` | image layer (**survives container rebuilds**) |
-| **Plugins in the profile** | plugins in the data directory (login, marketplace, …) | `dshm auth` / in-container `dsh plugin` / plugin market | data directory (persistent) |
+| **dsh** | the DeepSeek Harness running in the container | **npm registry** | `dshm version …` |
+| **dshm** (incl. the admin panel) | the deployment tooling itself | **tags you push** | `dshm dshm …` |
 
-**Note**: if you upgrade dsh itself in place from inside the container (e.g. via the
-`dsh-plugin-console` plugin), that change only touches files in the running container — **it is
-reverted as soon as the container is rebuilt**. To keep a dsh version permanently you must go
-through the image, i.e. the commands below.
+The two are **independent**: upstream releasing a new dsh does not mean dshm changes, and
+changing dshm does not mean dsh upgrades.
 
-#### 1. Check: what you have, and whether something newer exists
+> [!NOTE]
+> **The admin panel is a feature of dshm and shares its version.** The panel binary's version is
+> injected by CI from the repository-root `VERSION` file — the same source as the dshm script.
+> That is guaranteed by machinery, not by remembering to do it.
 
-```bash
-./dshm service status      # current version + whether an update exists (reports proactively)
-./dshm version show     # just the dsh version inside the container
-./dshm version list    # every installable version on npm, marking "current" and "latest"
-```
-
-`service status` prints something like:
-
-```
-dsh 版本：0.1.7-rc.2 → 有新版本 0.2.0-rc.2
-升级：./dshm version update --latest
-```
-
-Set `DSHM_SKIP_UPDATE_CHECK=1` to skip that check (offline deployments).
-
-#### 2. Upgrade: three ways, pick by situation
+#### Check
 
 ```bash
-./dshm version update             # pull the CI-built image from GHCR (fastest; the usual choice)
-./dshm version update --latest    # resolve npm latest → write .env → build locally (slowest)
-./dshm version update 0.2.0-rc.2 --build   # build a specific version locally
+./dshm version              # all four versions at once (see below)
+./dshm version list         # images already built + dsh versions available on npm
+./dshm service status       # health (and whether dsh has an update)
+
+./dshm dshm version         # dshm's own version + panel installed? + update available? (tags only)
+./dshm dshm list            # every published dshm version
 ```
 
-**Why changing versions requires a rebuild**: dsh is npm-installed into the image **at build
-time**. That is the common approach for this kind of packaging project (1Panel's app store and
-comparable community projects do the same) — it means the container **works offline**, and a bad
-version combination fails **at build time** instead of after the container starts.
+`dshm version` prints **four** versions that can differ from each other:
 
-#### 3. Roll back: install an older version
+```
+配置里钉的版本：  0.2.0-rc.2       <- what the next build will produce
+镜像：            ghcr.io/…:latest  <- which image you pull
+容器内实际运行：  0.2.0-rc.2       <- what is actually running
+npm 最新：        0.2.0-rc.2       <- what you could get
+```
+
+It **warns when "configured" and "actually running" disagree** — the state you land in after
+editing `.env` without running `up`. `./dshm service up` applies it.
+
+Set `DSHM_SKIP_UPDATE_CHECK=1` to skip the network lookup (offline deployments).
+
+#### Upgrade dsh (the container)
 
 ```bash
-./dshm version list              # see what's available
-./dshm version update 0.1.7-rc.2 --build
+./dshm version update              # pull the newest built image (fast, preferred)
+./dshm version update --to <tag>   # install a specific build (rollback)
+./dshm version update --build      # build locally (slow); uses npm latest by default
+./dshm version update --build --dsh 0.1.7-rc.2   # build locally with a chosen dsh version
 ```
 
-Your data directory is untouched (sessions, plugins and credentials live in the bind mount), so
-rolling back does not lose data.
+| Your goal | Use | Cost |
+|---|---|---|
+| Follow the newest (CI has built it) | `version update` | fast (pull) |
+| Pin / roll back to a specific build | `version update --to <tag>` | fast (pull) |
+| Use npm latest, or a chosen version | `version update --build [--dsh v]` | slow (local build) |
 
-#### 4. Keep the repository current
+**Why changing the dsh version requires a rebuild**: dsh is npm-installed into the image **at
+build time**. That is the common approach for packaging projects like this one (1Panel's app
+store and comparable community projects do the same) — the container **works offline**, and a
+bad version combination fails **at build time** rather than after the container starts.
 
-`DSH_VERSION` is pinned in three files: `Dockerfile`, `docker-compose.yml` and `.env.example`.
-CI checks upstream weekly and **opens a PR** when there is something newer, for you to review and
-merge (see `.github/workflows/update-versions.yml`). In normal operation you never edit those three
-files by hand.
+**Rolling back loses no data**: sessions, plugins and credentials live in the bind-mounted data
+directory.
+
+#### Upgrade dshm (tooling + panel)
+
+```bash
+./dshm dshm update                 # install the newest published version
+./dshm dshm update --to <version>  # install / roll back to a specific one, e.g. --to 2026.10.01
+```
+
+**Tags only — never `main`**, so you can never pull a commit you have not decided to release.
+Inside a git working tree use `git pull`; `dshm dshm update` targets deployments that never kept
+a checkout (it stops by default in a git tree, `--allow-stale` forces it).
+
+#### Maintainer: how to release
+
+```bash
+# 1. bump the VERSION file (the single source of truth) and commit
+git commit -am "chore(release): v2026.10.01" && git push
+
+# 2. tag and push — CI builds the panel binary and publishes the release
+git tag v2026.10.01 && git push origin v2026.10.01
+```
+
+**Images need no manual tag**: every push to `main` makes CI build and push
+`<dsh version>-<date>-<sequence>` (e.g. `0.2.0-rc.2-2026.10.01-1`) to GHCR. The sequence number
+guarantees that multiple builds on the same day **never overwrite each other**.
+
+**The repository also keeps itself current**: CI checks upstream weekly and **opens a PR** when a
+newer dsh exists (see `.github/workflows/update-versions.yml`) — no hand-editing of
+`DSH_VERSION` in `Dockerfile` / `docker-compose.yml` / `.env.example`.
 
 ## Admin Panel
 

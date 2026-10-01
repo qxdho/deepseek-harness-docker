@@ -196,14 +196,38 @@ jobs:
             type=sha,format=short
 
       - name: 构建多平台并推送
+        # 用 env 传多行 tags：直接写在 run 里（尤其 herestring 后紧跟 ${{ }}）
+        # 会被 actionlint 的表达式解析器误判。
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          LABELS: ${{ steps.meta.outputs.labels }}
         run: |
+          set -euo pipefail
+          # TAGS 是**换行分隔的多行**（latest / 版本 tag / sha）。
+          # 不能写成一个 --tag "$TAGS"（会得到 invalid tag "...\n..."），
+          # 也不能用 xargs（它把 tag 追加到命令**末尾**、落到 build context 之后）。
+          # 用数组显式展开成多个 --tag 参数。
+          tags=()
+          while IFS= read -r t; do
+            [ -n "$t" ] && tags+=(--tag "$t")
+          done <<< "$TAGS"
+          echo "将要推送 ${#tags[@]} 个 tag"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            --tag "${{ steps.meta.outputs.tags }}" \
-            --label "${{ steps.meta.outputs.labels }}" \
+            "${tags[@]}" \
+            --label "$LABELS" \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
             --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+          echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+          echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             .
@@ -447,10 +471,12 @@ jobs:
           [ -f "${PKG}.sha256" ] || { echo "::error::找不到 ${PKG}.sha256" >&2; exit 1; }
 
           for i in 1 2 3; do
-            gh release view "$tag" >/dev/null 2>&1 \
-              || gh release create "$tag" --title "latest（main 最新构建）" \
-                   --notes "由 main 分支自动更新，供安装脚本从 releases/latest 拉取。" \
-                   >/dev/null 2>&1 || true
+            # 用 if 而不是「或运算接或运算」的链式简写（shellcheck SC2015）。
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" --title "latest（main 最新构建）" \
+                --notes "由 main 分支自动更新，供安装脚本从 releases/latest 拉取。" \
+                >/dev/null 2>&1 || true
+            fi
 
             # 先清掉 latest 里的历史发布包。否则每发一个版本就多留一份，latest 会一直
             # 堆积；--clobber 只覆盖同名文件，管不了旧版本名。

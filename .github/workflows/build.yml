@@ -344,9 +344,22 @@ jobs:
       - name: 生成发布包
         run: |
           set -eu
-          VER="v$(tr -d ' \t\r\n' < VERSION)"
-          [ -n "$VER" ] && [ "$VER" != "v" ] || { echo "读不到 VERSION" >&2; exit 1; }
-          NUM="${VER#v}"
+          NUM="$(tr -d ' \t\r\n' < VERSION)"
+          [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
+          VER="v${NUM}"
+          # 拒绝点：tag 名必须就是 v + VERSION 的内容。
+          #
+          # 为什么必须一致：包名、release 下载地址、脚本里写死的版本号全都从这一个号
+          # 派生。一旦 tag 与 VERSION 脱节（例如 tag 是 v2026.10.01-1 而 VERSION 还是
+          # 2026.10.01），发出来的包叫 dshm-v2026.10.01.tar.gz，而脚本会去请求
+          # .../v2026.10.01-1/dshm-v2026.10.01-1.tar.gz —— 404，自更新直接坏掉。
+          # 这种不一致极难从产物上看出来，所以在这里直接失败。
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$VER" ]; then
+            echo "::error::tag 与 VERSION 不一致：tag=${GITHUB_REF_NAME}，VERSION=${NUM}（应为 v${NUM}）" >&2
+            echo "  发布流程：先改 VERSION 并提交，再打同名 tag。同一天第二次发布就把 VERSION 写成 2026.10.01-1。" >&2
+            exit 1
+          fi
+          echo "版本：${NUM}（tag ${GITHUB_REF_NAME:-$VER}）"
           pkg="dshm-${VER}"
           rm -rf "$pkg"
           mkdir -p "$pkg/scripts"

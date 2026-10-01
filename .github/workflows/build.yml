@@ -196,27 +196,38 @@ jobs:
             type=sha,format=short
 
       - name: 构建多平台并推送
-        # 用 env 传多行 tags：直接写在 run 里（尤其 herestring 后紧跟 ${{ }}）
-        # 会被 actionlint 的表达式解析器误判。
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-          LABELS: ${{ steps.meta.outputs.labels }}
         run: |
           set -euo pipefail
-          # TAGS 是**换行分隔的多行**（latest / 版本 tag / sha）。
-          # 不能写成一个 --tag "$TAGS"（会得到 invalid tag "...\n..."），
-          # 也不能用 xargs（它把 tag 追加到命令**末尾**、落到 build context 之后）。
-          # 用数组显式展开成多个 --tag 参数。
+          # steps.meta.outputs.tags 是**换行分隔的多行**（latest / 版本 tag / sha-<短SHA>）。
+          #
+          # 不能写成一个 --tag "$TAGS"：会得到
+          #   invalid tag "ghcr.io/...:latest\nghcr.io/...:0.2.0-rc.2-..."  直接失败。
+          # 也不能用 xargs：它把 tag 追加到命令**末尾**、落到 build context 之后。
+          # 所以用数组显式展开成多个 --tag 参数。
+          #
+          # 这几行赋值放在脚本内（而不是 YAML 的 env:）有个副作用是好事：shellcheck 能
+          # 看到变量的赋值来源。走 env: 时它看不到，会报 SC2153「TAGS may not be assigned」，
+          # 而且 env: 紧跟 run: 的写法还会让它把续行里的 --push/--tag 误当命令名（SC2215）。
+          tags_raw="${{ steps.meta.outputs.tags }}"
+          labels_raw="${{ steps.meta.outputs.labels }}"
+          if [ -z "$tags_raw" ] || [ -z "$labels_raw" ]; then
+            echo "::error::metadata-action 没输出 tags/labels，无法确定推送目标" >&2
+            exit 1
+          fi
           tags=()
           while IFS= read -r t; do
-            [ -n "$t" ] && tags+=(--tag "$t")
-          done <<< "$TAGS"
+            # 显式 if，不用 `[ -n "$t" ] && tags+=(...)`：那种简写同样会被 shellcheck
+            # 按 SC2015 报出来（虽然这里没有兜底分支，语义上是对的）。
+            if [ -n "$t" ]; then
+              tags+=(--tag "$t")
+            fi
+          done <<< "$tags_raw"
           echo "将要推送 ${#tags[@]} 个 tag"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
             "${tags[@]}" \
-            --label "$LABELS" \
+            --label "$labels_raw" \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
             --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
             --cache-from type=gha \
@@ -483,8 +494,10 @@ jobs:
             gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null |
               grep -E '^dshm-.*\.tar\.gz(\.sha256)?$' |
               while read -r old; do
-                gh release delete-asset "$tag" "$old" --yes 2>/dev/null &&
-                  echo "已清理旧包：$old" || true
+                # 用 if 而不是「与运算接或运算接 true」的简写（shellcheck SC2015）。
+                if gh release delete-asset "$tag" "$old" --yes 2>/dev/null; then
+                  echo "已清理旧包：$old"
+                fi
               done
 
             if gh release upload "$tag" \

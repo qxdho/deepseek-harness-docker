@@ -84,14 +84,23 @@ jobs:
           echo "admin=$admin" >> "$GITHUB_OUTPUT"
           echo "需要构建镜像：$code；需要跑面板测试：$admin"
 
-  # 多架构构建并推送 GHCR（PR 不推送）。
+  # 构建并推送镜像到 GHCR。**只在打「镜像 tag」时构建，推 main 不构建。**
   #
-  # 依赖 smoke：串行后总墙钟更短（不做两遍重复构建），而且不会把冒烟没过的镜像
-  # 推成 latest。`changes` 也必须列进 needs —— 引用了它的 output 就得声明依赖。
+  # 为什么：多平台构建（arm64 在 x86 runner 上走 QEMU 模拟）要 6 分钟以上，占整条
+  # 流水线耗时的 97%，而日常推 main 多数时候并不需要新镜像。改由打 tag 决定何时出
+  # 镜像后，日常 CI 只剩 checks + release-admin，约 100 秒。
+  #
+  # 「镜像 tag」= 形如 <dsh版本>-<日期>-<序号>（0.2.0-rc.2-2026.10.01-1）。
+  # ⚠ dshm 自己的发布 tag 是 v*（v2026.10.01-2），而**在 GitHub 里它的 head_branch
+  # 也是该 tag 名**，同样匹配 refs/tags/*，所以不能只看 refs/tags/* —— 否则打 dshm tag
+  # 会顺带触发一次镜像构建。这里显式排除 v* 开头的。
+  #
+  # `changes` 必须列进 needs —— 引用了它的 output 就得声明依赖。
   build:
     needs: changes
     if: |
-      github.event_name != 'pull_request' &&
+      startsWith(github.ref, 'refs/tags/') &&
+      !startsWith(github.ref, 'refs/tags/v') &&
       needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -153,22 +162,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 一次构建、先推「待检」tag → 拉下来跑冒烟 → 通过后才打正式 tag。
+      # 先本地构建一份跑冒烟，再构建多平台推送到 GHCR。
       #
-      # 为什么不再用两次构建（原来 checks 用 load:true 构建一遍测试、build 再构建一遍
-      # 推送）：那是同一个镜像构建两次，白白多花一倍时间。这里只构建一次，而且
-      # **跑冒烟的就是将要发布的那个 digest** —— 不存在「测的是一份、推的是另一份」的风险。
+      # 为什么是两次构建：
+      #   * buildx **无法把多平台镜像 load 进本地 docker**（只有单平台可以），
+      #     所以拿不到「先测后推同一个 digest」的效果；
+      #   * 试过「推一个待检 tag → 拉回来测 → 通过后 imagetools create 派生正式 tag」，
+      #     但 `docker buildx imagetools` **没有 rm 子命令**（只有 create / inspect），
+      #     待检 tag 删不掉、会永久堆积，只能放弃。
       #
-      # 待检 tag 带 run id，并发 run 之间互不干扰，用完即删。
-      # 先本地构建一份用于冒烟，再构建多平台推送到 GHCR。
+      # 因此：本地只构建 amd64 供冒烟，多平台构建负责推送正式 tag。
+      # **缓存只由多平台那一步写入**（这里带 --cache-from 读取即可）——两次都写的话，
+      # 第一步会把刚算出的层再上传一遍，纯属浪费带宽与时间。
       #
-      # 为什么要构建两次：buildx **无法把多平台镜像 load 进本地 docker**（单平台才行），
-      # 所以「先构建再推送同一个 digest」这条路走不通。曾试过「推一个待检 tag → 拉回来
-      # 测 → 通过后 imagetools create 派生正式 tag」，但 `docker buildx imagetools`
-      # **没有 rm 子命令**（只有 create / inspect），待检 tag 删不掉，会永久堆积。
-      #
-      # 第二次构建**完全命中 GHA 缓存**（下面两个步骤共用 cache-from/cache-to），
-      # 只组装 manifest，实测只多几秒 —— 相比「多留一堆删不掉的 tag」，这个代价可以接受。
+      # 注意：**arm64 在 x86 runner 上走 QEMU 模拟，是整条流水线最慢的一块**。
       - name: 本地构建（仅 amd64，用于冒烟）
         run: |
           docker buildx build \
@@ -178,7 +185,6 @@ jobs:
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
             --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
             --cache-from type=gha \
-            --cache-to type=gha,mode=max \
             .
 
       - name: 冒烟测试
@@ -337,9 +343,14 @@ jobs:
     needs: changes
     # 面板二进制只由 admin/ 决定，但「哪些文件变了」的判断在 changes 作业里，为简洁
     # 复用同一个 code 输出：纯文档改动不重发（二进制与上一次代码推送时完全一致，
-    # 已在 latest release 里，跳过不影响安装）。打 tag 时无条件发，保证版本产物齐全。
+    # 已在 latest release 里，跳过不影响安装）。
+    #
+    # 触发条件覆盖两类 tag：
+    #   * dshm 发布 tag（v*）        → 发该 tag 的 release（dshm 包 + 面板二进制）
+    #   * 镜像 tag（<dsh版本>-<日期>-<序号>）→ 同样发 release，并带上镜像的 dsh 版本
+    # 推 main 时也发一次，只是为了刷新固定的 latest release（供没打 tag 的部署机安装）。
     if: |
-      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/') ||
       (github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
     permissions:

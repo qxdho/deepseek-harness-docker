@@ -20,9 +20,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -134,6 +136,14 @@ func (s *server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 校验通过后，还要确认这个二进制**真能跑**、且不是比当前更旧的版本。
+	// sha256 只证明"与同源校验文件一致"，证明不了"是个能用的、不比现在旧的产物"。
+	candVer, err := verifyDownloadedBinary(bin, adminVersion)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "已放弃替换："+err.Error())
+		return
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "无法定位当前面板二进制："+err.Error())
@@ -158,9 +168,111 @@ func (s *server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SelfUpdateResult{
 		OK:      true,
 		Message: "已替换面板二进制，需要重启面板才会生效（systemctl restart dsh-admin 或重新执行 dshm admin install）" + note,
-		Version: adminVersion,
+		Version: candVer,
 		Backup:  backup,
 	})
+}
+
+// compareVersions 比较两个版本号，返回 -1 / 0 / 1。
+//
+// 只做本项目用得到的比较：版本形如 v2026.10.01-3（日期 + 可选序号），
+// dev 视为"最旧"（开发构建不该被当成比发布版新）。
+// 逐段比较，数字段按数值比（这样 9 < 30，而字符串比较会得出 "9" > "30"），
+// 非数字段退化为字符串比较。
+func compareVersions(a, b string) int {
+	na := strings.TrimPrefix(strings.TrimSpace(a), "v")
+	nb := strings.TrimPrefix(strings.TrimSpace(b), "v")
+	if na == nb {
+		return 0
+	}
+	// dev / 空 视为最旧
+	if na == "" || na == "dev" {
+		if nb == "" || nb == "dev" {
+			return 0
+		}
+		return -1
+	}
+	if nb == "" || nb == "dev" {
+		return 1
+	}
+	pa := strings.FieldsFunc(na, func(r rune) bool { return r == '.' || r == '-' || r == '+' })
+	pb := strings.FieldsFunc(nb, func(r rune) bool { return r == '.' || r == '-' || r == '+' })
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var sa, sb string
+		if i < len(pa) {
+			sa = pa[i]
+		}
+		if i < len(pb) {
+			sb = pb[i]
+		}
+		if sa == sb {
+			continue
+		}
+		// 两边都是纯数字时按数值比较
+		da, ea := strconv.Atoi(sa)
+		db, eb := strconv.Atoi(sb)
+		switch {
+		case ea == nil && eb == nil:
+			if da < db {
+				return -1
+			}
+			return 1
+		case ea == nil:
+			// 数字段 vs 非数字段：数字在前（1.2-3 里的 3 与 rc 相比，序号更新）
+			return 1
+		case eb == nil:
+			return -1
+		default:
+			if sa < sb {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// verifyDownloadedBinary 把下载物写成临时文件跑一次 `-version`：
+//   - 确认它**真的能执行**（架构不对、动态链接缺失、产物损坏都跑不起来）；
+//   - 读出它自报的版本，拒绝对**当前版本**的降级。
+//
+// 为什么需要这层：sha256 只能证明"下载物与同源的校验文件一致"，证明不了"这是个能用
+// 的、不比现在旧的二进制"。CI 发错架构、发了个坏产物、或 latest 别名指向了旧 release
+// 时，光靠 sha256 会"成功地"装上一个跑不起来或更旧的版本，重启后才暴露。
+func verifyDownloadedBinary(bin []byte, current string) (string, error) {
+	dir, err := os.MkdirTemp("", "dsh-admin-verify-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	cand := filepath.Join(dir, "candidate")
+	if err := os.WriteFile(cand, bin, 0o755); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, cand, "-version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("下载到的二进制无法执行（%v）：%s", err, strings.TrimSpace(string(out)))
+	}
+	// 只取第一行、去掉可能的散文（-version 只打印版本号，但别假定太死）
+	candVer := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			candVer = s
+			break
+		}
+	}
+	if candVer == "" {
+		return "", fmt.Errorf("下载到的二进制没有报告版本号（输出为空）")
+	}
+	if strings.ContainsAny(candVer, " \t") {
+		return "", fmt.Errorf("下载到的二进制报告的版本号不合常理：%q", candVer)
+	}
+	if compareVersions(candVer, current) < 0 {
+		return "", fmt.Errorf("拒绝降级：下载到的是 %s，当前是 %s", candVer, current)
+	}
+	return candVer, nil
 }
 
 // hook 在「备份已完成、准备 rename 到位」之间被调用（测试用它检查 target 是否仍在位）。

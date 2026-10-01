@@ -207,3 +207,75 @@ func TestInstallBinaryBackupIsPreviousVersion(t *testing.T) {
 		t.Errorf("target = %q，期望 V3", got)
 	}
 }
+
+// compareVersions：本项目只用到「日期 + 可选序号」这种形态，但比较必须是数值感知的
+// —— 字符串比较会把 "2026.10.9" 判成比 "2026.10.30" 新（9 > 3），于是"拒降级"会误判。
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"v2026.10.01-3", "v2026.10.01-3", 0},
+		{"2026.10.01-3", "v2026.10.01-3", 0}, // 前缀 v 不影响
+		{"v2026.10.01-3", "v2026.10.01-2", 1},
+		{"v2026.10.01-2", "v2026.10.01-3", -1},
+		// 数值感知：字符串比 "9" > "30"，那是错的
+		{"v2026.10.9", "v2026.10.30", -1},
+		{"v2026.10.30", "v2026.10.9", 1},
+		{"v2026.9.1", "v2026.10.1", -1},
+		// dev 视为最旧：开发构建不该被认为比发布版新
+		{"dev", "v2026.10.01-1", -1},
+		{"v2026.10.01-1", "dev", 1},
+		{"dev", "", 0},
+	}
+	for _, c := range cases {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%q, %q) = %d，期望 %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// verifyDownloadedBinary：跑得起来 + 不降级。
+// 用一个能自报版本号的假二进制（shell 脚本模拟 -version 的输出）。
+func TestVerifyDownloadedBinary(t *testing.T) {
+	mk := func(version string) []byte {
+		return []byte("#!/bin/sh\necho '" + version + "'\n")
+	}
+
+	// ① 能跑且版本更新 → 通过，并回报它自己的版本
+	got, err := verifyDownloadedBinary(mk("v2026.10.01-4"), "v2026.10.01-3")
+	if err != nil {
+		t.Fatalf("更新的版本应通过，却报错：%v", err)
+	}
+	if got != "v2026.10.01-4" {
+		t.Errorf("回报的版本 = %q，期望 v2026.10.01-4（应是**新装上的**那个）", got)
+	}
+
+	// ② 同版本 → 允许（幂等重装）
+	if _, err := verifyDownloadedBinary(mk("v2026.10.01-3"), "v2026.10.01-3"); err != nil {
+		t.Errorf("同版本应允许，却报错：%v", err)
+	}
+
+	// ③ 更旧的版本 → 必须拒绝。latest 别名指向旧 release 时全靠这道闸门。
+	_, err = verifyDownloadedBinary(mk("v2026.09.01-1"), "v2026.10.01-3")
+	if err == nil {
+		t.Error("更旧的版本应被拒绝（降级闸门失效）")
+	} else if !strings.Contains(err.Error(), "拒绝降级") {
+		t.Errorf("错误信息应说明是拒降级，实际：%v", err)
+	}
+
+	// ④ 跑不起来的产物（架构不对 / 动态链接缺失 / 坏文件）→ 必须拒绝，
+	//    而不是"成功地"装上一个起不来的二进制。
+	_, err = verifyDownloadedBinary([]byte("not an executable at all"), "v2026.10.01-3")
+	if err == nil {
+		t.Error("跑不起来的产物应被拒绝")
+	} else if !strings.Contains(err.Error(), "无法执行") {
+		t.Errorf("错误信息应说明跑不起来，实际：%v", err)
+	}
+
+	// ⑤ 能跑但什么都不输出 → 拒绝（拿不到版本号就无法判断是否降级）
+	_, err = verifyDownloadedBinary([]byte("#!/bin/sh\nexit 0\n"), "v2026.10.01-3")
+	if err == nil {
+		t.Error("不报告版本号的产物应被拒绝")
+	}
+}

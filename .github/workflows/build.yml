@@ -55,7 +55,12 @@ jobs:
           fi
           files="$(git diff --name-only "$base" HEAD)"
           echo "改动文件："; printf '%s\n' "$files" | sed 's/^/  /'
-          # 只改这些就跳过镜像构建：Markdown、LICENSE、CI 配置本身、.gitignore/.dockerignore
+          # 只改这些就跳过镜像构建：Markdown、LICENSE、.gitignore/.dockerignore，
+          # 以及 .github/ 下的**非 workflow** 文件（如 ISSUE 模板）。
+          #
+          # 注意不能把 .github/ 整个当作「不影响代码」：workflow 文件里放的是发布逻辑
+          # 本身，改了它却不跑一遍，等于这部分改动永远不被验证 —— 这个坑真踩过一次
+          # （改了 latest release 的上传逻辑，结果 build/release-admin 全被跳过）。
           code=false
           # 面板相关的两个测试（离线 + go 单测）合计约 20s，只在 admin/ 或本 workflow
           # 改动时才跑 —— 它们只验证 admin 这个程序，与镜像内容无关。
@@ -63,9 +68,10 @@ jobs:
           while IFS= read -r p; do
             [ -n "$p" ] || continue
             case "$p" in
-            admin/* | .github/workflows/build.yml) admin=true ;;
+            admin/* | .github/workflows/*) admin=true ;;
             esac
             case "$p" in
+            .github/workflows/*) code=true ;;
             *.md | LICENSE | .github/* | .gitignore | .dockerignore) ;;
             *) code=true ;;
             esac

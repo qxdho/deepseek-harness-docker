@@ -213,9 +213,20 @@ func newServer(cfg Config) *server {
 func (s *server) audit(format string, args ...any) {
 	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
 	if s.cfg.AuditLog != "" {
-		if f, err := os.OpenFile(s.cfg.AuditLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
-			f.WriteString(line)
-			f.Close()
+		// **写失败必须报出来**，不能静默吞掉。
+		//
+		// 审计日志的价值在于"事后能查"；磁盘满、目录没了、权限不对时它会**静默消失**，
+		// 而面板照常工作 —— 用户以为在审计，其实什么都没记。这是安全相关功能，
+		// 不能像普通日志那样静默降级。
+		if f, err := os.OpenFile(s.cfg.AuditLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err != nil {
+			log.Printf("审计日志打开失败（本次未记录）：%v", err)
+		} else {
+			if _, werr := f.WriteString(line); werr != nil {
+				log.Printf("审计日志写入失败（本次可能未记录）：%v", werr)
+			}
+			if cerr := f.Close(); cerr != nil {
+				log.Printf("审计日志关闭失败（内容可能未落盘）：%v", cerr)
+			}
 		}
 	}
 	log.Print(strings.TrimSpace(line))
@@ -495,6 +506,18 @@ func (s *server) handlePrune(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "只支持 POST")
 		return
 	}
+	// 与其它会改动 docker 状态的操作**同一把锁**。
+	//
+	// prune 走的虽然是 docker API（不经过 dshm），但它删的就是镜像与构建缓存 ——
+	// 可能与 `dshm version update`（正在 pull/build）撞车：prune 把 update 正在用的
+	// 层删掉，update 就会以一堆莫名其妙的错误失败。用 TryLock 而不是 Lock：
+	// 忙的时候直接告诉用户"有别的操作在跑"，而不是让他排在一分钟以上的命令后面。
+	if !s.execMu.TryLock() {
+		writeErr(w, http.StatusConflict, "已有命令正在执行（如 dsh 更新），请等它结束再清理")
+		return
+	}
+	defer s.execMu.Unlock()
+
 	n, err := s.docker.Prune()
 	if err != nil {
 		s.audit("清理失败：%v", err)

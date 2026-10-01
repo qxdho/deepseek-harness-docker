@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -102,5 +108,81 @@ func TestSecurityHeadersAndCSPHash(t *testing.T) {
 		if !strings.Contains(contentSecurityPolicy, must) {
 			t.Errorf("CSP 缺少 %q：%s", must, contentSecurityPolicy)
 		}
+	}
+}
+
+// /api/prune 必须在别的命令正在跑时**明确拒绝**，而不是排队或并发执行。
+//
+// prune 删的是镜像与构建缓存，可能与 `dshm version update`（正在 pull/build）撞车，
+// 把 update 正在用的层删掉。修之前它完全不取锁。
+func TestPruneRefusesWhenBusy(t *testing.T) {
+	s := newServer(Config{}) // 不提供 socket：真实的 docker 调用只会失败，我们只验"先被锁挡住"
+
+	// 把锁拿在手里，模拟"已有命令在执行"
+	s.execMu.Lock()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/prune", nil)
+	s.handlePrune(rr, req)
+	s.execMu.Unlock()
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("忙时应返回 409，实际 %d（body=%s）", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "请等它结束") {
+		t.Errorf("应提示等待正在执行的命令，实际：%s", rr.Body.String())
+	}
+}
+
+// 非 POST 必须 405（这条是原有行为，一起钉住，免得重构时丢掉）
+func TestPruneRejectsNonPOST(t *testing.T) {
+	s := newServer(Config{})
+	rr := httptest.NewRecorder()
+	s.handlePrune(rr, httptest.NewRequest(http.MethodGet, "/api/prune", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET 应返回 405，实际 %d", rr.Code)
+	}
+}
+
+// 审计日志写不进去时必须**留下痕迹**（写到进程日志），而不是静默消失。
+//
+// 原来 `if f, err := os.OpenFile(...); err == nil { ... }` —— 打开失败就什么都不做，
+// 面板照常工作，用户以为在审计其实一条都没记。这是安全相关功能，不能静默降级。
+func TestAuditReportsWriteFailure(t *testing.T) {
+	// 指向一个不可能创建成功的路径：父目录是「文件」而不是目录
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(Config{AuditLog: filepath.Join(f, "audit.log")})
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	s.audit("测试条目")
+
+	if !strings.Contains(buf.String(), "审计日志打开失败") {
+		t.Errorf("审计写失败时应打到进程日志，实际日志：%q", buf.String())
+	}
+	// 无论写文件成功与否，"条目本身"都要出现在进程日志里（这是最后一道可追溯性）
+	if !strings.Contains(buf.String(), "测试条目") {
+		t.Errorf("条目本身应出现在进程日志里，实际：%q", buf.String())
+	}
+}
+
+// 审计日志正常时：文件里要真的有那一行（不能因为加了错误处理反而写不进去）
+func TestAuditWritesToFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	s := newServer(Config{AuditLog: path})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	s.audit("写入测试 %d", 42)
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("审计文件应存在：%v", err)
+	}
+	if !strings.Contains(string(b), "写入测试 42") {
+		t.Errorf("审计文件内容不对：%q", string(b))
 	}
 }

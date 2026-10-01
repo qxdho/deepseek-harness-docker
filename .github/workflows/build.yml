@@ -84,19 +84,21 @@ jobs:
           echo "admin=$admin" >> "$GITHUB_OUTPUT"
           echo "需要构建镜像：$code；需要跑面板测试：$admin"
 
-  # 构建并推送镜像到 GHCR。**只在打「镜像 tag」时构建，推 main 不构建。**
+  # 镜像构建：**只在打「镜像 tag」时进行，推 main 不构建。**
   #
-  # 为什么：多平台构建（arm64 在 x86 runner 上走 QEMU 模拟）要 6 分钟以上，占整条
-  # 流水线耗时的 97%，而日常推 main 多数时候并不需要新镜像。改由打 tag 决定何时出
-  # 镜像后，日常 CI 只剩 checks + release-admin，约 100 秒。
+  # 为什么推 main 不构建：多平台构建（arm64 在 x86 runner 上走 QEMU 模拟）要 6 分钟以上，
+  # 占整条流水线耗时的 97%，而日常推 main 多数时候并不需要新镜像。改由打 tag 决定何时
+  # 出镜像后，日常 CI 只剩 checks + release-admin，约 100 秒。
   #
   # 「镜像 tag」= 形如 <dsh版本>-<日期>-<序号>（0.2.0-rc.2-2026.10.01-1）。
-  # ⚠ dshm 自己的发布 tag 是 v*（v2026.10.01-2），而**在 GitHub 里它的 head_branch
-  # 也是该 tag 名**，同样匹配 refs/tags/*，所以不能只看 refs/tags/* —— 否则打 dshm tag
-  # 会顺带触发一次镜像构建。这里显式排除 v* 开头的。
+  # ⚠ dshm 自己的发布 tag 是 v*（v2026.10.01-2），而**在 GitHub 事件里它的 head_branch
+  # 就是该 tag 名**，同样匹配 refs/tags/*，所以要显式排除 v* —— 否则打 dshm tag 会顺带
+  # 触发一次 6 分钟的镜像构建。
   #
-  # `changes` 必须列进 needs —— 引用了它的 output 就得声明依赖。
-  build:
+  # 两个架构各跑在**原生 runner** 上（public 仓库的 arm64 runner 免费），并行完成后
+  # 用一个 job 合并 manifest。这样彻底避开 QEMU 模拟 —— 那是原先最慢的一块。
+
+  build-amd64:
     needs: changes
     if: |
       startsWith(github.ref, 'refs/tags/') &&
@@ -115,18 +117,124 @@ jobs:
           set -euo pipefail
           dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
           gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
-          # 读不到就会生成空 tag / 空构建参数（装成 latest），必须在这里就失败
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
           [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
 
-      # 镜像 tag = <dsh版本>-<日期>-<序号>，例如 0.2.0-rc.2-2026.09.30-1
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 先本地构建跑冒烟。**只 load、不推正式 tag** —— 冒烟没过就不该产出正式镜像。
+      - name: 构建 amd64（仅本地，用于冒烟）
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --tag dsh-test:smoke \
+            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha,scope=amd64 \
+            --cache-to type=gha,scope=amd64,mode=max \
+            .
+
+      - name: 冒烟测试
+        run: ./scripts/smoke-test.sh dsh-test:smoke
+
+      # 冒烟通过后才推。**只推单架构 tag**（带 commit），正式 tag 由 merge 作业统一生成，
+      # 这样正式 tag 只会指向多平台 manifest，不会先出现一份「单架构的同名镜像」。
+      - name: 推送单架构镜像（供合并）
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            --tag "${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_SHA::7}" \
+            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha,scope=amd64 \
+            .
+
+  build-arm64:
+    needs: changes
+    if: |
+      startsWith(github.ref, 'refs/tags/') &&
+      !startsWith(github.ref, 'refs/tags/v') &&
+      needs.changes.outputs.code == 'true'
+    # 原生 arm64 runner（public 仓库免费）。**不用 QEMU** —— 在 x86 runner 上模拟 arm64
+    # 是原先最慢的一块（多平台构建 369s 里大头在这里）。
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取内置版本
+        id: ver
+        run: |
+          set -euo pipefail
+          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
+          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
+          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
+          echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 arm64（供合并）
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --push \
+            --tag "${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_SHA::7}" \
+            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha,scope=arm64 \
+            --cache-to type=gha,scope=arm64,mode=max \
+            .
+
+  # 计算镜像 tag，并把两个单架构 manifest 合成一个多平台 manifest。
+  # **只改引用，不重新构建** —— 两个架构已由上面的作业并行构建好。
+  merge-manifests:
+    needs: [changes, build-amd64, build-arm64]
+    if: |
+      startsWith(github.ref, 'refs/tags/') &&
+      !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取内置版本
+        id: ver
+        run: |
+          set -euo pipefail
+          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
+          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
+          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
+          echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+
+      # 镜像 tag = <dsh版本>-<日期>-<序号>，例如 0.2.0-rc.2-2026.10.01-1
       #   * 带 dsh 版本 → 一眼看出镜像里是哪个 dsh
       #   * 带日期      → 看出是哪天的构建
       #   * 带序号      → 同一天多次构建互不覆盖，旧镜像仍可回退
       # 为什么必须有序号：tag 一旦被同名覆盖，旧镜像就失去引用、可能被回收，回退就没了。
-      # 这正是原先那个「纯 dsh 版本 tag」的坑，所以它被移除了。
       - name: 计算镜像 tag
         id: tag
         run: |
@@ -134,8 +242,7 @@ jobs:
           dsh="${{ steps.ver.outputs.dsh }}"
           day="$(date -u +%Y.%m.%d)"
           n=0
-          # 用 GHCR 的**匿名** pull token 列已有 tag —— 不需要任何密钥，
-          # 只读取公开包的 tag 列表。
+          # 用 GHCR 的**匿名** pull token 列已有 tag —— 不需要任何密钥。
           if token="$(curl -fsSL --max-time 20 \
               "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" \
               | grep -oE '"token":"[^"]+"' | cut -d'"' -f4)" && [ -n "$token" ]; then
@@ -152,45 +259,13 @@ jobs:
           echo "tag=${img_tag}" >> "$GITHUB_OUTPUT"
           echo "镜像 tag：${img_tag}（当天该 dsh 版本已有 ${n} 个构建）"
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      # 必须先登录 GHCR：待检 tag 与正式 tag 都要推。少这一步 buildx 会以**匿名**身份
-      # 请求 push token，GHCR 回 403，报错只写 "failed to fetch anonymous token"。
+
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # 先本地构建一份跑冒烟，再构建多平台推送到 GHCR。
-      #
-      # 为什么是两次构建：
-      #   * buildx **无法把多平台镜像 load 进本地 docker**（只有单平台可以），
-      #     所以拿不到「先测后推同一个 digest」的效果；
-      #   * 试过「推一个待检 tag → 拉回来测 → 通过后 imagetools create 派生正式 tag」，
-      #     但 `docker buildx imagetools` **没有 rm 子命令**（只有 create / inspect），
-      #     待检 tag 删不掉、会永久堆积，只能放弃。
-      #
-      # 因此：本地只构建 amd64 供冒烟，多平台构建负责推送正式 tag。
-      # **缓存只由多平台那一步写入**（这里带 --cache-from 读取即可）——两次都写的话，
-      # 第一步会把刚算出的层再上传一遍，纯属浪费带宽与时间。
-      #
-      # 注意：**arm64 在 x86 runner 上走 QEMU 模拟，是整条流水线最慢的一块**。
-      - name: 本地构建（仅 amd64，用于冒烟）
-        run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            --load \
-            --tag dsh-test:smoke \
-            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
-            --cache-from type=gha \
-            .
-
-      - name: 冒烟测试
-        run: |
-          set -euo pipefail
-          ./scripts/smoke-test.sh dsh-test:smoke
 
       - id: meta
         uses: docker/metadata-action@v5
@@ -200,49 +275,26 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             # 主 tag：<dsh版本>-<日期>-<序号>，唯一、不覆盖旧镜像（可回退）
             type=raw,value=${{ steps.tag.outputs.tag }},enable={{is_default_branch}}
-            # 精确到提交，便于排查；同一提交重复构建内容可能不同，故不作为版本依据
+            # 精确到提交，便于排查
             type=sha,format=short
 
-      - name: 构建多平台并推送
+      - name: 合并多平台 manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          # steps.meta.outputs.tags 是**换行分隔的多行**（latest / 版本 tag / sha-<短SHA>）。
-          #
-          # 不能写成一个 --tag "$TAGS"：会得到
-          #   invalid tag "ghcr.io/...:latest\nghcr.io/...:0.2.0-rc.2-..."  直接失败。
-          # 也不能用 xargs：它把 tag 追加到命令**末尾**、落到 build context 之后。
-          # 所以用数组显式展开成多个 --tag 参数。
-          #
-          # 这几行赋值放在脚本内（而不是 YAML 的 env:）有个副作用是好事：shellcheck 能
-          # 看到变量的赋值来源。走 env: 时它看不到，会报 SC2153「TAGS may not be assigned」，
-          # 而且 env: 紧跟 run: 的写法还会让它把续行里的 --push/--tag 误当命令名（SC2215）。
-          tags_raw="${{ steps.meta.outputs.tags }}"
-          labels_raw="${{ steps.meta.outputs.labels }}"
-          if [ -z "$tags_raw" ] || [ -z "$labels_raw" ]; then
-            echo "::error::metadata-action 没输出 tags/labels，无法确定推送目标" >&2
-            exit 1
-          fi
-          tags=()
+          amd="${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_SHA::7}"
+          arm="${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_SHA::7}"
+          echo "合并 $amd + $arm"
+          # imagetools create 从两个单架构 manifest 派生多平台 manifest，只改引用不重建。
+          # 多个正式 tag 一次生成（--tag 可重复）。
           while IFS= read -r t; do
-            # 显式 if，不用 `[ -n "$t" ] && tags+=(...)`：那种简写同样会被 shellcheck
-            # 按 SC2015 报出来（虽然这里没有兜底分支，语义上是对的）。
             if [ -n "$t" ]; then
-              tags+=(--tag "$t")
+              echo "  → $t"
+              docker buildx imagetools create --tag "$t" "$amd" "$arm"
             fi
-          done <<< "$tags_raw"
-          echo "将要推送 ${#tags[@]} 个 tag"
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --push \
-            "${tags[@]}" \
-            --label "$labels_raw" \
-            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            .
-          echo "已推送：${{ steps.tag.outputs.tag }}（含 latest）"
-  # 本作业只管纯静态/离线检查，两者互不依赖。
+          done <<< "$TAGS"
+          echo "多平台 manifest 已生成"
   checks:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -345,12 +397,12 @@ jobs:
     # 复用同一个 code 输出：纯文档改动不重发（二进制与上一次代码推送时完全一致，
     # 已在 latest release 里，跳过不影响安装）。
     #
-    # 触发条件覆盖两类 tag：
-    #   * dshm 发布 tag（v*）        → 发该 tag 的 release（dshm 包 + 面板二进制）
-    #   * 镜像 tag（<dsh版本>-<日期>-<序号>）→ 同样发 release，并带上镜像的 dsh 版本
-    # 推 main 时也发一次，只是为了刷新固定的 latest release（供没打 tag 的部署机安装）。
+    # **只认 dshm 发布 tag（v*）**，不认镜像 tag：本作业里有「tag 必须等于 v+VERSION」
+    # 的校验，而镜像 tag（<dsh版本>-<日期>-<序号>）与 VERSION 无关，若也触发就必然失败。
+    #
+    # 推 main 时也发一次，只为刷新固定的 latest release（供没打 tag 的部署机装面板）。
     if: |
-      startsWith(github.ref, 'refs/tags/') ||
+      startsWith(github.ref, 'refs/tags/v') ||
       (github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
     permissions:

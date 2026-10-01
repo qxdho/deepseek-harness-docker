@@ -98,17 +98,23 @@ else
 	pass "不存在的 tag 查不到 sha（下载前即可拒绝）"
 fi
 
-# 下载地址必须指向该 tag 的 release 包，而不是 main —— 这是「只认 tag」的核心
-url="$(dshm_release_url 2026.09.30)"
-case "$url" in
-*"/releases/download/v2026.09.30/dshm-v2026.09.30.tar.gz") pass "下载地址指向该 tag 的 release 包" ;;
-*) fail "下载地址应指向 tag 的 release 包，实际 $url" ;;
-esac
-case "$url" in
-*/main/*) fail "下载地址不该指向 main：$url" ;;
-*) pass "下载地址不指向 main（只认 tag）" ;;
-esac
-
+# 下载地址必须指向该 tag 的 release 包，而不是 main —— 这是「只认 tag」的核心。
+# 规则：包名 = dshm-<tag>.tar.gz（tag 名是唯一标识）。下面同时覆盖两类 tag：
+#   带 v 前缀的 dshm 发布 tag，以及不带 v 的镜像 tag。
+check_url() {
+	local tag="$1" url
+	url="$(dshm_release_url "$tag")"
+	case "$url" in
+	*"/releases/download/${tag}/dshm-${tag}.tar.gz") pass "下载地址指向 ${tag} 的 release 包" ;;
+	*) fail "下载地址不对：$url（期望 .../${tag}/dshm-${tag}.tar.gz）" ;;
+	esac
+	case "$url" in
+	*/main/*) fail "下载地址不该指向 main：$url" ;;
+	esac
+}
+check_url v2026.09.30
+check_url 0.2.0-rc.2-2026.10.01-3
+pass "下载地址不指向 main（只认 tag）"
 echo
 echo "== 发布包必须是整包（dshm 依赖同目录 scripts/）=="
 

@@ -124,8 +124,10 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
-          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          # 用 awk 提取而不是 grep -oP：BSD/macOS 的 grep 没有 -P，且无匹配时返回 1
+          # 会让这一步直接失败。（dshm 里已改用同样的做法。）
+          dsh="$(awk -F= '/^ARG DSH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
+          gate="$(awk -F= '/^ARG DSH_AUTH_GATE_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
           [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
@@ -187,8 +189,10 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
-          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          # 用 awk 提取而不是 grep -oP：BSD/macOS 的 grep 没有 -P，且无匹配时返回 1
+          # 会让这一步直接失败。（dshm 里已改用同样的做法。）
+          dsh="$(awk -F= '/^ARG DSH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
+          gate="$(awk -F= '/^ARG DSH_AUTH_GATE_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
           [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
@@ -232,8 +236,10 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          dsh="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile | head -1)"
-          gate="$(grep -oP 'ARG DSH_AUTH_GATE_VERSION=\K\S+' Dockerfile | head -1)"
+          # 用 awk 提取而不是 grep -oP：BSD/macOS 的 grep 没有 -P，且无匹配时返回 1
+          # 会让这一步直接失败。（dshm 里已改用同样的做法。）
+          dsh="$(awk -F= '/^ARG DSH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
+          gate="$(awk -F= '/^ARG DSH_AUTH_GATE_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
           [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
@@ -559,7 +565,6 @@ jobs:
           set -eu
           NUM="$(tr -d ' \t\r\n' < VERSION)"
           [ -n "$NUM" ] || { echo "读不到 VERSION" >&2; exit 1; }
-          VER="v${NUM}"
           # 一致性已在作业开头校验过（那样能在编译 Go 之前就失败），这里不再重复。
           # 包名从**本次推送的 tag 名**派生，而不是按 VERSION 拼 `v${NUM}`：
           # 镜像 tag（0.2.0-rc.2-2026.10.01-3）不带 v 前缀，按 VERSION 拼会得到另一个名字，

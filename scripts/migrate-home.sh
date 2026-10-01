@@ -20,7 +20,12 @@ legacy_dsh_home_volume() {
 # 目录为空（不存在也算空）
 dest_is_empty() {
 	[ -d "$1" ] || return 0
-	[ -z "$(ls -A "$1" 2>/dev/null)" ]
+	# **读不了不算空**：`ls` 失败（权限/IO）时它的输出也是空的，若直接判"空"，
+	# 后面那道「目标非空就不写」的唯一护栏就失效了，root 身份的 docker 会把旧卷
+	# 数据灌进一个可能已有数据的目录。所以读取失败一律按「非空」处理（fail-closed），
+	# 宁可让用户手工确认，也不能猜。
+	ls -A "$1" >/dev/null 2>&1 || return 1
+	[ -z "$(ls -A "$1")" ]
 }
 
 # 当前仍挂载该卷的容器 id
@@ -92,20 +97,65 @@ migrate_legacy_home() {
 		fi
 	fi
 
+	# 先拷到目标目录**旁边**的临时目录，成功后再改名进去。
+	#
+	# 为什么不能直接写目标目录：tar 失败时目标里已经留了半份数据，而下次运行会因为
+	# 「目标非空」直接跳过（dest_is_empty 判定），用户拿到的是一份半迁移的数据目录、
+	# 且提示写着「原数据未改动，可重试」（源确实没动，但目标已经是半成品）。
+	# 用临时目录 + 改名后，失败时目标仍保持原样，重试也仍然是「空 → 可以迁移」。
+	local tmp_dest="${dest}.migrating.$$"
+	rm -rf "$tmp_dest"
+	mkdir -p "$tmp_dest" || return 3
 	if ! docker run --rm --user 0:0 \
-		-v "${vol}:/from:ro" -v "${dest}:/to" alpine:3.21 \
-		sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)'; then
-		[ "$mode" = "explicit" ] && die "迁移失败（源卷 ${vol}）；原数据未改动，可重试"
-		warn "迁移失败（源卷 ${vol}）；原数据未改动，可重试 ./dshm migrate"
+		-v "${vol}:/from:ro" -v "${tmp_dest}:/to" alpine:3.21 \
+		sh -c 'set -o pipefail 2>/dev/null; cd /from && tar cf - . | (cd /to && tar xf -)'; then
+		rm -rf "$tmp_dest" 2>/dev/null || true
+		if [ "$mode" = "explicit" ]; then
+			die "迁移失败（源卷 ${vol}）；原数据与目标目录均未改动，可重试"
+		fi
+		warn "迁移失败（源卷 ${vol}）；原数据与目标目录均未改动，可重试 ./dshm migrate"
+		return 3
+	fi
+	# 目标此刻被 dest_is_empty 保证过是空的（或不存在），改名是原子的
+	if [ -e "$dest" ]; then
+		rmdir "$dest" 2>/dev/null || true
+	fi
+	if ! mv "$tmp_dest" "$dest" 2>/dev/null; then
+		rm -rf "$tmp_dest" 2>/dev/null || true
+		[ "$mode" = "explicit" ] && die "迁移的数据无法落位到 ${dest}；原数据未改动"
+		warn "迁移的数据无法落位到 ${dest}；原数据未改动"
 		return 3
 	fi
 
 	cu="$(env_value DSH_UID 1000)"
 	cg="$(env_value DSH_GID 1000)"
-	if [ "$(id -u)" = "0" ]; then
-		chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
-	elif command -v sudo >/dev/null 2>&1; then
-		sudo chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+	# 属主修复：docker 是以 root 写的，所以拷出来的文件属主是 root。
+	#   * 需要 root 才能改属主；不是 root 时**必须**确认有没有免密 sudo ——
+	#     原来只判 `command -v sudo`，需要密码时 `sudo chown` 会卡在密码提示上
+	#     （非交互调用直接挂住）。
+	#   * 改完要**校验**，失败就明确失败：属主不对的话容器起不来，那时再报错就晚了。
+	#   * 有些目标目录本来就属于正确 uid，不需要改，所以先判后改。
+	owner_ok() {
+		local o
+		o="$(stat -c '%u:%g' "$1" 2>/dev/null || echo "")"
+		[ "$o" = "${cu}:${cg}" ]
+	}
+	if ! owner_ok "$dest"; then
+		if [ "$(id -u)" = "0" ]; then
+			chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+		elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+			sudo -n chown -R "${cu}:${cg}" "$dest" 2>/dev/null || true
+		else
+			warn "数据已迁移，但无法把 ${dest} 的属主改成 ${cu}:${cg}（需要 root 或免密 sudo）。"
+			info "请手工执行：sudo chown -R ${cu}:${cg} ${dest}"
+			info "属主不对的话容器会因无法写入而反复重启。"
+			return 3
+		fi
+		if ! owner_ok "$dest"; then
+			warn "改属主后 ${dest} 仍不是 ${cu}:${cg}，容器可能起不来。"
+			info "请手工执行：sudo chown -R ${cu}:${cg} ${dest}"
+			return 3
+		fi
 	fi
 
 	ok "旧卷数据已迁移：${vol} → ${dest}"

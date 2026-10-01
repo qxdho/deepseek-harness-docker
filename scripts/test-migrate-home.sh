@@ -215,5 +215,35 @@ rc=0
 [ "$rc" != "0" ] && pass "explicit 模式报错退出（rc=$rc）" || fail "explicit 模式应报错退出"
 
 echo
+
+# ── 6b. 复制失败后目标目录必须保持原样、且不留临时目录 ─────────────────────
+# 以前 tar 是直接写目标目录的：失败时目标里已经留了半份数据，而下次运行会因为
+# 「目标非空」直接跳过（dest_is_empty 判定），提示却写着「原数据未改动，可重试」
+# —— 用户拿到的是一份半迁移的数据目录，且没有回滚路径。
+# 现在改成先拷到 ${dest}.migrating.$$ 再改名，失败时目标不受影响、重试仍然可行。
+echo "== 6b. 复制失败不污染目标目录 =="
+new_case run-fail
+set_dest
+reset_fake old_dsh-home
+: >"$FAKE/run-fail"
+rc=0
+migrate_legacy_home auto || rc=$?
+dest_dir="$(dst_of)"
+if [ "$rc" = "3" ]; then
+	pass "auto 模式返回 3（不阻断）"
+else
+	fail "auto 应返回 3，实际 $rc"
+fi
+if [ -z "$(ls -A "$dest_dir" 2>/dev/null)" ]; then
+	pass "失败后目标目录仍为空（没有半成品数据）"
+else
+	fail "失败却在目标里留下了数据：$(ls -A "$dest_dir" | tr '\n' ' ')"
+fi
+leftover="$(find "$(dirname "$dest_dir")" -maxdepth 1 -name '*.migrating.*' 2>/dev/null | head -3)"
+if [ -z "$leftover" ]; then
+	pass "失败后没有残留 .migrating 临时目录"
+else
+	fail "残留了临时目录：$leftover"
+fi
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

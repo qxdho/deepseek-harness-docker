@@ -60,23 +60,6 @@ func newDshVersionClient() *dshVersionClient {
 	}
 }
 
-// latest 返回 dist-tags.latest。取不到就报错 —— 绝不能返回空串，
-// 否则调用方会拿着空版本号去构建镜像。
-func (c *dshVersionClient) latest(ctx context.Context) (string, error) {
-	doc, err := c.fetch(ctx)
-	if err != nil {
-		return "", err
-	}
-	raw, ok := doc.DistTags["latest"]
-	if !ok {
-		return "", fmt.Errorf("registry 响应里没有 dist-tags.latest")
-	}
-	var v string
-	if err := json.Unmarshal(raw, &v); err != nil || v == "" {
-		return "", fmt.Errorf("dist-tags.latest 不是有效的版本号")
-	}
-	return v, nil
-}
 
 // all 返回全部版本（semver 升序）与发布标签。
 func (c *dshVersionClient) all(ctx context.Context) ([]string, map[string]string, error) {
@@ -297,15 +280,20 @@ func (s *server) handleDshUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	target := strings.TrimSpace(body.Version)
 
-	argv := []string{"service", "update"}
-	if target == "" {
-		argv = append(argv, "--latest")
-	} else {
+	// 注意：这里的参数必须与 dshm 的实际命令面保持一致。
+	// dshm 的命令在重构后是 `version update --build [--dsh <版本>]`：
+	//   * `service update` 已不存在（service 只管容器生命周期）
+	//   * `--latest` 已移除（--build 本身就表示要本地构建，默认取 npm 最新版）
+	//   * 版本号要用 `--dsh` 传，位置参数会被拒绝
+	// 这几条一旦漂移，面板这个按钮就整条路径失效，而 test-admin.sh 用的是 stub，
+	// 掩盖了问题 —— 所以测试里必须有真实 dshm 参与的用例。
+	argv := []string{"version", "update", "--build"}
+	if target != "" {
 		if !versionRe.MatchString(target) {
 			writeErr(w, http.StatusBadRequest, "版本号格式不合法")
 			return
 		}
-		argv = append(argv, target, "--build")
+		argv = append(argv, "--dsh", target)
 	}
 
 	// 构建会重装 dsh 并现场编译 node-pty，实测数分钟，超时给足。

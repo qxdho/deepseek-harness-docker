@@ -125,7 +125,7 @@ const indexHTML = `<!doctype html>
       </div>
       <div id="cmdButtons" class="row" style="margin:10px 0"></div>
       <div class="row">
-        <input id="cmdLine" placeholder="例如：service status / auth user list / service update 0.1.8" style="flex:1;min-width:220px">
+        <input id="cmdLine" placeholder="例如：service status / auth user list / version update" style="flex:1;min-width:220px">
         <button class="primary" id="btnRun">运行</button>
       </div>
       <pre id="cmdOut" style="margin-top:12px">（输出会显示在这里）</pre>

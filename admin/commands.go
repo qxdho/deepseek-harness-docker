@@ -70,7 +70,7 @@ var commandCatalog = []CommandInfo{
 	{Path: []string{"service", "logs"}, Desc: "查看 dsh 日志"},
 	{Path: []string{"version", "show"}, Desc: "看全四个 dsh 版本"},
 	{Path: []string{"version", "list"}, Desc: "列出可装的 dsh 版本（npm）"},
-	{Path: []string{"version", "update"}, Desc: "升级（默认拉镜像，可跟版本号）"},
+	{Path: []string{"version", "update"}, Desc: "升级（默认拉已构建镜像；--build 本地构建）"},
 	{Path: []string{"service", "url"}, Desc: "一次性 launch URL"},
 	{Path: []string{"disk"}, Desc: "磁盘占用"},
 	{Path: []string{"auth", "user", "list"}, Desc: "列出登录用户"},

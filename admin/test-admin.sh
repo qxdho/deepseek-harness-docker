@@ -98,12 +98,31 @@ chmod +x "$proj/dshm"
 c="$(code -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' "$base/api/restart")"
 [ "$c" = "502" ] && pass "dshm 退出码非 0 → 502（不假装成功）" || fail "dshm 失败时应 502，实际 $c"
 
+
 # 还原可用桩：后面的命令台用例还要用它
 cat >"$proj/dshm" <<'STUB'
 #!/usr/bin/env bash
 echo "ARGS:$*"
 STUB
 chmod +x "$proj/dshm"
+
+# 版本切换：面板必须拼出 dshm **实际支持**的命令面。
+#
+# 这条用例是补出来的：dshm 重构命令（service 不再管版本、移除 --latest、版本号改用
+# --dsh 传）之后，面板仍拼 `service update [--latest|版本 --build]`，整条路径必然失败，
+# 而当时没有任何测试覆盖这个接口 —— 之前只有命令台被测到，漏掉了这个。
+out="$(curl -s -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \
+	-d '{"version":""}' "$base/api/dsh/update" 2>/dev/null)"
+case "$out" in
+*"ARGS:version update --build"*) pass "切换 dsh 版本用的是 dshm 支持的写法（version update --build）" ;;
+*) fail "版本切换拼错命令面：$out" ;;
+esac
+out="$(curl -s -b "$tmp/jar" -X POST -H 'X-DSH-Admin: 1' -H 'Content-Type: application/json' \
+	-d '{"version":"0.1.8-rc.2"}' "$base/api/dsh/update" 2>/dev/null)"
+case "$out" in
+*"ARGS:version update --build --dsh 0.1.8-rc.2"*) pass "指定版本走 --dsh（位置参数会被 dshm 拒绝）" ;;
+*) fail "指定版本的参数不对：$out" ;;
+esac
 
 # ── 命令台 ──────────────────────────────────────────────────────────────────
 [ "$(code -b "$tmp/jar" "$base/api/commands")" = "200" ] \

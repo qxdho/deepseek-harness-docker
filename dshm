@@ -29,7 +29,6 @@ CLI_NAME=dshm
 ENV_FILE=.env
 CONTAINER=qxdho-dsh
 dsh_home_in_container() { env_value_new DSH_HOME_CONTAINER /dsh; }
-dsh_home_host() { env_value DSH_HOME_HOST /dsh; }
 cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" "$(dsh_home_in_container)"; }
 
 # ── 输出样式 ────────────────────────────────────────────────────────────────
@@ -336,7 +335,9 @@ self_update() {
 	# 校验 sha256（CI 会一并发布 .sha256）。取不到校验文件只警告不阻断 ——
 	# 可能是较早的发布没有附带，但仍然值得装。
 	local want got
-	want="$(curl -fsSL --max-time 30 "$sha_url" 2>/dev/null | awk 'NR==1{print $1}')"
+	# 末尾的 || true 必需：curl 对该文件返回非 0 时，pipefail 会让整条赋值失败，
+	# 而 set -e 会直接终止脚本 —— 下面「取不到只警告」的分支根本走不到（实测复现）。
+	want="$(curl -fsSL --max-time 30 "$sha_url" 2>/dev/null | awk 'NR==1{print $1}' || true)"
 	if [ -n "$want" ]; then
 		got="$(sha256sum "$tgz" | cut -d' ' -f1)"
 		if [ "$want" != "$got" ]; then
@@ -488,7 +489,7 @@ img_tags() {
 	curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
 		"https://${host}/v2/${repo}/tags/list" 2>/dev/null |
 		sed -n 's/.*"tags":\[\(.*\)\]}.*/\1/p' |
-		tr ',' '\n' | sed 's/^"//; s/"$//' | grep -v '^$'
+		tr ',' '\n' | sed 's/^"//; s/"$//' | grep -v '^$' || true
 }
 
 # 当天该 dsh 版本的下一个序号：已有几个 <dsh>-<日期>-* 就 +1
@@ -500,10 +501,6 @@ img_next_seq() {
 }
 
 # 构造镜像 tag
-img_tag_for() {
-	local dsh="$1" day="${2:-$(date -u +%Y.%m.%d)}"
-	printf '%s-%s-%s' "$dsh" "$day" "$(img_next_seq "$dsh" "$day")"
-}
 
 # ── dsh 版本管理 ────────────────────────────────────────────────────────────
 # npm registry 上的可用版本。解析 JSON 优先用 jq，其次 node / python3 —— 部署机上不一定
@@ -551,11 +548,23 @@ current_dsh_version() {
 		v="$(env_value_new DSH_VERSION "")"
 	fi
 	if [ -z "$v" ] && [ -f Dockerfile ]; then
-		v="$(grep -oP 'ARG DSH_VERSION=\K\S+' Dockerfile 2>/dev/null | head -1)"
+		# 用 awk 而非 grep -oP：BSD/macOS 自带的 grep 没有 -P，而且 grep 无匹配时
+		# 返回 1、在 pipefail 下会让整个赋值失败并终止脚本（实测复现）。
+		# scripts/update-versions.sh 里已经因为同样的原因改用 awk 了。
+		v="$(dockerfile_arg DSH_VERSION)"
 	fi
 	printf '%s' "$v"
 }
 
+
+# 从 Dockerfile 读一个 ARG 的值。两处都在读 DSH_VERSION，各写一遍迟早漂移
+# （其中一处曾用 grep -oP，BSD grep 没有 -P、且无匹配时会因 pipefail 终止脚本）。
+# 无匹配或读不到时返回空串，由调用方决定怎么兜底。
+dockerfile_arg() {
+	awk -F= -v k="ARG $1=" '
+		index($0, k) == 1 { v = substr($0, length(k) + 1); gsub(/[ \t\r]/, "", v); print v; exit }
+	' Dockerfile 2>/dev/null || true
+}
 # 该 dsh 版本在 npm 上是否存在（构建前校验，避免打错字等几分钟构建才失败）
 dsh_version_exists() {
 	local want="$1" json
@@ -1002,7 +1011,7 @@ disk)
 	df -h / 2>/dev/null | sed 's/^/    /' || true
 	if docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
 		info "容器内 $(dsh_home_in_container) 所在卷："
-		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" df -h '$DSH_HOME' 2>/dev/null |
+		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" sh -c 'df -h "$DSH_HOME"' 2>/dev/null |
 			sed 's/^/    /' || true
 		info "占用最大的目录："
 		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" sh -c \
@@ -1209,7 +1218,7 @@ version-show)
 	require_docker
 
 	pinned="$(env_value_new DSH_VERSION "")"
-	[ -n "$pinned" ] || pinned="$(awk -F= '/^ARG DSH_VERSION=/{print $2}' Dockerfile 2>/dev/null | head -1)"
+	[ -n "$pinned" ] || pinned="$(dockerfile_arg DSH_VERSION)"
 	img="$(env_value DSH_IMAGE "")"
 
 	running=""
@@ -1295,7 +1304,11 @@ dshm-version)
 	printf '    %s\n' "本地版本：    v${cur}"
 
 	# 面板是 dshm 的附属功能，同版本发布 —— 这里顺带确认二进制是否在位。
-	if [ -x "$(admin_dir 2>/dev/null)/dsh-admin" ]; then
+	# 这里不能用 admin_dir()：它定义在 scripts/admin.sh 里，而本分支（dshm dshm version）
+	# 并没有 source 那个文件 —— 未定义时命令替换为空，实际会判断 /dsh-admin，
+	# 于是面板即使装在别处也永远显示「未安装」。直接读 .env 里的配置值即可。
+	panel_dir="$(env_value DSH_ADMIN_DIR /dsh-manager)"
+	if [ -x "$panel_dir/dsh-admin" ]; then
 		printf '    %s\n' "管理面板：    已安装（与 dshm 同版本）"
 	else
 		printf '    %s\n' "管理面板：    未安装（./dshm admin install）"

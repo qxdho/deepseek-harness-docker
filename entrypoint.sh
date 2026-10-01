@@ -135,11 +135,29 @@ if [ "$workspace_ok" != "1" ]; then
 fi
 
 # ── 1. 播种 profile ─────────────────────────────────────────────────────────
+# 触发条件只看 package.json 在不在，所以目录里可能还有用户自己装的插件。
+# 因此**不能先 `rm -rf "$PROFILE"` 再 `cp -a`**：一旦 cp 失败（磁盘满、被中断），
+# 用户什么都没有了 —— 插件没了，连 dsh 也起不来。改成先拷到旁边的临时目录、
+# 校验通过后再原子换名。
 if [ ! -f "$PROFILE/package.json" ]; then
   [ -d "$SEED/profiles/web" ] || die "镜像内缺少预置 profile：$SEED/profiles/web"
   log "从镜像播种 web profile（含 dsh-auth-gate）"
+  seed_tmp="${PROFILE}.seeding.$$"
+  rm -rf "$seed_tmp"
+  if ! cp -a "$SEED/profiles/web" "$seed_tmp"; then
+    rm -rf "$seed_tmp"
+    die "播种 profile 失败（磁盘满？）：$SEED/profiles/web → $seed_tmp"
+  fi
+  # 关键文件必须在位，否则这次播种等于制造一个跑不起来的 profile
+  if [ ! -f "$seed_tmp/node_modules/dsh-auth-gate/lib/cli.js" ]; then
+    rm -rf "$seed_tmp"
+    die "播种出来的 profile 缺少 dsh-auth-gate，已放弃替换（原目录未改动）"
+  fi
   rm -rf "$PROFILE"
-  cp -a "$SEED/profiles/web" "$PROFILE"
+  if ! mv "$seed_tmp" "$PROFILE"; then
+    rm -rf "$seed_tmp"
+    die "播种的 profile 无法落位到 $PROFILE"
+  fi
 fi
 if [ ! -f "$PROFILE/node_modules/dsh-auth-gate/lib/cli.js" ]; then
   die "profile 里没有 dsh-auth-gate，请重建镜像或执行 dsh plugin --profile web add dsh-auth-gate"
@@ -203,19 +221,34 @@ cookie_secure=false
 [ "$DSH_COOKIE_SECURE" = "1" ] && cookie_secure=true
 case "$DSH_AUTH_TOTP" in off | optional | required) ;; *) die "DSH_AUTH_TOTP 只能是 off/optional/required" ;; esac
 
-cat >"$PROFILE/cordis.patch.yml" <<EOF
-# 由容器 entrypoint 依据环境变量生成，请改 .env 而不是改这里。
-- id: dsh-auth-gate
-  config:
-    mode: password
-    totp: "${DSH_AUTH_TOTP}"
-    cookieSecure: ${cookie_secure}
-    clientIpHeader: "${DSH_CLIENT_IP_HEADER}"
-    trustedProxyCidrs: ["127.0.0.0/8"]
-EOF
-if [ -n "$DSH_PUBLIC_HOST" ]; then
-  printf '    publicHost: "%s"\n' "$DSH_PUBLIC_HOST" >>"$PROFILE/cordis.patch.yml"
-fi
+# 写插件配置。**先写临时文件、再原子替换**，不要 `cat >` 直接截断目标文件：
+# 本脚本前面专门为 ENOSPC 做了预检，可真写满时 `cat >` 会留下一个**空或半截**的
+# cordis.patch.yml（mode: password 丢了），容器随即进重启循环 —— 明明只是磁盘满了。
+# 另外 DSH_PUBLIC_HOST / DSH_CLIENT_IP_HEADER 会被插进 YAML，必须校验字符集，
+# 否则一个带双引号的 publicHost 就能生成非法 YAML（实测 `evil".example.com` 会写出
+# `publicHost: "evil".example.com"`）。
+case "$DSH_PUBLIC_HOST" in
+*[!A-Za-z0-9.:_-]*) die "DSH_PUBLIC_HOST 含不允许的字符（只允许字母数字和 . : _ -）：$DSH_PUBLIC_HOST" ;;
+esac
+case "$DSH_CLIENT_IP_HEADER" in
+*[!A-Za-z0-9-]*) die "DSH_CLIENT_IP_HEADER 含不允许的字符（只允许字母数字和 -）：$DSH_CLIENT_IP_HEADER" ;;
+esac
+
+patch_tmp="${PROFILE}/.cordis.patch.yml.new.$$"
+{
+  printf '%s\n' '# 由容器 entrypoint 依据环境变量生成，请改 .env 而不是改这里。'
+  printf '%s\n' '- id: dsh-auth-gate'
+  printf '%s\n' '  config:'
+  printf '%s\n' '    mode: password'
+  printf '    totp: "%s"\n' "$DSH_AUTH_TOTP"
+  printf '    cookieSecure: %s\n' "$cookie_secure"
+  printf '    clientIpHeader: "%s"\n' "$DSH_CLIENT_IP_HEADER"
+  printf '%s\n' '    trustedProxyCidrs: ["127.0.0.0/8"]'
+  if [ -n "$DSH_PUBLIC_HOST" ]; then
+    printf '    publicHost: "%s"\n' "$DSH_PUBLIC_HOST"
+  fi
+} >"$patch_tmp" || { rm -f "$patch_tmp"; die "写插件配置失败（磁盘满？）：$patch_tmp"; }
+mv "$patch_tmp" "$PROFILE/cordis.patch.yml" || { rm -f "$patch_tmp"; die "替换插件配置失败"; }
 
 # ── 3. 首次创建管理员 ───────────────────────────────────────────────────────
 if [ ! -s "$DSH_HOME/auth/users.yaml" ]; then

@@ -636,5 +636,117 @@ case "$out3" in
 esac
 
 echo
+
+# ── 9. entrypoint 写插件配置与播种 profile 都不能「先破坏再写」 ──────────────
+# 两处都曾直接操作最终路径：
+#   * `cat >"$PROFILE/cordis.patch.yml"` 先截断 —— 磁盘写满时留下空/半截的鉴权网关
+#     配置（mode: password 丢了），容器进重启循环；
+#   * `rm -rf "$PROFILE"` 再 `cp -a` —— cp 失败（磁盘满/被中断）时用户连原有的
+#     插件和能跑的 profile 都没了。
+# 现在都是「临时文件 + 校验 + 原子换名」。
+echo "== 9. entrypoint 的配置写入与播种是原子的 =="
+stage9="$sandbox/ep9"
+rm -rf "$stage9"
+mkdir -p "$stage9"
+cp "$ENTRYPOINT" "$stage9/entrypoint.sh"
+sed -i "s#^SEED=/opt/dsh-seed#SEED=$sandbox/ep9-seed#" "$stage9/entrypoint.sh"
+
+# 一个最小可用的假 seed（含 auth-gate 的必需文件），以及它的"缺失版"
+mk_seed() {
+	rm -rf "$1"
+	mkdir -p "$1/profiles/web/node_modules/dsh-auth-gate/lib"
+	printf '{}\n' >"$1/profiles/web/package.json"
+	printf '//x\n' >"$1/profiles/web/node_modules/dsh-auth-gate/lib/cli.js"
+}
+healthy="$sandbox/ep9-seed"
+mk_seed "$healthy"
+
+home9="$sandbox/ep9-home"
+mkdir -p "$home9/profiles"
+# 预置一份「用户已在用」的 profile：有 package.json（所以不触发播种）与一个用户插件
+mkdir -p "$home9/profiles/web"
+printf '{}\n' >"$home9/profiles/web/package.json"
+mkdir -p "$home9/profiles/web/node_modules/dsh-auth-gate/lib"
+printf '//x\n' >"$home9/profiles/web/node_modules/dsh-auth-gate/lib/cli.js"
+printf 'user-plugin\n' >"$home9/profiles/web/node_modules/.user-plugin-marker"
+
+# 9a. 正常启动：cordis.patch.yml 应被写出且内容完整
+set +e
+out9="$(DSH_HOME="$home9" DSH_AUTH_PASSWORD=x DSH_AUTH_USER=admin \
+	DSH_PUBLIC_HOST=dsh.example.com timeout 5 bash "$stage9/entrypoint.sh" 2>&1)"
+set -e
+patch="$home9/profiles/web/cordis.patch.yml"
+if [ -f "$patch" ] && grep -q 'mode: password' "$patch" && grep -q 'publicHost: "dsh.example.com"' "$patch"; then
+	ok "插件配置被写出且内容完整（含 publicHost）"
+else
+	bad "插件配置不完整：$(cat "$patch" 2>/dev/null | tr '\n' ' ')"
+fi
+# 不能留临时文件
+left9="$(find "$home9/profiles/web" -maxdepth 1 -name '.cordis.patch.yml.new.*' 2>/dev/null | wc -l)"
+if [ "$left9" = "0" ]; then
+	ok "配置写入没有残留临时文件"
+else
+	bad "配置写入残留了 $left9 个临时文件"
+fi
+
+# 9b. 非法 publicHost（含双引号）必须被拒绝，而不是生成非法 YAML
+set +e
+out9b="$(DSH_HOME="$home9" DSH_AUTH_PASSWORD=x DSH_PUBLIC_HOST='evil".example.com' \
+	timeout 5 bash "$stage9/entrypoint.sh" 2>&1)"
+rc9b=$?
+set -e
+if [ "$rc9b" -ne 0 ]; then
+	ok "含非法字符的 DSH_PUBLIC_HOST 被拒绝（rc=$rc9b）"
+else
+	bad "非法 DSH_PUBLIC_HOST 未被拒绝"
+fi
+case "$out9b" in
+*"不允许的字符"*) ok "给出了字符集诊断" ;;
+*) bad "缺少诊断：$(printf '%s' "$out9b" | tail -1)" ;;
+esac
+# 关键不变式：**任何一次失败的启动都不能让已有的插件配置变得不完整**。
+#
+# 旧实现是 `cat >"$PROFILE/cordis.patch.yml"` —— 一旦截断后写失败（磁盘满），
+# 留下的是空/半截文件：mode: password 丢了、YAML 也不合法，容器随即进重启循环。
+# 只断言"文件还在"太弱，这里逐个字段检查它仍然完整可用。
+missing_fields=""
+for field in 'mode: password' 'totp:' 'cookieSecure:' 'clientIpHeader:' 'trustedProxyCidrs:' 'publicHost:'; do
+	grep -q "$field" "$patch" 2>/dev/null || missing_fields="$missing_fields [$field]"
+done
+if [ -z "$missing_fields" ]; then
+	ok "启动失败后已有插件配置仍完整（6 个字段都在）"
+else
+	bad "启动失败后插件配置缺字段：$missing_fields（半截文件会让容器起不来）"
+fi
+
+# 9c. seed 缺少 auth-gate 时必须放弃替换，且不动已有的 profile
+broken="$sandbox/ep9-seed-broken"
+rm -rf "$broken"
+mkdir -p "$broken/profiles/web"
+printf '{}\n' >"$broken/profiles/web/package.json"   # 有 package.json 但没有 auth-gate
+home9c="$sandbox/ep9-home-c"
+mkdir -p "$home9c/profiles/web"
+printf 'user-data\n' >"$home9c/profiles/web/keepme"
+sed -i "s#^SEED=.*#SEED=$broken#" "$stage9/entrypoint.sh"
+set +e
+out9c="$(DSH_HOME="$home9c" DSH_AUTH_PASSWORD=x timeout 5 bash "$stage9/entrypoint.sh" 2>&1)"
+rc9c=$?
+set -e
+if [ "$rc9c" -ne 0 ]; then
+	ok "播种出的 profile 缺 auth-gate 时报错退出（rc=$rc9c）"
+else
+	bad "缺 auth-gate 却没有报错"
+fi
+if [ -f "$home9c/profiles/web/keepme" ]; then
+	ok "播种失败没有动已有的 profile 目录"
+else
+	bad "播种失败把已有 profile 弄丢了"
+fi
+left9c="$(find "$home9c/profiles" -maxdepth 1 -name '*.seeding.*' 2>/dev/null | wc -l)"
+if [ "$left9c" = "0" ]; then
+	ok "播种失败没有残留临时目录"
+else
+	bad "播种失败残留了 $left9c 个 .seeding 临时目录"
+fi
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

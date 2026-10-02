@@ -530,6 +530,34 @@ server {
 </details>
 
 <details>
+<summary><b>日志里出现 <code>dsh proxy error: socket hang up</code>？</b></summary>
+
+<br/>
+
+这句话的意思是「本项目代理到 dsh 的连接被对方掐断了」，最常见两种原因：
+
+1. **空闲的 keep-alive 连接**：dsh 默认 5 秒就关掉空闲连接，而代理的连接池会留着重用。
+   池子里的死连接被下一次请求命中时就报这个。代理现在对 `GET`/`HEAD` **自动重试一次**
+   （`POST` 之类绝不重试，避免重复执行），所以偶发一两条不再影响页面。
+2. **dsh 正在重启**：`./dshm service update`、崩溃重启期间，在途请求都会断。看
+   `./dshm service status` 与 `./dshm service logs` 确认。
+
+日志现在带请求上下文，便于区分：
+
+```
+[proxy] dsh proxy error: socket hang up — GET /api/sessions（耗时 12ms ECONNRESET）
+[proxy] 连接被上游中断，重试一次：GET /api/sessions（socket hang up，耗时 8ms ECONNRESET）
+[proxy] dsh proxy error: socket hang up — POST /api/…（120s 后上游仍未响应（本项目代理超时，可用 DSH_PROXY_TIMEOUT_MS 调整））
+```
+
+- 带「耗时 12ms」的：连接被掐断，已自动重试。
+- 带「120s 后上游仍未响应」的：是**本项目代理**的超时（默认 120 秒），不是 dsh 崩了；
+  确实需要更久就调大 `DSH_PROXY_TIMEOUT_MS`（毫秒）后 `./dshm service up`。
+- 同一个 URL 反复出现且伴随容器重启：看 dsh 是否在崩溃循环（多为数据目录权限，见上一条）。
+
+</details>
+
+<details>
 <summary><b>浏览器控制台一直刷 <code>WebSocket connection to 'wss://…/api/remote.mux' failed</code>？</b></summary>
 
 <br/>

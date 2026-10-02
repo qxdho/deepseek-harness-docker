@@ -174,7 +174,7 @@ function rewriteIncomingHeaders(req) {
   //
   // 我加这段时正是无条件删的，造成过一次真回归；而且**普通 HTTP 用例全都照样通过**，
   // 只有专门发裸 socket 升级请求的用例才抓得到（见 test-inject.js 第 18 条）。
-  const isUpgrade = /(^|,)\s*upgrade\s*($|,)/i.test(String(h.connection || ''));
+  const isUpgrade = isUpgradeRequest({ headers: h });
   for (const name of HOP_BY_HOP) {
     if (isUpgrade && (name === 'connection' || name === 'upgrade')) continue;
     delete h[name];
@@ -342,9 +342,75 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
   });
 });
 
+// 是不是 WebSocket 升级请求（只看 connection 头里的 upgrade token）。
+// 这里只写一份：头改写与错误日志都要用，过去各写一份、结果重构时只改了一处，
+// 另一处就引用了不存在的函数（运行时 ReferenceError）。
+function isUpgradeRequest(req) {
+  const connection = req && req.headers ? req.headers.connection : undefined;
+  return /(^|,)\s*upgrade\s*($|,)/i.test(String(connection || ''));
+}
+
+// ── 错误上下文与一次性重试 ──────────────────────────────────────────────────
+// 原来这里只打一句 `dsh proxy error: socket hang up` —— 用户拿着这句话既不知道是
+// 哪个请求、也不知道是我们自己的超时还是上游断了，只能猜。现在补上请求上下文与耗时。
+const requestStartedAt = new WeakMap();
+const retriedRequests = new WeakSet();
+
+function markRequestStart(req) {
+  requestStartedAt.set(req, Date.now());
+}
+
+function requestLabel(req, extra) {
+  if (!req) return '(未知请求)';
+  const upgrade = isUpgradeRequest(req) ? ' [upgrade]' : '';
+  return `${req.method || '?'} ${req.url || '?'}${upgrade}${extra ? ` ${extra}` : ''}`;
+}
+
+function errorDetail(req, err) {
+  const started = requestStartedAt.get(req);
+  const ms = started === undefined ? 0 : Date.now() - started;
+  const code = err && err.code ? ` ${err.code}` : '';
+  // 超过 9 成阈值就当作我们自己的上游超时：那种情况下重试没有意义（上游还是慢）
+  if (ms >= PROXY_TIMEOUT_MS * 0.9) {
+    return `${Math.round(ms / 1000)}s 后上游仍未响应（本项目代理超时，可用 DSH_PROXY_TIMEOUT_MS 调整）`;
+  }
+  return `耗时 ${ms}ms${code}`;
+}
+
+function isIdempotent(req) {
+  return !!req && (req.method === 'GET' || req.method === 'HEAD');
+}
+
+/** 这次失败是否像"我们自己的上游超时"（而不是连接被掐断） */
+function looksLikeUpstreamTimeout(req) {
+  const started = requestStartedAt.get(req);
+  return started !== undefined && Date.now() - started >= PROXY_TIMEOUT_MS * 0.9;
+}
+
 proxy.on('error', (err, req, res) => {
+  const detail = errorDetail(req, err);
+
+  // 空闲的 keep-alive 连接被上游关掉（dsh 默认空闲 5s 超时）、或 dsh 正在重启时，
+  // 池子里的死连接会让这一条请求直接 socket hang up。GET/HEAD 没有副作用，重试一次
+  // 就好；POST 之类绝不重试（可能已经生效，重试会重复执行）。
+  // 超时导致的失败也不重试：上游还是慢，再等 120s 没有意义。
+  if (
+    res instanceof http.ServerResponse &&
+    isIdempotent(req) &&
+    !res.headersSent &&
+    req &&
+    !retriedRequests.has(req) &&
+    !looksLikeUpstreamTimeout(req)
+  ) {
+    retriedRequests.add(req);
+    console.error(`[proxy] 连接被上游中断，重试一次：${requestLabel(req)}（${err.message}，${detail}）`);
+    rewriteIncomingHeaders(req);
+    proxy.web(req, res);
+    return;
+  }
+
   const message = `dsh proxy error: ${err.message}\n`;
-  console.error(`[proxy] ${message.trim()}`);
+  console.error(`[proxy] ${message.trim()} — ${requestLabel(req)}（${detail}）`);
   if (res instanceof http.ServerResponse) {
     if (!res.headersSent) {
       res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
@@ -378,6 +444,7 @@ const server = http.createServer((req, res) => {
     res.end('upgrade required: this endpoint only answers WebSocket upgrade requests\n');
     return;
   }
+  markRequestStart(req);
   // 先改写头再交给 http-proxy —— 不能依赖 proxyReq 钩子（带 Expect 时它不触发）
   rewriteIncomingHeaders(req);
   proxy.web(req, res);
@@ -388,6 +455,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.end();
     return;
   }
+  markRequestStart(req);
   rewriteIncomingHeaders(req);
   // 升级连接显式不用 keep-alive 连接池：池里的 socket 是给短请求复用的，
   // 而 WebSocket 升级后这条连接会长期独占，混用只会让两边都出错。

@@ -41,6 +41,18 @@ const upstream = http.createServer((req, res) => {
     res.end(JSON.stringify({ xff: req.headers['x-forwarded-for'] ?? null }));
     return;
   }
+  if (req.url.startsWith('/flaky')) {
+    // 模拟"池子里的死连接"：第一次直接把 socket 掐断（没有响应），之后正常。
+    // 代理必须对 GET 自动重试一次，否则用户看到的就是 502 + socket hang up。
+    flakyHits += 1;
+    if (flakyHits === 1) {
+      req.socket.destroy();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ok after retry');
+    return;
+  }
   if (req.url.startsWith('/latin1')) {
     // 非 UTF-8 页面：iso-8859-1 里的 "é" 是单字节 0xE9。
     // 代理若按 UTF-8 解码再编码，会变成 EF BF BD（U+FFFD）—— 整页内容被改坏。
@@ -91,6 +103,7 @@ const upstream = http.createServer((req, res) => {
 // 时才发升级请求；代理若把这两个头当 hop-by-hop 删掉，上游收到的是普通 GET、
 // 升级被降级 —— 实时通道直接不可用，而普通 HTTP 用例全都照样通过（所以必须有这条）。
 let sawUpgrade = 0;
+let flakyHits = 0;
 let upgradeHeaders = null;
 upstream.on('upgrade', (req, socket) => {
   sawUpgrade += 1;
@@ -432,6 +445,22 @@ const INJECT_ID = 'dsh-forward-inject';
     ok('探针请求不转发给 dsh（上游计数未变）');
   } else {
     bad('探针请求被转发到了上游');
+  }
+
+  // 20. 上游把连接掐断时，GET 必须自动重试一次。
+  //     真实场景：keep-alive 池里的连接被上游关掉（dsh 默认空闲 5s 超时）、或 dsh 正在
+  //     重启 —— 用户只看到 `dsh proxy error: socket hang up`、页面打不开。GET 没有副作用，
+  //     重试一次即可；POST 不能重试（可能已经执行）。
+  const flaky = await get(PROXY_PORT, '/flaky');
+  if (flaky.status === 200 && /ok after retry/.test(flaky.body)) {
+    ok('上游掐断连接后 GET 自动重试成功');
+  } else {
+    bad(`重试未生效：status=${flaky.status} body=${String(flaky.body).slice(0, 60)}`);
+  }
+  if (flakyHits === 2) {
+    ok('上游确实被请求了两次（失败一次 + 重试一次）');
+  } else {
+    bad(`上游请求次数异常：${flakyHits}（期望 2）`);
   }
 
   proxy.kill('SIGTERM');

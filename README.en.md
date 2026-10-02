@@ -555,6 +555,36 @@ Check the logs: `./dshm service logs`. The first start takes a dozen seconds or 
 </details>
 
 <details>
+<summary><b>The log shows <code>dsh proxy error: socket hang up</code>.</b></summary>
+
+<br/>
+
+It means the connection from this project's proxy to dsh was cut by the other side. Two common causes:
+
+1. **Idle keep-alive connection**: dsh closes idle connections after 5 seconds by default, while the
+   proxy's connection pool keeps them for reuse; the next request can pick a dead one. The proxy now
+   **retries `GET`/`HEAD` once** (`POST` is never retried, to avoid executing twice), so occasional
+   hits no longer break the page.
+2. **dsh is restarting**: in-flight requests are cut during `./dshm version update` or a crash loop.
+   Check `./dshm service status` and `./dshm service logs`.
+
+The log now carries request context so the two are distinguishable:
+
+```
+[proxy] dsh proxy error: socket hang up — GET /api/sessions（耗时 12ms ECONNRESET）
+[proxy] 连接被上游中断，重试一次：GET /api/sessions（socket hang up，耗时 8ms ECONNRESET）
+[proxy] dsh proxy error: socket hang up — POST /api/…（120s 后上游仍未响应（本项目代理超时，可用 DSH_PROXY_TIMEOUT_MS 调整））
+```
+
+- "耗时 12ms": the connection was cut; the retry already handled it.
+- "120s 后上游仍未响应": this is **this project's proxy timeout** (120 s by default), not a dsh crash.
+  Raise `DSH_PROXY_TIMEOUT_MS` (milliseconds) and run `./dshm service up` if you genuinely need longer.
+- The same URL repeating together with container restarts: check whether dsh is in a crash loop
+  (usually data-directory permissions — see the entry above).
+
+</details>
+
+<details>
 <summary><b>The browser console keeps repeating <code>WebSocket connection to 'wss://…/api/remote.mux' failed</code>.</b></summary>
 
 <br/>

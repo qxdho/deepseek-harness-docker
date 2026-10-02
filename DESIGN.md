@@ -151,6 +151,23 @@ content untouched):
 Only these known files are touched — a blanket `chmod -R` would rewrite the agent's own workspace permissions,
 which are the deployer's business.
 
+### 5.4 Silencing a third-party deprecation on purpose
+
+`http-proxy` calls Node's deprecated `util._extend`, so every forwarded request printed a warning that has
+nothing to do with this project and that users reasonably read as an error:
+
+```
+(node:73) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+```
+
+`proxy/index.js` replaces `util._extend` with `Object.assign` **before** requiring `http-proxy`, so the two
+modules capture the replacement at load time. The semantics are identical (`_extend(target, source)` copies
+own enumerable properties and returns `target`), only that one property is touched, and the reversal also
+protects against a future Node major that removes `_extend` outright. The override must be unconditional:
+the property still exists today (`typeof === 'function'`), so a "only if missing" guard would silently do
+nothing. `scripts/test-proxy.sh` drives one real forwarded request and fails if `DEP0060` reappears — it has
+to be a forwarded request, because the call happens in `setupOutgoing`, not at startup.
+
 ## 6. Verification
 
 | Layer | What it covers | Needs Docker |

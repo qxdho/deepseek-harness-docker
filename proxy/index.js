@@ -22,6 +22,19 @@
 
 const http = require('node:http');
 const zlib = require('node:zlib');
+
+// http-proxy 内部用的是 Node 已废弃的 `util._extend`（common.js / index.js 各一处），
+// 每次转发都会打印：
+//   (node:73) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated.
+// 语义上 `_extend(target, source)` 与 `Object.assign` 完全一致（复制自有可枚举属性、
+// 返回 target）。所以在 require http-proxy **之前**把它替换成 Object.assign：这样那
+// 两个模块在加载时捕获到的就是新函数，警告消失；将来 Node 真删掉它时也不会崩。
+//
+// 注意要**无条件覆盖**：Node 目前只是把它标记为废弃，属性仍然存在（`typeof === 'function'`），
+// 写成"不存在时才补"等于什么都没做 —— 我第一版就是这么写的，警告照旧。
+const util = require('node:util');
+util._extend = Object.assign;
+
 const httpProxy = require('http-proxy');
 
 const DSH_HOST = process.env.DSH_HOST || '127.0.0.1';

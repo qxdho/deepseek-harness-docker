@@ -54,5 +54,41 @@ else
 		printf '%s\n' "$out" | grep -E 'FAIL' | sed 's/^/     /' >&2
 	fi
 fi
+# 启动代理并**真实转发一次请求**时，不能出现与使用者无关的弃用警告。
+#
+# http-proxy 内部调用 Node 已废弃的 `util._extend`，而且是在**转发请求**时调用
+# （common.js 的 setupOutgoing），所以只启动不打流量是测不出来的。proxy/index.js
+# 在 require 之前把它替换成 Object.assign；这条用例专门守住它 —— 否则升级 Node
+# 或调整 require 顺序时会悄悄把警告带回来（用户会来问"这是什么"）。
+dep_log="$(mktemp)"
+dep_up_port=$(((RANDOM % 500) + 15200))
+dep_port=$((dep_up_port + 500))
+node -e "require('http').createServer((q,r)=>{r.writeHead(200);r.end('ok')}).listen(${dep_up_port},'127.0.0.1')" &
+dep_up=$!
+DSH_HOST=127.0.0.1 DSH_PORT="$dep_up_port" PROXY_PORT="$dep_port" \
+	node "$root/proxy/index.js" >"$dep_log" 2>&1 &
+dep_pid=$!
+for _ in $(seq 1 50); do
+	grep -q '\[proxy\] 0.0.0.0' "$dep_log" 2>/dev/null && break
+	sleep 0.1
+done
+if kill -0 "$dep_pid" 2>/dev/null; then
+	pass "代理启动成功"
+else
+	fail "代理没能启动：$(tail -2 "$dep_log" | tr '\n' ' ')"
+fi
+# 驱动一次真实转发：正是这一步才会触发 http-proxy 的 _extend 调用
+node -e "require('http').get({host:'127.0.0.1',port:${dep_port},path:'/'},(r)=>{r.resume();r.on('end',()=>process.exit(0))}).on('error',()=>process.exit(1))" \
+	>/dev/null 2>&1 || true
+sleep 0.3
+if grep -q 'DEP0060' "$dep_log"; then
+	fail "转发时仍打印 DEP0060（util._extend 没有被替换）"
+else
+	pass "转发请求时没有 util._extend 弃用警告（DEP0060）"
+fi
+kill "$dep_pid" "$dep_up" 2>/dev/null || true
+wait "$dep_pid" "$dep_up" 2>/dev/null || true
+rm -f "$dep_log"
+
 rm -f /tmp/test-proxy-npm.log
 run_tests

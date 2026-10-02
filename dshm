@@ -1185,6 +1185,9 @@ service-doctor | service-diagnose)
 	require_docker; require_env
 	hdr "部署自检"
 	doc_port="$(env_value_new DSH_HTTP_PORT 3080)"
+	# 没有 curl 时不能把"测不了"说成"没响应"（会把人的排查方向带偏）
+	doc_has_curl=0
+	command -v curl >/dev/null 2>&1 && doc_has_curl=1
 
 	# 1) 容器本身
 	doc_state="$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo 'missing')"
@@ -1193,13 +1196,17 @@ service-doctor | service-diagnose)
 	*) warn "容器状态：${doc_state}（先解决它，否则下面几项没有意义）" ;;
 	esac
 
-	# 2) 本机 HTTP
-	doc_http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${doc_port}/" 2>/dev/null || true)"
-	case "$doc_http" in
-	200 | 302 | 401) ok "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
-	"") warn "本机 HTTP：连不上 127.0.0.1:${doc_port}（容器没起或端口没监听到）" ;;
-	*) warn "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
-	esac
+	# 2) 本机 HTTP（需要 curl）
+	if [ "$doc_has_curl" = "0" ]; then
+		info "宿主机没有 curl，跳过 HTTP 检查（本机实时通道那一步用的是 bash 内置 TCP，不受影响）"
+	else
+		doc_http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${doc_port}/" 2>/dev/null || true)"
+		case "$doc_http" in
+		200 | 302 | 401) ok "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
+		"") warn "本机 HTTP：连不上 127.0.0.1:${doc_port}（容器没起或端口没监听到）" ;;
+		*) warn "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
+		esac
+	fi
 
 	# 3) 本机实时通道：直连本项目代理的升级探针（绕过反代）
 	#    探针只回两种结果：101（升级头到了）或 426（请求到了但没带升级头）。
@@ -1226,6 +1233,8 @@ service-doctor | service-diagnose)
 	if [ -z "$doc_base" ]; then
 		info "未提供公网地址（也没有 DSH_PUBLIC_HOST），跳过反代那一段"
 		info "要一起验： ./dshm service doctor https://你的域名"
+	elif [ "$doc_has_curl" = "0" ]; then
+		warn "宿主机没有 curl，无法验证经反代那一跳；装一个 curl 再跑本命令"
 	else
 		doc_line="$(ws_probe_url "${doc_base}${DSH_UPGRADE_PROBE_PATH}")"
 		case "$(doctor_classify "$doc_line")" in

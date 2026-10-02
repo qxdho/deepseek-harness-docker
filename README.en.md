@@ -607,6 +607,13 @@ upgrade headers were stripped gets `426`. That removes the ambiguity of probing 
 - local `101` + proxied `426` → **the reverse proxy drops the upgrade headers**; fix nginx below.
 - neither hop is `101` → the local proxy or dsh is at fault; see `./dshm service logs | tail -50`.
 
+> [!IMPORTANT]
+> **Never hard-code the `Connection` header.** Some panels/tutorials only add
+> `proxy_set_header Connection "upgrade";`, so *every* request carries `Connection: upgrade` while
+> `Upgrade` is absent. This project's proxy now tolerates that (it no longer mistakes such requests
+> for upgrades), but the correct form uses `map` so only real upgrade requests get it (below).
+> Seeing `GET / [upgrade]` in the log means exactly that misconfiguration.
+
 nginx needs:
 
 ```nginx

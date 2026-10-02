@@ -41,6 +41,16 @@ const upstream = http.createServer((req, res) => {
     res.end(JSON.stringify({ xff: req.headers['x-forwarded-for'] ?? null }));
     return;
   }
+  if (req.url.startsWith('/conn-only')) {
+    // 反向代理常被配成无条件 `proxy_set_header Connection "upgrade";`：普通页面请求
+    // 也会带 Connection: upgrade，却没有 Upgrade 头。代理不能把它当升级处理，更不能
+    // 给上游补出 `Upgrade: websocket`（那会变成缺少 Sec-WebSocket-Key 的伪升级请求，
+    // dsh 立刻掐断 —— 线上表现就是 GET / 报 socket hang up）。
+    connOnlyUpgradeHeader = req.headers.upgrade ?? null;
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('plain ok');
+    return;
+  }
   if (req.url.startsWith('/flaky')) {
     // 模拟"池子里的死连接"：第一次直接把 socket 掐断（没有响应），之后正常。
     // 代理必须对 GET 自动重试一次，否则用户看到的就是 502 + socket hang up。
@@ -104,6 +114,7 @@ const upstream = http.createServer((req, res) => {
 // 升级被降级 —— 实时通道直接不可用，而普通 HTTP 用例全都照样通过（所以必须有这条）。
 let sawUpgrade = 0;
 let flakyHits = 0;
+let connOnlyUpgradeHeader = "unset";
 let upgradeHeaders = null;
 upstream.on('upgrade', (req, socket) => {
   sawUpgrade += 1;
@@ -447,7 +458,24 @@ const INJECT_ID = 'dsh-forward-inject';
     bad('探针请求被转发到了上游');
   }
 
-  // 20. 上游把连接掐断时，GET 必须自动重试一次。
+  // 20. 只有 `Connection: upgrade`、没有 `Upgrade` 头的请求必须当普通请求转发。
+  //     反向代理被配成无条件 `proxy_set_header Connection "upgrade";` 时，每个页面请求
+  //     都是这个样子。之前代理只看 connection 就按升级处理，还给上游补出
+  //     `Upgrade: websocket` —— dsh 收到缺少 Sec-WebSocket-Key 的伪升级请求后立刻掐断，
+  //     线上表现就是 `GET /`、`GET /favicon.ico` 一直 socket hang up、页面打不开。
+  const connOnly = await get(PROXY_PORT, '/conn-only', { connection: 'upgrade' });
+  if (connOnly.status === 200 && /plain ok/.test(connOnly.body)) {
+    ok('Connection: upgrade（无 Upgrade 头）被当作普通请求，正常返回 200');
+  } else {
+    bad(`伪升级请求没有正常处理：status=${connOnly.status} body=${String(connOnly.body).slice(0, 60)}`);
+  }
+  if (connOnlyUpgradeHeader === null) {
+    ok('上游没有收到伪造的 Upgrade 头');
+  } else {
+    bad(`上游收到了伪造的 upgrade 头：${JSON.stringify(connOnlyUpgradeHeader)}`);
+  }
+
+  // 21. 上游把连接掐断时，GET 必须自动重试一次。
   //     真实场景：keep-alive 池里的连接被上游关掉（dsh 默认空闲 5s 超时）、或 dsh 正在
   //     重启 —— 用户只看到 `dsh proxy error: socket hang up`、页面打不开。GET 没有副作用，
   //     重试一次即可；POST 不能重试（可能已经执行）。

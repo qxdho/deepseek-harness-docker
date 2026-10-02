@@ -578,6 +578,13 @@ server {
 - 本机 `101` + 经反代 `426` → **反代没转发升级头**，按下面的 nginx 配置改。
 - 两跳都不是 `101` → 本机代理或 dsh 的问题，`./dshm service logs | tail -50`。
 
+> [!IMPORTANT]
+> **别把 `Connection` 写成固定值。** 有些面板/教程只给一行
+> `proxy_set_header Connection "upgrade";`，于是**所有**请求都带上
+> `Connection: upgrade` 却没有 `Upgrade` 头。本项目代理能容忍这种配置（不再把它误当升级），
+> 但正确写法是用 `map` 只对真正的升级请求设置（见下）。若日志里出现
+> `GET / [upgrade]` 这类字样，就是这个配置在作怪。
+
 nginx 需要：
 
 ```nginx

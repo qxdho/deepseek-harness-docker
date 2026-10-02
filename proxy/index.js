@@ -167,22 +167,26 @@ function rewriteIncomingHeaders(req) {
   // 删掉 Expect：否则 http-proxy 走的是"等上游 100"的分支，而我们已经把
   // Content-Length 之类都定好了；同时避免上游 100-continue 与我们的改写竞争。
   delete h.expect;
-  // 删掉 hop-by-hop 头。**但升级请求必须放过 `connection` 与 `upgrade`**：
+  // 删掉 hop-by-hop 头。**但真正的升级请求必须放过 `connection` 与 `upgrade`**：
   // 这两条正是 WebSocket 握手需要的 —— Node 的 http.request 只在 `connection` 含
   // `upgrade`（或存在 `upgrade` 头）时才发真正的升级请求。无条件删掉它们，上游收到的
   // 就是普通 GET、升级被降级，实时通道（dsh 的 /api/remote.mux）彻底不可用。
   //
   // 我加这段时正是无条件删的，造成过一次真回归；而且**普通 HTTP 用例全都照样通过**，
   // 只有专门发裸 socket 升级请求的用例才抓得到（见 test-inject.js 第 18 条）。
+  //
+  // 判据必须是「connection 含 upgrade **且** upgrade 非空」：反向代理常被配成无条件
+  // `Connection: upgrade`，此时普通请求只有 connection、没有 upgrade —— 按升级处理会
+  // 给它补出 `Upgrade: websocket`，变成伪升级请求，dsh 直接掐断（socket hang up）。
   const isUpgrade = isUpgradeRequest({ headers: h });
   for (const name of HOP_BY_HOP) {
     if (isUpgrade && (name === 'connection' || name === 'upgrade')) continue;
     delete h[name];
   }
   if (isUpgrade) {
-    // 规范化成小写值：有些客户端写 `Connection: upgrade` 或带额外 token
+    // 规范化：有些客户端写 `Connection: upgrade` 或带额外 token
     h.connection = 'Upgrade';
-    h.upgrade = 'websocket';
+    h.upgrade = String(h.upgrade || 'websocket').toLowerCase();
   }
   // accept-encoding 固定为 identity：注入逻辑不做压缩，这样上游直接给明文
   h['accept-encoding'] = 'identity';
@@ -345,9 +349,18 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
 // 是不是 WebSocket 升级请求（只看 connection 头里的 upgrade token）。
 // 这里只写一份：头改写与错误日志都要用，过去各写一份、结果重构时只改了一处，
 // 另一处就引用了不存在的函数（运行时 ReferenceError）。
+// 是不是真正的 WebSocket 升级请求：**`Connection` 含 upgrade 且 `Upgrade` 非空**。
+//
+// 只看 `Connection` 是不够的，而且会闯大祸：反向代理常被配成
+//   proxy_set_header Connection "upgrade";
+//（无条件对**所有**请求设置），此时普通页面请求也会带 `Connection: upgrade` 却没有
+// `Upgrade` 头。若这时我们按升级处理，就会凭空给上游补一个 `Upgrade: websocket`，
+// 把 `GET /`、`/favicon.ico` 变成缺少 Sec-WebSocket-Key 的伪升级请求 —— dsh 立刻
+// 掐断连接（socket hang up），页面直接打不开。
 function isUpgradeRequest(req) {
-  const connection = req && req.headers ? req.headers.connection : undefined;
-  return /(^|,)\s*upgrade\s*($|,)/i.test(String(connection || ''));
+  const headers = (req && req.headers) || {};
+  if (!/(^|,)\s*upgrade\s*($|,)/i.test(String(headers.connection || ''))) return false;
+  return String(headers.upgrade || '').trim() !== '';
 }
 
 // ── 错误上下文与一次性重试 ──────────────────────────────────────────────────

@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1
 #
 # dsh 一键部署镜像（DeepSeek Harness + dsh-auth-gate 登录门禁）
+#
+# 架构：
+#   浏览器 -> 代理 0.0.0.0:3080 -> dsh 127.0.0.1:3079（web profile + dsh-auth-gate）
+#
+# 要点：
+#   * dsh 官方拒绝 --host 0.0.0.0，所以 dsh 只听回环，对外由代理承担。
 #   * 登录、会话、可选 TOTP 由 dsh-auth-gate 插件在 dsh 进程内完成；
 #     它还负责把 dsh 的一次性 launch token 自动桥接成会话 Cookie，
 #     所以用户永远不需要看到或复制 token。
@@ -27,6 +33,71 @@ RUN apt-get update \
 # （node-pty 仍需现场编译，缓存主要省掉重复下载）。
 # 不要再跟 `npm cache clean`，那会把 cache mount 清掉，等于白缓存。
 RUN --mount=type=cache,target=/root/.npm \
+    npm install -g --no-fund --no-audit \
+      "pnpm@${PNPM_VERSION}" \
+      "@deepseek-ai/dsh@${DSH_VERSION}" \
+ && test "$(dsh --version)" = "${DSH_VERSION}"
+
+# 预置一个带 dsh-auth-gate 的 web profile。装进镜像后，首次启动无需联网装插件。
+#
+# HOME 必须显式设成 DSH_HOME：基础镜像的 HOME 是 /root，而 pnpm 把 store 位置
+# 记在 `node_modules/.modules.yaml` 里（默认 $HOME/.local/share/pnpm/store 或
+# $XDG_DATA_HOME/pnpm/store）。不设就会记成 /root/...，而运行期 HOME=$DSH_HOME，
+# 两个路径对不上 → 用户第一次装插件报 ERR_PNPM_UNEXPECTED_STORE。
+#
+# 但仅仅让两边 HOME 一致还不够：profile 在运行期会被复制进数据卷，绝对路径必然
+# 与镜像内不同，而 pnpm 记的是**解析后的绝对路径**。所以构建完直接删掉这个记账
+# 文件（见本 RUN 末尾）—— 运行期第一次装插件时 pnpm 会按当时的环境重新算并写回，
+# 也就落在 .env 定义的 DSH_HOME 里。插件本体已随 profile 进镜像，删除记账文件
+# 不影响「首次装插件无需联网」。
+ENV DSH_HOME=/opt/dsh-seed \
+    HOME=/opt/dsh-seed
+RUN set -eux; \
+    mkdir -p "${DSH_HOME}"; \
+    DSH_BIN="$(npm root --global)/@deepseek-ai/dsh/lib/bin.js"; \
+    node --expose-internals "$DSH_BIN" --profile web --dump-config >/dev/null; \
+    node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-auth-gate@${DSH_AUTH_GATE_VERSION}"; \
+    # dsh 会校验 profile 插件行的 peer 依赖（storage-domain 缺失会让 web 起不来），
+    # dsh-auth-gate 的 CLI 也需要它们。补软链；目标不存在时直接构建失败，避免像以前
+    # 那样发出悬空软链、等到运行时才炸（entrypoint 也会在每次启动时幂等补齐）。
+    npm_root="$(npm root --global)"; \
+    for peer in dsh-storage-domain cordis; do \
+      src="$npm_root/@deepseek-ai/dsh/node_modules/@deepseek-ai/$peer"; \
+      [ -f "$src/package.json" ] || src="$npm_root/@deepseek-ai/$peer"; \
+      test -f "$src/package.json" || { echo "找不到 peer 依赖 $peer" >&2; exit 1; }; \
+      ln -sfn "$src" "${DSH_HOME}/profiles/web/node_modules/@deepseek-ai/$peer"; \
+    done; \
+    # 构建期冒烟：证明 CLI 真能建用户，然后删掉这个临时用户文件
+    printf '%s\n' 'build-smoke-only' \
+      | node "${DSH_HOME}/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" user add build-smoke --password-stdin; \
+    test -s "${DSH_HOME}/auth/users.yaml"; \
+    rm -rf "${DSH_HOME}/auth"; \
+    # 丢掉构建期的 store 记账（它是本镜像内的绝对路径，运行期必然失配），
+    # 让运行期第一次 pnpm 操作时按 .env 定义的 DSH_HOME 重新计算并写回。
+    rm -f "${DSH_HOME}/profiles/web/node_modules/.modules.yaml"; \
+    node --expose-internals "$DSH_BIN" --version
+
+# 预置 profile 必须归 node 所有。首启播种是运行期以 node 身份 `cp -a` 镜像里的
+# 这份 profile 到数据目录，而 profile 里含有 pnpm 以 600/700 建的文件
+# （package.json、.plugin-manager）—— 属主是 root 时 node 连读都读不到，
+# `cp -a` 直接失败、容器起不来（数据目录为空的全新部署必然踩到）。
+RUN chown -R node:node /opt/dsh-seed \
+    && chmod -R a+rX /opt/dsh-seed
+
+# ── 阶段 2：运行镜像 ────────────────────────────────────────────────────────
+FROM ${NODE_IMAGE}
+
+# DSH_VERSION 只在 builder 阶段用到（决定 npm 装哪个版本）；运行阶段不需要，
+# 留在这里只会变成没人读的构建参数。
+ARG DSH_DEV_TOOLS=none
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/node \
+    DSH_HOME=/home/node/.dsh \
+    DSH_HOST=127.0.0.1 \
+    DSH_PORT=3079 \
+    PROXY_PORT=3080 \
+    DSH_PERMISSION_MODE=workspace-write \
     DSH_TELEMETRY_DISABLED=1 \
     NARB_DISABLE_NATIVE_CACHE=1 \
     npm_config_cache=/tmp/npm-cache \
@@ -49,18 +120,6 @@ COPY --from=builder /usr/local/ /usr/local/
 # 预置 profile（含 dsh-auth-gate），供首启或空卷 seeding
 COPY --from=builder /opt/dsh-seed /opt/dsh-seed
 
-# 上面这条 COPY 会把 /opt/dsh-seed 的属主**重置成 root:root**（覆盖 builder 阶段的
-# chown，因为 COPY 默认以 root 身份复制），而且 profile 里带着 pnpm 以 600/700 建的
-# 文件（package.json 600、.plugin-manager 700）。两个后果：
-#   1. 容器以 node 运行时，entrypoint 的 `cp -a /opt/dsh-seed/profiles/web` 读不了那些
-#      600/700 的文件 —— 空数据目录首启会直接失败并**无限重启**。
-#   2. compose 与 README 都允许用 DSH_UID/DSH_GID 改成非 1000 的 uid（NAS、桌面发行版），
-#      那时连 node 的属主也帮不上忙，只能靠"对所有人可读"这个权限。
-# 所以这里显式恢复属主，并把 seed 目录里的文件改成对所有人可读（目录可进入）——
-# 这不会让 dsh 以别人身份写入（数据目录是另一份拷贝），只是让播种能读到。
-RUN chown -R node:node /opt/dsh-seed \
-    && chmod -R a+rX /opt/dsh-seed
-
 # dsh 启动需要 Node 的 --expose-internals（HMR 插件），npm 生成的软链不带该参数，
 # 这里用一层 wrapper 保证任何方式调用 dsh 都正确。先删掉 npm 的软链，避免 COPY
 # 顺着软链覆盖到 bin.js。
@@ -73,11 +132,6 @@ RUN chmod 0755 /usr/local/bin/dsh
 # 构建可复现，也避免 lockfile 与 package.json 漂移时被静默忽略。
 WORKDIR /app/proxy
 COPY proxy/package.json proxy/package-lock.json /app/proxy/
-# npm 缓存目录必须在这里建、并交给 node：npm_config_cache=/tmp/npm-cache
-# （见上面的 ENV），而容器以 USER node（或 DSH_UID/DSH_GID 指定的 uid）运行。
-# 这句原来写在 COPY --from=builder 之后 —— 那时目录还不存在（要到这次 npm ci
-# 才创建），`if [ -d ... ]` 恒假、等于没做；于是 NAS 上用 DSH_UID≠1000 时
-# 装插件会报 EACCES，而报错信息完全指不到这里。用 1777（粘滞位）让任意 uid 都能写。
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --omit=dev --no-fund --no-audit \
     && mkdir -p /tmp/npm-cache \

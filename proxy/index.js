@@ -356,12 +356,38 @@ proxy.on('error', (err, req, res) => {
   }
 });
 
+// ── 升级探针 ────────────────────────────────────────────────────────────────
+// `/__dsh_probe_upgrade` 是给 `dshm service doctor` 与用户排障用的**无数据端点**：
+//   * 收到真正的 WebSocket 升级请求 → 回 101 后立即关闭，证明「升级头到达了本代理」；
+//   * 收到普通 GET（升级头在半路被剥掉）→ 回 426 Upgrade Required。
+// 为什么需要它：拿 /api/remote.mux 去猜是分不清的 —— 没带会话 Cookie 时那条路径本来
+// 就会回 302（登录跳转），"反代剥掉了升级头"与"链路正常只是没登录"从状态码上一样。
+// 这个端点不转发、不读凭据、不返回数据，放在鉴权之外是安全的。
+const UPGRADE_PROBE_PATH = '/__dsh_probe_upgrade';
+
+function requestPath(req) {
+  const url = String(req.url || '');
+  const q = url.indexOf('?');
+  return q === -1 ? url : url.slice(0, q);
+}
+
 const server = http.createServer((req, res) => {
+  if (requestPath(req) === UPGRADE_PROBE_PATH) {
+    // 走到这里说明它不是升级请求：升级头在某一跳丢了（或者有人直接 GET 它）
+    res.writeHead(426, { 'content-type': 'text/plain; charset=utf-8', upgrade: 'websocket' });
+    res.end('upgrade required: this endpoint only answers WebSocket upgrade requests\n');
+    return;
+  }
   // 先改写头再交给 http-proxy —— 不能依赖 proxyReq 钩子（带 Expect 时它不触发）
   rewriteIncomingHeaders(req);
   proxy.web(req, res);
 });
 server.on('upgrade', (req, socket, head) => {
+  if (requestPath(req) === UPGRADE_PROBE_PATH) {
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+    socket.end();
+    return;
+  }
   rewriteIncomingHeaders(req);
   // 升级连接显式不用 keep-alive 连接池：池里的 socket 是给短请求复用的，
   // 而 WebSocket 升级后这条连接会长期独占，混用只会让两边都出错。

@@ -411,6 +411,29 @@ const INJECT_ID = 'dsh-forward-inject';
   } else {
     bad(`转发时丢了 upgrade 头：${JSON.stringify(upgradeHeaders)}`);
   }
+
+  // 19. 升级探针端点：`dshm service doctor` 靠它区分「反代剥掉了升级头」与「链路正常、
+  //     只是没登录」—— 后者拿 /api/remote.mux 是分不出来的（没 Cookie 必然 302）。
+  //     普通 GET 回 426，升级请求回 101，且两者都不能打到上游。
+  const sawUpgradeBefore = sawUpgrade;
+  const probePlain = await get(PROXY_PORT, '/__dsh_probe_upgrade');
+  if (probePlain.status === 426) {
+    ok('探针收到普通 GET → 426（升级头没到）');
+  } else {
+    bad(`探针普通 GET 期望 426，实际 ${probePlain.status}`);
+  }
+  const probeUpgrade = await rawUpgrade(PROXY_PORT, '/__dsh_probe_upgrade');
+  if (probeUpgrade.status === 101) {
+    ok('探针收到升级请求 → 101（升级头到了本代理）');
+  } else {
+    bad(`探针升级期望 101，实际 ${probeUpgrade.status || '（连接被关）'}`);
+  }
+  if (sawUpgrade === sawUpgradeBefore) {
+    ok('探针请求不转发给 dsh（上游计数未变）');
+  } else {
+    bad('探针请求被转发到了上游');
+  }
+
   proxy.kill('SIGTERM');
   upstream.close();
   console.log(`\nPASS=${PASS} FAIL=${FAIL}`);

@@ -44,6 +44,7 @@ check http-redirect "302" "HTTP/1.1 302 Found"
 check http-ok "200" "HTTP/1.1 200 OK"
 check http-denied "401" "HTTP/1.1 401 Unauthorized"
 check http-denied "502" "HTTP/1.1 502 Bad Gateway"
+check upgrade-stripped "426（升级头被剥掉）" "HTTP/1.1 426 Upgrade Required"
 check no-response "空行（连接建不起来/超时）" ""
 check unexpected "莫名其妙的内容" "not-http-at-all"
 # 关键区分：不带空格的状态行不能被当成 101（比如版本号里恰好含 101 的路径）

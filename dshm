@@ -1201,18 +1201,19 @@ service-doctor | service-diagnose)
 	*) warn "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
 	esac
 
-	# 3) 本机 WebSocket（直连本项目代理，绕过反代）
-	doc_line="$(ws_probe_tcp 127.0.0.1 "$doc_port" /api/remote.mux)"
+	# 3) 本机实时通道：直连本项目代理的升级探针（绕过反代）
+	#    探针只回两种结果：101（升级头到了）或 426（请求到了但没带升级头）。
+	doc_line="$(ws_probe_tcp 127.0.0.1 "$doc_port" "$DSH_UPGRADE_PROBE_PATH")"
 	case "$(doctor_classify "$doc_line")" in
-	upgraded) ok "本机实时通道：WebSocket 握手 → ${doc_line}" ;;
-	http-ok | http-redirect | http-denied)
-		ok "本机实时通道：代理转发正常（${doc_line}）—— 这次没带会话 Cookie，属预期"
+	upgraded) ok "本机实时通道：升级握手 → ${doc_line}" ;;
+	upgrade-stripped)
+		warn "本机实时通道：探针收到普通请求（${doc_line}）—— 连本机这一跳都没带升级头"
 		;;
 	no-response)
-		warn "本机实时通道：127.0.0.1:${doc_port} 没有任何响应 —— 代理或 dsh 有问题"
+		warn "本机实时通道：127.0.0.1:${doc_port} 没有任何响应 —— 代理没起来或端口不对"
 		info "看日志： ./dshm service logs | tail -50"
 		;;
-	*) warn "本机实时通道：握手结果异常（${doc_line}）" ;;
+	*) warn "本机实时通道：结果异常（${doc_line}）—— 确认端口 ${doc_port} 上是我们这个代理" ;;
 	esac
 
 	# 4) 经反向代理（给了 URL 用 URL；否则用 DSH_PUBLIC_HOST 拼 https）
@@ -1226,14 +1227,18 @@ service-doctor | service-diagnose)
 		info "未提供公网地址（也没有 DSH_PUBLIC_HOST），跳过反代那一段"
 		info "要一起验： ./dshm service doctor https://你的域名"
 	else
-		doc_line="$(ws_probe_url "${doc_base}/api/remote.mux")"
+		doc_line="$(ws_probe_url "${doc_base}${DSH_UPGRADE_PROBE_PATH}")"
 		case "$(doctor_classify "$doc_line")" in
 		upgraded) ok "经反代实时通道：${doc_base} → ${doc_line}" ;;
-		no-response) warn "经反代：${doc_base} 没有响应（DNS / 证书 / 反代本身）" ;;
-		*)
-			warn "经反代：${doc_base} 没拿到 101（${doc_line}）—— 浏览器里的实时通道会一直重连"
-			info "本机那一跳正常的话，问题就在反代没有转发 Upgrade/Connection 头"
+		upgrade-stripped)
+			warn "经反代：探针收到普通请求（${doc_line}）—— 反代没有转发 Upgrade/Connection 头"
+			info "这就是浏览器里实时通道一直重连的原因；本机那一跳正常说明代理与 dsh 没问题"
 			doctor_proxy_hint
+			;;
+		no-response) warn "经反代：${doc_base} 没有响应（DNS / 证书 / 反代没在听 / 连接被断开）" ;;
+		*)
+			warn "经反代：${doc_base} 的结果不符合预期（${doc_line}）"
+			info "若返回的是登录跳转（30x），说明反代把请求转到了别处或改写了路径"
 			;;
 		esac
 	fi

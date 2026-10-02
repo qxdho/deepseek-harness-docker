@@ -539,10 +539,18 @@ server {
 头都会是这个现象，而普通 HTTP 请求完全正常。
 
 ```bash
-./dshm service doctor https://你的域名     # 逐跳验：容器 → 本机 HTTP → 本机 WebSocket → 反代
+./dshm service doctor https://你的域名     # 逐跳验：容器 → 本机 HTTP → 本机升级握手 → 反代
 ```
 
-本机那一跳是 `101`、经反代不是 `101`，问题就在反代。nginx 需要：
+判断依据是**探针端点** `/__dsh_probe_upgrade`（本项目代理提供，不转发、不读凭据）：
+收到真正的升级请求回 `101`，收到被剥掉升级头的普通 GET 回 `426`。所以结论没有歧义 ——
+拿业务路径 `/api/remote.mux` 是分不出来的，它没带会话 Cookie 时本来就回 `302`（登录跳转）。
+
+- 本机 `101` + 经反代 `101` → 链路正常，若浏览器仍报错，看是否用了别的域名/端口。
+- 本机 `101` + 经反代 `426` → **反代没转发升级头**，按下面的 nginx 配置改。
+- 两跳都不是 `101` → 本机代理或 dsh 的问题，`./dshm service logs | tail -50`。
+
+nginx 需要：
 
 ```nginx
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }

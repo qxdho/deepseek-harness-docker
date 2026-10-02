@@ -565,11 +565,19 @@ proxy → dsh*, and any hop that does not forward `Upgrade` / `Connection` break
 keeps working.
 
 ```bash
-./dshm service doctor https://your-domain    # hop by hop: container → local HTTP → local WebSocket → proxy
+./dshm service doctor https://your-domain    # hop by hop: container → local HTTP → local upgrade → proxy
 ```
 
-If the local hop returns `101` and the proxied one does not, the reverse proxy is the problem. nginx
-needs:
+The verdict comes from a **probe endpoint** `/__dsh_probe_upgrade` (served by this project's proxy; it
+forwards nothing and reads no credentials): a real upgrade request gets `101`, a plain GET whose
+upgrade headers were stripped gets `426`. That removes the ambiguity of probing the business path —
+`/api/remote.mux` answers `302` (login redirect) whenever no session cookie is present.
+
+- local `101` + proxied `101` → the chain is fine; check whether the browser uses another host/port.
+- local `101` + proxied `426` → **the reverse proxy drops the upgrade headers**; fix nginx below.
+- neither hop is `101` → the local proxy or dsh is at fault; see `./dshm service logs | tail -50`.
+
+nginx needs:
 
 ```nginx
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }

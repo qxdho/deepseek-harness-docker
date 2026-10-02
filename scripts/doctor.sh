@@ -8,17 +8,22 @@
 # 调用方需先定义：hdr / info / ok / warn / die。
 # 离线测试：scripts/test-doctor.sh
 
+# 探针路径：代理侧的专用端点，收到升级请求回 101、收到普通 GET 回 426。
+# 用它而不是 /api/remote.mux：后者没带会话 Cookie 时必然回 302，无法区分
+# 「反代剥掉了升级头」和「链路正常只是没登录」。
+DSH_UPGRADE_PROBE_PATH=/__dsh_probe_upgrade
+
 # 握手结果分类：入参是响应首行（可能为空）
-#   upgraded      = 101，链路通
-#   http-ok       = 2xx（有些服务对未认证的升级请求直接回普通响应）
-#   http-redirect = 3xx（同上的常见形态，说明代理转发是通的）
-#   http-denied   = 4xx/5xx
-#   no-response   = 连接建不起来或超时没回包（代理没在听 / 上游挂了）
+#   upgraded          = 101，升级头到达了这一跳
+#   upgrade-stripped  = 426，请求到了但升级头被剥掉（反代少配了 Upgrade/Connection）
+#   http-ok / 3xx / 4xx / 5xx = 普通 HTTP 响应（探针路径上不该出现，除 426）
+#   no-response       = 连接建不起来或没回包（没在听 / 中间设备直接断开）
 doctor_classify() {
 	case "$1" in
 	"") printf '%s' 'no-response' ;;
 	# 只看「HTTP/x.y 空格 三位状态码」这个位置，避免把正文里的 101 当成升级成功
 	HTTP/*" 101"*) printf '%s' 'upgraded' ;;
+	HTTP/*" 426"*) printf '%s' 'upgrade-stripped' ;;
 	HTTP/*" "2[0-9][0-9]*) printf '%s' 'http-ok' ;;
 	HTTP/*" "3[0-9][0-9]*) printf '%s' 'http-redirect' ;;
 	HTTP/*" "[0-9][0-9][0-9]*) printf '%s' 'http-denied' ;;

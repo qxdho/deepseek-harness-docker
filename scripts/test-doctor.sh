@@ -69,35 +69,45 @@ s.on('upgrade', (req, socket) => {
 s.on('clientError', (err, socket) => socket.destroy());
 s.listen(port, '127.0.0.1', () => console.log('ready'));
 JS
-	node "$sandbox/up.js" "$port" upgrade >/dev/null 2>&1 &
+	node "$sandbox/up.js" "$port" upgrade >"$sandbox/up.log" 2>&1 &
 	up_pid=$!
-	node "$sandbox/up.js" "$((port + 1))" reject >/dev/null 2>&1 &
+	node "$sandbox/up.js" "$((port + 1))" reject >"$sandbox/rej.log" 2>&1 &
 	rej_pid=$!
 	trap 'kill "$up_pid" "$rej_pid" 2>/dev/null || true; rm -rf "$sandbox"' EXIT
 	# 等服务起来：用被测函数本身重试，别用「连上就断」的探针（会让 stub 收到
 	# 突然断开的 socket，在旧 stub 上直接把进程带走）
 	got=""
-	for _ in $(seq 1 30); do
+	# 10 秒窗口：CI 上 node 冷启动 + runner 负载可能比本地慢得多（原来 3 秒，
+	# 在 CI 上真的等不到 —— 报出来还是"断言失败"，掩盖了真实原因）
+	for _ in $(seq 1 100); do
 		got="$(ws_probe_tcp 127.0.0.1 "$port" /api/remote.mux)"
 		[ -n "$got" ] && break
 		sleep 0.1
 	done
-	[ -n "$got" ] || skip "stub 未就绪，跳过握手用例"
 
-	[ "$(doctor_classify "$got")" = "upgraded" ] \
-		&& pass "直连能升级：$got" || fail "直连未升级：$got"
+	if [ -z "$got" ]; then
+		# stub 起不来时**必须整体跳过**：之前只 skip 一句就继续往下跑，后面的断言
+		# 拿着空值报出三条假失败（CI 上真踩到过）。这里把 stub 的输出打出来，
+		# 否则连"为什么起不来"都看不到。
+		skip "stub 未就绪，跳过握手用例（端口 ${port}）"
+		[ -f "$sandbox/up.log" ] && sed 's/^/    stub: /' "$sandbox/up.log" | head -5
+		got=""
+	else
+		[ "$(doctor_classify "$got")" = "upgraded" ] \
+			&& pass "直连能升级：$got" || fail "直连未升级：$got"
 
-	got="$(ws_probe_tcp 127.0.0.1 "$((port + 1))" /api/remote.mux)"
-	[ "$(doctor_classify "$got")" = "http-denied" ] \
-		&& pass "对端拒绝升级（401）也能读到状态行：$got" || fail "拒绝升级的状态行读错了：$got"
+		got="$(ws_probe_tcp 127.0.0.1 "$((port + 1))" /api/remote.mux)"
+		[ "$(doctor_classify "$got")" = "http-denied" ] \
+			&& pass "对端拒绝升级（401）也能读到状态行：$got" || fail "拒绝升级的状态行读错了：$got"
 
-	got="$(ws_probe_tcp 127.0.0.1 "$((port + 2))" /api/remote.mux)"
-	[ "$(doctor_classify "$got")" = "no-response" ] \
-		&& pass "没人监听 → no-response（不挂死）" || fail "没人监听时结果不对：$got"
+		got="$(ws_probe_tcp 127.0.0.1 "$((port + 2))" /api/remote.mux)"
+		[ "$(doctor_classify "$got")" = "no-response" ] \
+			&& pass "没人监听 → no-response（不挂死）" || fail "没人监听时结果不对：$got"
 
-	got="$(ws_probe_url "http://127.0.0.1:${port}/api/remote.mux")"
-	[ "$(doctor_classify "$got")" = "upgraded" ] \
-		&& pass "经 URL（curl）也能升级：$got" || fail "curl 路径未升级：$got"
+		got="$(ws_probe_url "http://127.0.0.1:${port}/api/remote.mux")"
+		[ "$(doctor_classify "$got")" = "upgraded" ] \
+			&& pass "经 URL（curl）也能升级：$got" || fail "curl 路径未升级：$got"
+	fi
 
 	got="$(ws_probe_url "http://127.0.0.1:$((port + 3))/api/remote.mux")"
 	[ "$(doctor_classify "$got")" = "no-response" ] \

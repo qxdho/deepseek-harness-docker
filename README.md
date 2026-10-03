@@ -569,19 +569,22 @@ server {
 dsh 的 Cookie（launch-token 桥接）。桥接没生效时，它退化成"直接跳回原路径"，于是你带着门禁
 Cookie 进到 dsh，而 dsh 认不出你 —— 就是这句话。
 
-**先这样做**（多半就好了）：让浏览器**重新登录一次**，重新触发桥接。
-
-```
-https://你的域名/auth/logout        然后重新登录
-# 或者清掉该站点的 Cookie 后再访问
-```
-
-**仍然不行**时手动换一次（token 是一次性的，容器重启会换新的）：
+**先试这个**（不必先退出登录）：直接用一次性 token 换到 dsh 的 Cookie。
 
 ```bash
 ./dshm service logs | grep "dsh web:"    # 取出 ?token=... 那串
 # 然后在浏览器里打开： https://你的域名/?token=<那串>
 ```
+
+**或者让浏览器重新登录一次**，重新触发桥接：在应用里点退出，或清掉该站点的 Cookie 后再访问。
+
+> [!NOTE]
+> `/auth/logout` **只接受 POST**。在地址栏直接打开 `https://你的域名/auth/logout` 只会得到
+> `405 method not allowed` —— 那是正常的，不是故障。想在控制台手动退出可以这样（在站点页面上执行）：
+>
+> ```js
+> fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }).then(() => location.reload())
+> ```
 
 **排查桥为什么失效**：日志里下面三条告警各对应一种原因（每条每进程只打一次）：
 

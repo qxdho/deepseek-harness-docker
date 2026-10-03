@@ -1200,11 +1200,26 @@ service-doctor | service-diagnose)
 	if [ "$doc_has_curl" = "0" ]; then
 		info "宿主机没有 curl，跳过 HTTP 检查（本机实时通道那一步用的是 bash 内置 TCP，不受影响）"
 	else
-		doc_http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${doc_port}/" 2>/dev/null || true)"
-		case "$doc_http" in
-		200 | 302 | 401) ok "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
-		"") warn "本机 HTTP：连不上 127.0.0.1:${doc_port}（容器没起或端口没监听到）" ;;
-		*) warn "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → ${doc_http}" ;;
+		# 正文要看：两个 401 的含义相反（门禁守卫正常 vs 门禁被穿过、dsh 不认识你）
+		doc_body_file="$(mktemp)"
+		doc_http="$(curl -s -o "$doc_body_file" -w '%{http_code}' --max-time 5 "http://127.0.0.1:${doc_port}/" 2>/dev/null || true)"
+		doc_body="$(head -c 400 "$doc_body_file" 2>/dev/null || true)"
+		rm -f "$doc_body_file"
+		case "$(doctor_index_verdict "$doc_http" "$doc_body")" in
+		public) ok "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → 200（可直接访问）" ;;
+		gate-nav) ok "本机 HTTP：GET / → ${doc_http}（门禁生效：浏览器会被引导到登录页）" ;;
+		gate-api)
+			ok "本机 HTTP：GET / → 401（门禁生效：脚本请求未登录返回 401 是预期行为）"
+			;;
+		unreachable) warn "本机 HTTP：连不上 127.0.0.1:${doc_port}（容器没起或端口没监听到）" ;;
+		bridge-down)
+			warn "本机 HTTP：GET / → 401，且正文是 **dsh 自己**的文案 —— 请求穿过门禁却没带上 dsh 的 Cookie"
+			info "这是登录后的 launch-token 桥接没生效（门禁认你、dsh 不认你）。先看："
+			info "  ./dshm service logs | grep -i 'launch-token'"
+			info "或直接用一次性 token 换 Cookie（README 的 FAQ 有完整步骤）："
+			info "  ./dshm service logs | grep 'dsh web:'   # 取 ?token=… 后在浏览器打开 https://<域名>/?token=<那串>"
+			;;
+		*) warn "本机 HTTP：GET / → ${doc_http}（非预期；看 ./dshm service logs | tail -50）" ;;
 		esac
 	fi
 

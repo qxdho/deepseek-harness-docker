@@ -597,19 +597,24 @@ exchanges that for dsh's cookie (the launch-token bridge). When the bridge does 
 back to a plain redirect — you arrive at dsh with only the gate cookie, dsh cannot recognise you, and you
 get this message.
 
-**First thing to try** (usually enough): make the browser log in again, which re-runs the bridge.
-
-```
-https://your-domain/auth/logout       then log in again
-# or clear the site's cookies and revisit
-```
-
-**If it still fails**, exchange the token by hand (tokens are one-time and rotate on restart):
+**First thing to try** (no need to log out first): exchange the one-time token for dsh's cookie directly.
 
 ```bash
 ./dshm service logs | grep "dsh web:"    # copy the ?token=… value
 # then open in the browser: https://your-domain/?token=<that value>
 ```
+
+**Or make the browser log in again** so the bridge runs once more: log out from inside the app, or clear
+the site's cookies and revisit.
+
+> [!NOTE]
+> `/auth/logout` accepts **POST only**. Opening `https://your-domain/auth/logout` in the address bar just
+> returns `405 method not allowed` — that is expected, not a failure. To log out from the browser console
+> instead (run it on the site's page):
+>
+> ```js
+> fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }).then(() => location.reload())
+> ```
 
 **To find out why the bridge failed**, these three warnings each mean a different layer (logged once per
 process):

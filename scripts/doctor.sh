@@ -31,6 +31,29 @@ doctor_classify() {
 	esac
 }
 
+# `GET /` 这一跳的判词。入参：HTTP 状态码、响应正文（前若干字节）。
+#
+# 为什么不能只看状态码：**两个 401 的含义完全相反**。
+#   * dsh-auth-gate 对"非浏览器导航"的未登录请求回 401，正文是它自己的一行 `unauthorized` —— 这是**正常**的（门禁在守卫）；
+#   * dsh 自己的会话门回 401，正文是 `dsh web authentication required; …` —— 这表示请求**穿过了**门禁、
+#     但没带上 dsh 的 Cookie（登录后的 launch-token 桥接没生效）。
+# 只看 401 会把后者当成前者，白白放过线上真实故障。
+doctor_index_verdict() { # <code> <body>
+	local code="$1" body="$2"
+	case "$code" in
+	"" | 000) printf '%s' 'unreachable' ;;   # curl 连不上时给的是 000，不是空
+	200) printf '%s' 'public' ;;
+	30[0-9]) printf '%s' 'gate-nav' ;;
+	401)
+		case "$body" in
+		*dsh\ web\ authentication\ required*) printf '%s' 'bridge-down' ;;
+		*) printf '%s' 'gate-api' ;;
+		esac
+		;;
+	*) printf '%s' 'other' ;;
+	esac
+}
+
 # 直连本机端口的 WS 握手，打印响应首行（拿不到就打印空）
 ws_probe_tcp() { # <host> <port> <path>
 	local host="$1" port="$2" path="$3" line=""

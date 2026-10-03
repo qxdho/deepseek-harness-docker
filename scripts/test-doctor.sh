@@ -51,6 +51,21 @@ check unexpected "莫名其妙的内容" "not-http-at-all"
 check http-denied "410 正文里含 101（只看状态码位置）" "HTTP/1.1 410 Gone (101 bytes)"
 check unexpected "非 HTTP 首行" "upstream closed"
 
+section "1b. doctor_index_verdict 判词（两个 401 含义相反）"
+check_idx() { # <期望> <说明> <code> <body>
+	local want="$1" label="$2" got
+	got="$(doctor_index_verdict "$3" "$4")"
+	[ "$got" = "$want" ] && pass "$label → $got" || fail "$label：期望 $want，实际 $got（code=$3）"
+}
+check_idx public "200（可直接访问）" "200" "<html>"
+check_idx gate-nav "302（门禁引导登录页）" "302" ""
+check_idx gate-api "401 + 门禁自己的 unauthorized（守卫正常）" "401" "unauthorized"
+check_idx bridge-down "401 + dsh 自己的文案（桥接失效）" "401" \
+	"dsh web authentication required; reopen the URL printed by dsh web."
+check_idx unreachable "curl 连不上（000）" "000" ""
+check_idx unreachable "空 code" "" ""
+check_idx other "其它状态码" "500" "boom"
+
 section "2. ws_probe_tcp 直连握手"
 port=$(((RANDOM % 2000) + 21000))
 if command -v node >/dev/null 2>&1; then

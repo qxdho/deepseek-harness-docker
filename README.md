@@ -558,6 +558,45 @@ server {
 </details>
 
 <details>
+<summary><b>页面显示 <code>dsh web authentication required; reopen the URL printed by dsh web.</code>？</b></summary>
+
+<br/>
+
+这是 **dsh 自己**的 401 文案（不是登录门禁的）。它出现说明请求**已经通过了** dsh-auth-gate
+（也就是你的门禁会话有效），但没有带上 dsh 自己的会话 Cookie。
+
+原因是这条链路：门禁登录成功后，会 302 到 `/?token=<dsh 一次性 token>`，由浏览器自动把它换成
+dsh 的 Cookie（launch-token 桥接）。桥接没生效时，它退化成"直接跳回原路径"，于是你带着门禁
+Cookie 进到 dsh，而 dsh 认不出你 —— 就是这句话。
+
+**先这样做**（多半就好了）：让浏览器**重新登录一次**，重新触发桥接。
+
+```
+https://你的域名/auth/logout        然后重新登录
+# 或者清掉该站点的 Cookie 后再访问
+```
+
+**仍然不行**时手动换一次（token 是一次性的，容器重启会换新的）：
+
+```bash
+./dshm service logs | grep "dsh web:"    # 取出 ?token=... 那串
+# 然后在浏览器里打开： https://你的域名/?token=<那串>
+```
+
+**排查桥为什么失效**：日志里下面三条告警各对应一种原因（每条每进程只打一次）：
+
+| 日志 | 含义 |
+|---|---|
+| `launch-token bridge inactive: no connection.authenticatedUrl` | dsh 没提供 `connection` 服务（版本不匹配，或 `credentials` 服务没起来） |
+| `launch-token bridge unavailable: authenticatedUrl returned no token` | 拿得到服务但取不到启动 token |
+| `launch-token bridge unavailable: <message>` | 调用抛错（消息里有原因） |
+
+`.credentials.yaml` 权限不对会让 `credentials` → `connection` 服务起不来，桥自然失效 ——
+见上面那条权限 FAQ。
+
+</details>
+
+<details>
 <summary><b>浏览器控制台一直刷 <code>WebSocket connection to 'wss://…/api/remote.mux' failed</code>？</b></summary>
 
 <br/>

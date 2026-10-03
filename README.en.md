@@ -585,6 +585,47 @@ The log now carries request context so the two are distinguishable:
 </details>
 
 <details>
+<summary><b>The page shows <code>dsh web authentication required; reopen the URL printed by dsh web.</code></b></summary>
+
+<br/>
+
+That is **dsh's own** 401 text, not the login gate's. Seeing it means the request already **passed**
+dsh-auth-gate (your gate session is valid) but carried no dsh session cookie of its own.
+
+The chain is: after a successful login the gate 302s to `/?token=<dsh one-time token>`, and the browser
+exchanges that for dsh's cookie (the launch-token bridge). When the bridge does not fire, the gate falls
+back to a plain redirect — you arrive at dsh with only the gate cookie, dsh cannot recognise you, and you
+get this message.
+
+**First thing to try** (usually enough): make the browser log in again, which re-runs the bridge.
+
+```
+https://your-domain/auth/logout       then log in again
+# or clear the site's cookies and revisit
+```
+
+**If it still fails**, exchange the token by hand (tokens are one-time and rotate on restart):
+
+```bash
+./dshm service logs | grep "dsh web:"    # copy the ?token=… value
+# then open in the browser: https://your-domain/?token=<that value>
+```
+
+**To find out why the bridge failed**, these three warnings each mean a different layer (logged once per
+process):
+
+| Log line | Meaning |
+|---|---|
+| `launch-token bridge inactive: no connection.authenticatedUrl` | dsh exposes no `connection` service (version mismatch, or the `credentials` service never came up) |
+| `launch-token bridge unavailable: authenticatedUrl returned no token` | service present, but no launch token available |
+| `launch-token bridge unavailable: <message>` | the call threw (the message carries the reason) |
+
+Wrong `.credentials.yaml` permissions keep the `credentials` → `connection` services from starting, which
+kills the bridge — see the permissions entry above.
+
+</details>
+
+<details>
 <summary><b>The browser console keeps repeating <code>WebSocket connection to 'wss://…/api/remote.mux' failed</code>.</b></summary>
 
 <br/>

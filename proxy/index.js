@@ -225,7 +225,14 @@ const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 
 // 上游响应超时（毫秒）。没有它的话：dsh 卡住或半死不活（接了 TCP 但不回包）时，
 // 客户端会一直挂着 —— 浏览器的转圈永远不停，nginx 那边的 60s 也只能回 504，
-// 而代理自己一直占着连接与 socket。给一个明确上限，超时就回 504。
+// 而代理自己一直占着连接与 socket。给一个明确上限。
+//
+// 注意实际表现：超时走的是 `proxyReq.abort()`，本次请求的 socket 已被销毁，
+// 所以**客户端拿到的是 ECONNRESET，拿不到任何状态码**（不是 502/504）。
+// 由 test-sse.js 的第 8 条断言锁定，别再照抄"超时返回 5xx"的说法。
+//
+// **它只能用来判"响应迟迟不开始"，不能用来判"响应还没结束"**：
+// 见 clearProxyTimeout 的注释。
 const PROXY_TIMEOUT_MS = Number(process.env.DSH_PROXY_TIMEOUT_MS || 120000);
 
 const proxy = httpProxy.createProxyServer({
@@ -236,6 +243,51 @@ const proxy = httpProxy.createProxyServer({
   proxyTimeout: PROXY_TIMEOUT_MS,
   timeout: PROXY_TIMEOUT_MS,
 });
+
+/**
+ * 判定一个响应是不是"长连接流"——即**空闲是它的正常状态**。
+ *
+ * 为什么必须把它和超时区分开：http-proxy 的 `proxyTimeout` 实现是
+ *
+ *     proxyReq.setTimeout(ms, () => proxyReq.abort())
+ *
+ * 这是**按 socket 空闲**触发的，完全不看响应是不是已经开始流出去了。于是：
+ *   - 普通请求：上游 120s 不回 → 掐断（客户端收到 ECONNRESET）。这是我们要的。
+ *   - SSE/流式响应：连上后本来就会长时间静默（dsh 的 /plugins/events
+ *     在插件图不变时一个字都不发）→ 被当成"卡住"掐断。
+ *
+ * 症状是浏览器侧 /plugins/events 反复 ERR_HTTP2_PROTOCOL_ERROR / ERR_CONNECTION_RESET
+ * 并无限重连；而**普通请求的用例全都照样通过**，所以只有专门的长连接用例抓得到
+ * （见 test-sse.js）。
+ *
+ * 判定用两条例：
+ *   1. content-type 是 text/event-stream（SSE，dsh 的热更新通道走这条）；
+ *   2. 响应没有 content-length 且是 200 —— 分块流，长度事先未知，
+ *      典型就是 WebSocket 之外的各类实时推送。
+ * 保守起见只认这两条：宁可漏判（退化成现在的行为），也不要把本该超时的
+ * 普通请求放过。`text/html` 之类的常规响应不在此列。
+ */
+function isStreamingResponse(proxyRes) {
+  const type = String(proxyRes.headers['content-type'] || '');
+  if (/text\/event-stream/i.test(type)) return true;
+  const hasLength = proxyRes.headers['content-length'] !== undefined;
+  return proxyRes.statusCode === 200 && !hasLength;
+}
+
+/**
+ * 响应确实在流式输出后，取消上游请求上的空闲超时。
+ *
+ * `proxyRes.req` 是 http-proxy 内部创建的 ClientRequest —— 也就是被
+ * `proxyReq.setTimeout(...)` 装了 abort 计时器的那个对象。把它置回 0
+ * 就移除了空闲计时器，同时**不破坏"上游迟迟不响应就超时"的保护**：
+ * 那时还没有 proxyRes，也就走不到这里。
+ */
+function clearProxyTimeout(proxyRes) {
+  const req = proxyRes && proxyRes.req;
+  if (req && typeof req.setTimeout === 'function') {
+    req.setTimeout(0);
+  }
+}
 
 proxy.on('proxyReq', (proxyReq, req) => {
   setForwardHeaders(proxyReq, req);
@@ -270,6 +322,16 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
     proxyRes.statusCode === 204 || proxyRes.statusCode === 304 ||
     proxyRes.statusCode === 206 ||
     proxyRes.headers['content-range'] !== undefined;
+
+  // 流式响应（SSE 等）空闲是正常的，不能套用"响应迟迟不开始"的超时。
+  if (isStreamingResponse(proxyRes)) {
+    clearProxyTimeout(proxyRes);
+    // 客户端方向同理：http-proxy 的 `timeout` 会 req.socket.setTimeout(ms)，
+    // 长连接空闲时同样会误伤。置 0 移除此计时器。
+    if (req.socket && typeof req.socket.setTimeout === 'function') {
+      req.socket.setTimeout(0);
+    }
+  }
 
   if (!isHtml || noBody) {
     passthrough(proxyRes, res);

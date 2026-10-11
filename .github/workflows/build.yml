@@ -594,7 +594,18 @@ jobs:
           # `|| exit` 不能省：cd 失败时若不退出，npm install 会在错误目录里执行（shellcheck SC2164）。
           cd proxy || exit 1
           npm install --omit=dev --no-fund --no-audit
-          node test-inject.js
+          # 跑 proxy/ 下所有 test-*.js，别写死单个文件：
+          # 写死的话新加的用例（如 test-sse.js）在 CI 里根本不会执行。
+          shopt -s nullglob
+          files=(test-*.js)
+          shopt -u nullglob
+          [ ${#files[@]} -gt 0 ] || { echo "::error::proxy/ 下没有 test-*.js"; exit 1; }
+          rc=0
+          for f in "${files[@]}"; do
+            echo "--- $f"
+            node "$f" || rc=1
+          done
+          exit $rc
   # 管理面板二进制。安装脚本从 releases/latest/download/... 拉取，所以**必须**在推
   # main 时也发布 —— 只在打 tag 时发的话，没有 tag 的仓库永远没有可下载的产物，
   # `dshm admin install` 就会一路回退到「本机 Go 构建」并最终失败。

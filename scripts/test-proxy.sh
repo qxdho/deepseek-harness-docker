@@ -34,26 +34,21 @@ if [ ! -d "$root/proxy/node_modules/http-proxy" ]; then
 	fi
 fi
 
-# `|| true` 是为了拿到输出后自己判定：test-inject.js 崩了也会退出非 0，
+# `|| true` 是为了拿到输出后自己判定：测试脚本崩了也会退出非 0，
 # 而我们要分辨"有断言失败"与"根本没跑起来"。
-out="$(cd "$root/proxy" && node test-inject.js 2>&1)" || true
-# test-inject.js 自己打印 PASS=n FAIL=m，转成 test-lib 的计数
-p="$(printf '%s' "$out" | grep -oE 'PASS=[0-9]+' | tail -1 | cut -d= -f2 || true)"
-f="$(printf '%s' "$out" | grep -oE 'FAIL=[0-9]+' | tail -1 | cut -d= -f2 || true)"
-if [ -z "$p" ]; then
-	# 拿不到结果 = 脚本没跑完（语法错误、依赖缺失、端口占用…），必须算失败，
-	# 但要把原始输出带出来，否则只看到一句"没有输出结果"无从下手。
-	fail "代理测试没能跑完（未输出 PASS=n）：$(printf '%s' "$out" | tail -4 | tr '\n' ' ')"
-else
-	PASS=$((PASS + p))
-	FAIL=$((FAIL + f))
-	if [ "$f" = "0" ]; then
-		pass "代理测试全部通过（$p 条）"
-	else
-		fail "代理测试有 $f 条失败"
-		printf '%s\n' "$out" | grep -E 'FAIL' | sed 's/^/     /' >&2
-	fi
-fi
+#
+# 跑 proxy/ 下所有 test-*.js：新增一个用例文件就自动被跑到，不用再来改这里。
+# （原来只写死 test-inject.js，于是新加的 test-sse.js 不会被执行 —— 又是一个
+#  "本地全绿、CI 红"的口子。）
+shopt -s nullglob
+files=("$root"/proxy/test-*.js)
+shopt -u nullglob
+if [ ${#files[@]} -eq 0 ]; then
+	fail "proxy/ 下没有找到 test-*.js"
+	run_tests
+	exit 0
+ fi
+
 # 启动代理并**真实转发一次请求**时，不能出现与使用者无关的弃用警告。
 #
 # http-proxy 内部调用 Node 已废弃的 `util._extend`，而且是在**转发请求**时调用
@@ -90,5 +85,26 @@ kill "$dep_pid" "$dep_up" 2>/dev/null || true
 wait "$dep_pid" "$dep_up" 2>/dev/null || true
 rm -f "$dep_log"
 
+for file in "${files[@]}"; do
+	name="$(basename "$file")"
+	out="$(cd "$root/proxy" && node "$name" 2>&1)" || true
+	# 测试脚本自己打印 PASS=n FAIL=m，转成 test-lib 的计数
+	p="$(printf '%s' "$out" | grep -oE 'PASS=[0-9]+' | tail -1 | cut -d= -f2 || true)"
+	f="$(printf '%s' "$out" | grep -oE 'FAIL=[0-9]+' | tail -1 | cut -d= -f2 || true)"
+	if [ -z "$p" ]; then
+		# 拿不到结果 = 脚本没跑完（语法错误、依赖缺失、端口占用…），必须算失败，
+		# 但要把原始输出带出来，否则只看到一句"没有输出结果"无从下手。
+		fail "代理测试 $name 没能跑完（未输出 PASS=n）：$(printf '%s' "$out" | tail -4 | tr '\n' ' ')"
+	else
+		PASS=$((PASS + p))
+		FAIL=$((FAIL + f))
+		if [ "$f" = "0" ]; then
+			pass "代理测试 $name 全部通过（$p 条）"
+		else
+			fail "代理测试 $name 有 $f 条失败"
+			printf '%s\n' "$out" | grep -E 'FAIL' | sed 's/^/     /' >&2
+		fi
+	fi
+done
 rm -f /tmp/test-proxy-npm.log
 run_tests

@@ -19,9 +19,9 @@ ARG NODE_IMAGE=node:24-bookworm-slim
 
 # ── 阶段 1：安装 dsh 并预置插件 ─────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
-ARG DSH_VERSION=0.2.1-rc.2
+ARG DSH_VERSION=0.2.1-rc.5
 ARG PNPM_VERSION=11.7.0
-ARG DSH_AUTH_GATE_VERSION=0.17.4
+ARG DSH_AUTH_GATE_VERSION=0.18.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 # node-pty 在 Linux 没有预编译产物，安装 dsh 时会用 node-gyp 现场编译

@@ -148,4 +148,24 @@ if [ -x "$(dirname "$0")/smoke-plugin.sh" ]; then
 fi
 
 echo
+# 失败时把容器日志和插件图打出来。冒烟只跑在 CI 里，失败却没日志等于还要再猜一轮：
+# 2026-11-05 那次（dsh 0.2.2-rc.1 + auth-gate 0.18.0）只看到「登录页 404」，
+# 分不清是插件没进图、还是进了图但 apply 抛错 —— 两者的修法完全不同。
+if [ "$FAIL" != "0" ]; then
+	echo
+	echo "== 失败诊断：容器日志（末 80 行）=="
+	docker logs "$NAME" 2>&1 | tail -80 || true
+	echo
+	echo "== 失败诊断：登录门禁是否进了插件图 =="
+	docker exec "$NAME" sh -lc '
+		home="${DSH_HOME:-/dsh}"
+		echo "DSH_HOME=$home"
+		echo "--- profile 的 bundle 列表 ---"
+		grep -o "dsh-auth-gate" "$home/profiles/web/package.json" 2>/dev/null | head -1 || echo "(package.json 里没有 dsh-auth-gate)"
+		echo "--- 插件目录 ---"
+		ls "$home/profiles/web/node_modules/dsh-auth-gate/lib/index.js" 2>&1
+		echo "--- 生成的 cordis.patch.yml ---"
+		head -12 "$home/profiles/web/cordis.patch.yml" 2>&1
+	' 2>&1 || true
+fi
 run_tests

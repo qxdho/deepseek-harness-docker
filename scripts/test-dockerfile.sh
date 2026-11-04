@@ -180,4 +180,16 @@ grep -qE '^[[:space:]]*USER[[:space:]]' <<<"$LOGICAL" && pass "设置了 USER" |
 grep -qE '^[[:space:]]*ENTRYPOINT[[:space:]]' <<<"$LOGICAL" && pass "设置了 ENTRYPOINT" || fail "缺少 ENTRYPOINT"
 grep -qE '^[[:space:]]*HEALTHCHECK[[:space:]]' <<<"$LOGICAL" && pass "设置了 HEALTHCHECK" || fail "缺少 HEALTHCHECK"
 
+# entrypoint 依赖的辅助脚本必须真的进了镜像：sync-gate.sh 缺失时那个 `-x` 判断会
+# 静默跳过同步（门禁不升级），healthcheck.sh 缺失时容器永远 unhealthy。两者都不报错，
+# 只能靠这里钉住。
+for helper in scripts/sync-gate.sh scripts/healthcheck.sh; do
+	# 用 -F 而不是正则：路径里有 `/` 和 `.`，正则要转义；`\Q…\E` 在 grep -E 下不通用。
+	if printf '%s\n' "$LOGICAL" | grep -qF "COPY $helper "; then
+		pass "镜像里包含 $helper"
+	else
+		fail "镜像里缺少 $helper"
+	fi
+done
+
 run_tests

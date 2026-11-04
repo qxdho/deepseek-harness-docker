@@ -43,6 +43,8 @@ services:
       PROXY_PORT: 3080
       # off | optional | required
       DSH_AUTH_TOTP: ${DSH_AUTH_TOTP:-optional}
+      # auto | off —— 升级镜像时是否把卷里的登录插件同步成镜像版本（规则见 DESIGN §12.5）
+      DSH_GATE_SYNC: ${DSH_GATE_SYNC:-auto}
       # 走 HTTPS 时设为 1（否则会话 cookie 不带 Secure）
       DSH_COOKIE_SECURE: ${DSH_COOKIE_SECURE:-0}
       # 登录页显示的域名，例如 dsh.example.com；留空则显示回环地址

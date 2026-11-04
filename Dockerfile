@@ -17,7 +17,15 @@
 
 # 基础镜像。dsh 自己声明了 node 引擎下界（0.2.2-rc.1 起是 >=24.9.0），
 # 所以别把它换回 node:22 之类的旧主版本，构建会在装包阶段被 engines 检查拦下。
-ARG NODE_IMAGE=node:24-bookworm-slim
+#
+# **钉 digest，不用浮动 tag**：`node:24-bookworm-slim` 平时会指向不同的层，
+# 同一个 commit 隔一周构建出来就不是同一个镜像了（排查"昨天还好"的问题时最难受）。
+# 想跟进基础镜像的安全更新时，手动刷新一次：
+#   T=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull" | sed 's/.*"token":"\([^"]*\)".*/\1/')
+#   curl -sI -H "Authorization: Bearer $T" -H "Accept: application/vnd.oci.image.index.v1+json" \
+#     https://registry-1.docker.io/v2/library/node/manifests/24-bookworm-slim | grep -i docker-content-digest
+# 然后把下面这串换掉。（digest 是**索引**的，amd64/arm64 都适用。）
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 
 # ── 阶段 1：安装 dsh 并预置插件 ─────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
@@ -142,8 +150,10 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY proxy/index.js /app/proxy/index.js
 
 COPY entrypoint.sh /app/entrypoint.sh
+# 启动时用来把卷里的登录门禁跟上镜像版本（规则见脚本头部注释）。
+COPY scripts/sync-gate.sh /app/scripts/sync-gate.sh
 COPY scripts/healthcheck.sh /usr/local/bin/dsh-healthcheck
-RUN chmod 0755 /app/entrypoint.sh /usr/local/bin/dsh-healthcheck
+RUN chmod 0755 /app/entrypoint.sh /app/scripts/sync-gate.sh /usr/local/bin/dsh-healthcheck
 
 # 让空命名卷/空 bind mount 首启就有可用的已装插件 profile
 # 注意：/workspace 的这次 chown 只对「命名卷」有效。生产用的是 bind mount

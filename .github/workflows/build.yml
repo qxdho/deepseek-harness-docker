@@ -219,6 +219,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 和 amd64 一样：先本地构建跑冒烟，过了才推。arm 上要现场编译 node-pty、
+      # 跑 Landlock、判 uid —— 这些全是架构相关的，不在这边冒烟等于只验了一半。
+      # 第二次构建（--push）会命中同一条 gha 缓存，多花的只有冒烟那一分钟。
+      - name: 构建 arm64（仅本地，用于冒烟）
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --load \
+            --tag dsh-test:smoke \
+            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
+            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --cache-from type=gha,scope=arm64 \
+            --cache-to type=gha,scope=arm64,mode=max \
+            .
+
+      - name: 冒烟测试
+        run: ./scripts/smoke-test.sh dsh-test:smoke
+
       - name: 构建并推送 arm64（供合并）
         run: |
           docker buildx build \
@@ -325,13 +343,15 @@ jobs:
           done <<< "$TAGS"
           echo "多平台 manifest 已生成"
 
-  # 清理合并用的单架构 tag（:amd64-<sha> / :arm64-<sha>）。
+  # 清理合并用的单架构 tag（:amd64-<run id> / :arm64-<run id>）。
   #
-  # 单独一个作业、并用 needs 保证**只在合并成功后**才删：合并失败时留着这些 tag
-  # 还能手动排查/补救；成功后它们就没用了，留着会每次构建多堆两个。
+  # **必须 always()**：失败/被取消的构建同样会推出这两个中间 tag（冒烟挂掉时
+  # amd64 那个可能还没推，但 arm64 已经推了）。以前只在合并成功后清，失败的 tag
+  # 就永久堆在 GHCR —— 实测残留过 arm64-41867041930、arm64-41868680319 两条。
+  # 排查不依赖 registry 上那张图：同一个 commit 重跑一次就能复现。
   cleanup-staging:
     needs: [merge-manifests]
-    if: needs.merge-manifests.result == 'success'
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       packages: write

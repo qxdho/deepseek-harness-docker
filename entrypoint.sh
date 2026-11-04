@@ -36,6 +36,8 @@ die() { log "ERROR: $*"; exit 1; }
 SEED=/opt/dsh-seed
 PROFILE="$DSH_HOME/profiles/web"
 WEB_LOG=/tmp/dsh-web.log
+# 脚本自身所在目录（镜像里是 /app）：随镜像一起发布的辅助脚本都从这里调。
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="${DSH_WORKSPACE_CONTAINER:-/workspace}"
 
 # 宿主机上的数据目录路径：compose 的 env_file 会把 DSH_HOME_HOST 传进来。有了它，
@@ -161,6 +163,17 @@ if [ ! -f "$PROFILE/package.json" ]; then
 fi
 if [ ! -f "$PROFILE/node_modules/dsh-auth-gate/lib/cli.js" ]; then
   die "profile 里没有 dsh-auth-gate，请重建镜像或执行 dsh plugin --profile web add dsh-auth-gate"
+fi
+
+# 升级镜像时让卷里的登录门禁跟上镜像版本。
+#
+# 上面的播种只在「卷里没有 package.json」时发生，所以老用户升级镜像后 dsh 换了、
+# 门禁还是旧的；而下面又会把 peer 软链指向新镜像的 cordis —— 旧插件配新框架，
+# 0.2.2-rc.1 那次「插件 apply 抛错、门禁消失、容器却 healthy」就是这么来的。
+# 判定规则（人动过就不碰）全在脚本里；这里只负责调用，出错也不阻断启动。
+if [ -x "$APP_DIR/scripts/sync-gate.sh" ]; then
+  "$APP_DIR/scripts/sync-gate.sh" "$SEED/profiles/web" "$PROFILE" "$DSH_HOME/.gate-managed-version" ||
+    log "登录门禁同步跳过（脚本出错，继续用卷里的版本）"
 fi
 
 # pnpm 把 store 位置记在 node_modules/.modules.yaml，运行期每次装插件都拿它跟当前

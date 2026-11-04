@@ -21,7 +21,7 @@ ARG NODE_IMAGE=node:24-bookworm-slim
 
 # ── 阶段 1：安装 dsh 并预置插件 ─────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
-ARG DSH_VERSION=0.2.2-rc.1
+ARG DSH_VERSION=0.2.1-rc.5
 ARG PNPM_VERSION=11.7.0
 ARG DSH_AUTH_GATE_VERSION=0.18.0
 ENV DEBIAN_FRONTEND=noninteractive

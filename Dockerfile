@@ -15,13 +15,15 @@
 #     它不做鉴权。
 #   * 不改 dsh 任何文件。dsh 升级不会让代理或补丁失效。
 
+# 基础镜像。dsh 自己声明了 node 引擎下界（0.2.2-rc.1 起是 >=24.9.0），
+# 所以别把它换回 node:22 之类的旧主版本，构建会在装包阶段被 engines 检查拦下。
 ARG NODE_IMAGE=node:24-bookworm-slim
 
 # ── 阶段 1：安装 dsh 并预置插件 ─────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
-ARG DSH_VERSION=0.2.1-rc.2
+ARG DSH_VERSION=0.2.2-rc.1
 ARG PNPM_VERSION=11.7.0
-ARG DSH_AUTH_GATE_VERSION=0.17.4
+ARG DSH_AUTH_GATE_VERSION=0.18.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 # node-pty 在 Linux 没有预编译产物，安装 dsh 时会用 node-gyp 现场编译

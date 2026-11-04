@@ -26,9 +26,9 @@ const http = require("node:http");
 const port = Number(process.argv[1]);
 http.createServer((q, r) => {
   const p = decodeURIComponent(q.url);
-  let v = "9.9.9";
-  if (p.includes("dsh-auth-gate")) v = "9.8.8";
-  if (p.includes("pnpm")) v = "9.7.7";
+  let v = "99.9.9";
+  if (p.includes("dsh-auth-gate")) v = "99.8.8";
+  if (p.includes("pnpm")) v = "99.7.7";
   r.writeHead(200, { "content-type": "application/json" });
   r.end(JSON.stringify({ "dist-tags": { latest: v } }));
 }).listen(port, "127.0.0.1");
@@ -85,7 +85,7 @@ fi
 # ── 写入模式 ──────────────────────────────────────────────────────────────
 upd >"$tmp/write.out" 2>&1 || true
 d="$(pin DSH_VERSION)"
-if [ "$d" = "9.9.9" ]; then
+if [ "$d" = "99.9.9" ]; then
 	pass "写入后 Dockerfile 的 DSH_VERSION 变成假 registry 的值"
 else
 	fail "Dockerfile 未被更新，实际 '${d}'"
@@ -108,7 +108,7 @@ e2="$(env_val DSH_AUTH_GATE_VERSION)"
 # 实际是 .env.example 那一项被留在了旧值 —— 静默的三处不一致：
 # 用户照 .env.example 复制出 .env 后，docker compose build 会把旧值当 build-arg
 # 传进去、覆盖 Dockerfile 的新默认值。绿测把雷盖住了。
-if [ "$d2" = "9.8.8" ] && [ "$d2" = "$c2" ] && [ "$d2" = "$e2" ]; then
+if [ "$d2" = "99.8.8" ] && [ "$d2" = "$c2" ] && [ "$d2" = "$e2" ]; then
 	pass "auth-gate 版本被更新且三处一致（$d2）"
 else
 	fail "auth-gate 不一致：Dockerfile=$d2 compose=$c2 .env.example=$e2"
@@ -129,7 +129,7 @@ case "$(cat "$tmp/again.out")" in
 esac
 
 # ── pnpm 有意不自动改，且不应触发 --check 的退出码 1 ──────────────────────
-# 此时只剩 pnpm 有新版（假 registry 里 pnpm=9.7.7，而仓库钉的是 11.7.0）。
+# 此时只剩 pnpm 有新版（假 registry 里 pnpm=99.7.7，而仓库钉的是 11.7.0）。
 # 若 --check 仍返回 1，定时任务会因为构建工具的小版本更新反复开空 PR。
 set +e
 upd --check >"$tmp/pnpm.out" 2>&1
@@ -145,11 +145,81 @@ case "$(cat "$tmp/pnpm.out")" in
 *) fail "pnpm 条目缺少「不自动改」提示" ;;
 esac
 p="$(pin PNPM_VERSION)"
-if [ "$p" != "9.7.7" ]; then
+if [ "$p" != "99.7.7" ]; then
 	pass "pnpm 版本确实未被改动（仍是 $p）"
 else
 	fail "pnpm 被自动改了（不应改）"
 fi
+
+# ── 降级保护：latest 比现值旧时保持不动 ──────────────────────────────────
+# 仓库可能刻意钉在比 latest 更新的构建上（例如 latest 还停在 0.2.1-rc.5，而我们已经
+# 用上 0.2.2-rc.1）。旧写法只判断「不相等就写」，定时任务会开出一个把版本降回去的 PR。
+port_old=$((port + 1))
+node -e '
+const http = require("node:http");
+http.createServer((q, r) => {
+  r.writeHead(200, { "content-type": "application/json" });
+  r.end(JSON.stringify({ "dist-tags": { latest: "0.0.1" } }));
+}).listen(Number(process.argv[1]), "127.0.0.1");
+' "$port_old" &
+srv_old=$!
+sleep 1
+upd_old() { DSH_UPDATE_REPO_ROOT="$repo" DSH_NPM_REGISTRY="http://127.0.0.1:$port_old" "$here/update-versions.sh" "$@"; }
+
+before_gt="$(pin DSH_VERSION)"
+set +e
+upd_old --check >"$tmp/old.out" 2>&1
+rc_old=$?
+set -e
+if [ "$rc_old" = "0" ]; then
+	pass "latest 更旧时 --check 返回 0（不报可更新）"
+else
+	fail "latest 更旧时 --check 应返回 0，实际 $rc_old"
+fi
+case "$(cat "$tmp/old.out")" in
+*"保持不动"*) pass "latest 更旧时明确提示「保持不动」" ;;
+*) fail "latest 更旧时缺少「保持不动」提示：$(cat "$tmp/old.out")" ;;
+esac
+upd_old >"$tmp/old-apply.out" 2>&1 || true
+if [ "$(pin DSH_VERSION)" = "$before_gt" ]; then
+	pass "latest 更旧时不会把版本降回去（${before_gt} 保持不变）"
+else
+	fail "latest 更旧时把版本改成了 $(pin DSH_VERSION)（降级了）"
+fi
+if [ "$(pin DSH_AUTH_GATE_VERSION)" = "$(env_val DSH_AUTH_GATE_VERSION)" ]; then
+	pass "降级保护下三处仍一致"
+else
+	fail "降级保护下三处不一致"
+fi
+kill "$srv_old" 2>/dev/null || true
+
+# ── 正式版必须能盖过同号预发布（sort -V 在这里会判错）────────────────────
+# 用 `sort -V` 比较时 `1.0.0-rc.1` 排在 `1.0.0` **之后**，于是正式版发布后自动任务
+# 会以为现值更新、永远不跟进。这里钉死这个方向：现值 1.0.0-rc.1、latest 1.0.0 => 要更新。
+port_rel=$((port + 2))
+node -e '
+const http = require("node:http");
+http.createServer((q, r) => {
+  r.writeHead(200, { "content-type": "application/json" });
+  r.end(JSON.stringify({ "dist-tags": { latest: "1.0.0" } }));
+}).listen(Number(process.argv[1]), "127.0.0.1");
+' "$port_rel" &
+srv_rel=$!
+sleep 1
+rel_repo="$tmp/rel"
+cp -r "$repo" "$rel_repo"
+sed -i 's/^ARG DSH_VERSION=.*/ARG DSH_VERSION=1.0.0-rc.1/' "$rel_repo/Dockerfile"
+sed -i 's/^DSH_VERSION=.*/DSH_VERSION=1.0.0-rc.1/' "$rel_repo/.env.example"
+sed -i 's/DSH_VERSION: ${DSH_VERSION:-[^}]*}/DSH_VERSION: ${DSH_VERSION:-1.0.0-rc.1}/' "$rel_repo/docker-compose.yml"
+DSH_UPDATE_REPO_ROOT="$rel_repo" DSH_NPM_REGISTRY="http://127.0.0.1:$port_rel" \
+	"$here/update-versions.sh" >"$tmp/rel.out" 2>&1 || true
+rel_pin="$(awk -F= -v k="ARG DSH_VERSION=" 'index($0,k)==1{print substr($0,length(k)+1)}' "$rel_repo/Dockerfile")"
+if [ "$rel_pin" = "1.0.0" ]; then
+	pass "正式版 1.0.0 能盖过同号预发布 1.0.0-rc.1（不会卡住不跟进）"
+else
+	fail "正式版没能盖过预发布：现值仍是 $rel_pin"
+fi
+kill "$srv_rel" 2>/dev/null || true
 
 # ── registry 不可达时必须保留现值，不能写空 ──────────────────────────────
 bad_repo="$tmp/bad"
@@ -236,7 +306,7 @@ else
 fi
 # 端到端：格式漂移时必须非 0 退出并说明哪一项没写全（而不是开出一个空 PR）
 #
-# 构造：把三个文件的钉住值都改成 9.9.8（假 registry 报 9.9.9，所以「有可更新项」），
+# 构造：把三个文件的钉住值都改成 9.9.8（假 registry 报 99.9.9，所以「有可更新项」），
 # 再把 compose 里的 `${DSH_VERSION:-...}` 换成写死的值 —— 正则匹配不上，即格式漂移。
 # 此时 Dockerfile 与 .env.example 仍应被正常写入（不能因为一处不匹配就整体不干活）。
 drift_repo="$tmp/drift"
@@ -269,8 +339,8 @@ else
 	fail "没提示格式漂移：$(tail -2 "$tmp/drift.out" | tr '\n' ' ')"
 fi
 # 匹配得上的那两个文件仍应被写入
-if grep -q '^ARG DSH_VERSION=9.9.9$' "$drift_repo/Dockerfile" &&
-	grep -q '^DSH_VERSION=9.9.9$' "$drift_repo/.env.example"; then
+if grep -q '^ARG DSH_VERSION=99.9.9$' "$drift_repo/Dockerfile" &&
+	grep -q '^DSH_VERSION=99.9.9$' "$drift_repo/.env.example"; then
 	pass "匹配得上的文件仍被写入新值"
 else
 	fail "匹配得上的文件没被写入"

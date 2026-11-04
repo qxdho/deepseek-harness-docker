@@ -68,6 +68,61 @@ npm_latest() {
 	fi
 }
 
+# $1 是否严格比 $2 新（semver，含预发布）。
+#
+# 为什么需要它：仓库可能刻意钉在**比 latest 更新的构建**上（例如 latest 还停在
+# 0.2.1-rc.5，而已知 0.2.2-rc.1 没问题就先用上了）。定时任务若照旧"只要不相等就写"，
+# 会开出一个把版本降回去的 PR —— 那从来不是自动更新该做的事，降级只能手动做。
+#
+# 为什么不用 `sort -V`：它把 `1.0.0-rc.1` 排在 `1.0.0` **之后**（预发布当成更新的后缀），
+# 于是正式版发布后自动任务会认为"现值更新"，永远不跟进。这里按 semver 规则比：
+# 拆 core 与 prerelease，core 逐段比数字；core 相同则**没有 prerelease 的更大**；
+# 都有 prerelease 时逐段比，数字段按数值、字母段按字典序，数字段小于字母段。
+#
+# 没有 node 时退回 `sort -V`（近似，预发布与正式版共存时会判错，仅作兜底）。
+ver_gt() {
+	local a="$1" b="$2"
+	[ "$a" = "$b" ] && return 1
+	if command -v node >/dev/null 2>&1; then
+		node -e '
+			const parse = (v) => {
+				const i = v.indexOf("-");
+				const core = (i < 0 ? v : v.slice(0, i)).split(".").map(Number);
+				const pre = i < 0 ? null : v.slice(i + 1).split(".");
+				return { core, pre };
+			};
+			const cmpNum = (x, y) => (x > y ? 1 : x < y ? -1 : 0);
+			const a = parse(process.argv[1]);
+			const b = parse(process.argv[2]);
+			for (let i = 0; i < Math.max(a.core.length, b.core.length); i += 1) {
+				const r = cmpNum(a.core[i] || 0, b.core[i] || 0);
+				if (r !== 0) process.exit(r > 0 ? 0 : 1);
+			}
+			if (a.pre === null || b.pre === null) {
+				if (a.pre === null && b.pre === null) process.exit(1); // 相等
+				process.exit(a.pre === null ? 0 : 1);                 // 正式版 > 预发布
+			}
+			for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i += 1) {
+				if (i >= a.pre.length) process.exit(1);
+				if (i >= b.pre.length) process.exit(0);
+				const x = a.pre[i], y = b.pre[i];
+				const nx = /^\d+$/.test(x), ny = /^\d+$/.test(y);
+				if (nx && ny) {
+					const r = cmpNum(Number(x), Number(y));
+					if (r !== 0) process.exit(r > 0 ? 0 : 1);
+				} else if (nx !== ny) {
+					process.exit(nx ? 1 : 0); // 数字段 < 字母段
+				} else if (x !== y) {
+					process.exit(x > y ? 0 : 1);
+				}
+			}
+			process.exit(1);
+		' "$a" "$b" 2>/dev/null
+	else
+		[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n1)" = "$a" ]
+	fi
+}
+
 # 当前钉住的版本：从 Dockerfile 的 ARG 读（它是唯一的真源，compose 与 .env.example
 # 只是它的镜像）。
 #
@@ -171,6 +226,13 @@ for entry in "${ENTRIES[@]}"; do
 
 	if [ "$old" = "$new" ]; then
 		printf '%-26s %-14s %-14s %s\n' "$name" "$old" "$new" "已最新"
+		continue
+	fi
+
+	# 只在**确实更新**时跟进。latest 比现值旧 => 仓库刻意钉在更新的构建上，
+	# 保持不动（否则定时任务会开出一个把版本降回去的 PR）。理由与比较规则见 ver_gt。
+	if ! ver_gt "$new" "$old"; then
+		printf '%-26s %-14s %-14s %s\n' "$name" "$old" "$new" "本地更靠前，保持不动"
 		continue
 	fi
 

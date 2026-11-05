@@ -169,7 +169,7 @@ migrate_legacy_keys >/dev/null
 [ "$(get_env DSH_WORKSPACE_HOST)" = "/root/ws" ] && pass "DSH_WORKSPACE → DSH_WORKSPACE_HOST" || fail "工作区未迁移"
 [ "$(get_env DSH_HOME_CONTAINER)" = "/home/node/.dsh" ] && pass "DSH_HOME → DSH_HOME_CONTAINER" || fail "数据目录未迁移"
 [ "$(get_env DSH_AUTH_TOTP)" = "required" ] && pass "DSH_TOTP → DSH_AUTH_TOTP" || fail "TOTP 未迁移"
-[ "$(get_env DSH_AUTH_GATE_VERSION)" = "0.16.0" ] && pass "AUTH_GATE_VERSION → DSH_AUTH_GATE_VERSION" || fail "插件版本未迁移"
+[ "$(get_env DSH_WEB_AUTH_VERSION)" = "0.16.0" ] && pass "AUTH_GATE_VERSION → DSH_WEB_AUTH_VERSION" || fail "插件版本未迁移"
 [ "$(get_env DSH_DEV_TOOLS)" = "full" ] && pass "DEV_TOOLS → DSH_DEV_TOOLS" || fail "构建参数未迁移"
 for old in PROXY_PORT DSH_WORKSPACE DSH_HOME DSH_TOTP AUTH_GATE_VERSION DEV_TOOLS; do
 	has_key "$old" && fail "旧键 ${old} 仍留在 .env"

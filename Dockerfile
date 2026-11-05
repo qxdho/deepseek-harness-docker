@@ -1,126 +1,67 @@
 # syntax=docker/dockerfile:1
 #
-# dsh 一键部署镜像（DeepSeek Harness + dsh-auth-gate 登录门禁）
+# dsh-docker v2：dsh + dsh-web-startup-auth
 #
 # 架构：
-#   浏览器 -> 代理 0.0.0.0:3080 -> dsh 127.0.0.1:3079（web profile + dsh-auth-gate）
+#   浏览器 -> dsh 0.0.0.0:3080（web profile + dsh-web-startup-auth）
 #
-# 要点：
-#   * dsh 官方拒绝 --host 0.0.0.0，所以 dsh 只听回环，对外由代理承担。
-#   * 登录、会话、可选 TOTP 由 dsh-auth-gate 插件在 dsh 进程内完成；
-#     它还负责把 dsh 的一次性 launch token 自动桥接成会话 Cookie，
-#     所以用户永远不需要看到或复制 token。
-#   * 代理只做三件事：监听 0.0.0.0、把 Host/Origin 一致改写成回环 authority、
-#     往 HTML 里注入 crypto.randomUUID 补丁和 __DSH_TRANSPORT__.ownsHost。
-#     它不做鉴权。
-#   * 不改 dsh 任何文件。dsh 升级不会让代理或补丁失效。
+# 与 v1 的区别：
+#   * 不再有反向代理；dsh-web-startup-auth 替换 dsh 的 startup，允许监听 0.0.0.0。
+#   * 不再有 dsh-auth-gate / vendor 补丁 / sync-gate。
+#   * 登录页、会话、API/WebSocket 门禁由 dsh-web-startup-auth 在 dsh 进程内完成。
+#   * 账号在 dsh 启动前由 entrypoint 预置，避免“第一个访问的人成为管理员”。
 
-# 基础镜像。dsh 自己声明了 node 引擎下界（0.2.2-rc.1 起是 >=24.9.0），
-# 所以别把它换回 node:22 之类的旧主版本，构建会在装包阶段被 engines 检查拦下。
-#
-# **钉 digest，不用浮动 tag**：`node:24-bookworm-slim` 平时会指向不同的层，
-# 同一个 commit 隔一周构建出来就不是同一个镜像了（排查"昨天还好"的问题时最难受）。
-# 想跟进基础镜像的安全更新时，手动刷新一次：
-#   T=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull" | sed 's/.*"token":"\([^"]*\)".*/\1/')
-#   curl -sI -H "Authorization: Bearer $T" -H "Accept: application/vnd.oci.image.index.v1+json" \
-#     https://registry-1.docker.io/v2/library/node/manifests/24-bookworm-slim | grep -i docker-content-digest
-# 然后把下面这串换掉。（digest 是**索引**的，amd64/arm64 都适用。）
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 
-# ── 阶段 1：安装 dsh 并预置插件 ─────────────────────────────────────────────
+# ── 阶段 1：安装 dsh 并预置 web-auth profile ────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
 ARG DSH_VERSION=0.2.2-rc.1
 ARG PNPM_VERSION=11.7.0
-ARG DSH_AUTH_GATE_VERSION=0.18.0
+ARG DSH_WEB_AUTH_VERSION=0.1.14
 ENV DEBIAN_FRONTEND=noninteractive
 
-# node-pty 在 Linux 没有预编译产物，安装 dsh 时会用 node-gyp 现场编译
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# npm 缓存用 BuildKit cache mount：不进镜像层，重跑这一层时能复用已下载的包
-# （node-pty 仍需现场编译，缓存主要省掉重复下载）。
-# 不要再跟 `npm cache clean`，那会把 cache mount 清掉，等于白缓存。
 RUN --mount=type=cache,target=/root/.npm \
     npm install -g --no-fund --no-audit \
       "pnpm@${PNPM_VERSION}" \
       "@deepseek-ai/dsh@${DSH_VERSION}" \
  && test "$(dsh --version)" = "${DSH_VERSION}"
 
-# 预置一个带 dsh-auth-gate 的 web profile。装进镜像后，首次启动无需联网装插件。
-#
-# HOME 必须显式设成 DSH_HOME：基础镜像的 HOME 是 /root，而 pnpm 把 store 位置
-# 记在 `node_modules/.modules.yaml` 里（默认 $HOME/.local/share/pnpm/store 或
-# $XDG_DATA_HOME/pnpm/store）。不设就会记成 /root/...，而运行期 HOME=$DSH_HOME，
-# 两个路径对不上 → 用户第一次装插件报 ERR_PNPM_UNEXPECTED_STORE。
-#
-# 但仅仅让两边 HOME 一致还不够：profile 在运行期会被复制进数据卷，绝对路径必然
-# 与镜像内不同，而 pnpm 记的是**解析后的绝对路径**。所以构建完直接删掉这个记账
-# 文件（见本 RUN 末尾）—— 运行期第一次装插件时 pnpm 会按当时的环境重新算并写回，
-# 也就落在 .env 定义的 DSH_HOME 里。插件本体已随 profile 进镜像，删除记账文件
-# 不影响「首次装插件无需联网」。
 ENV DSH_HOME=/opt/dsh-seed \
     HOME=/opt/dsh-seed
-# 登录门禁用**本仓库 vendor 的那份构建**，而不是运行时从 npm 现取：
-# 上游 0.18.0 的 wrapServer 还不认识 dsh 0.2.2 新增的 `{resource}` 路由形态，
-# 会在 apply 阶段抛 TypeError，结果是插件被跳过、门禁整体消失、容器却 healthy。
-# 补丁内容、风险与升级方式见 vendor/dsh-auth-gate/VENDORED.md。
-COPY vendor/dsh-auth-gate /opt/gate-vendored
+
 RUN set -eux; \
     mkdir -p "${DSH_HOME}"; \
     DSH_BIN="$(npm root --global)/@deepseek-ai/dsh/lib/bin.js"; \
     node --expose-internals "$DSH_BIN" --profile web --dump-config >/dev/null; \
-    # vendor 的版本必须和 DSH_AUTH_GATE_VERSION 对得上，否则"镜像里到底是哪版门禁"就说不清了
-    vendored_gate="$(node -p "require('/opt/gate-vendored/package.json').version")"; \
-    [ "$vendored_gate" = "${DSH_AUTH_GATE_VERSION}" ] || { \
-      echo "vendor 里的门禁版本($vendored_gate) != DSH_AUTH_GATE_VERSION(${DSH_AUTH_GATE_VERSION})" >&2; exit 1; }; \
-    # 打成 tarball 再装：pnpm 对目录会装成链接（指向 /opt/gate-vendored），
-    # 而 profile 会被复制进数据卷，链接目标必须一直在镜像里；tarball 装出来是实体目录，更稳。
-    # --ignore-scripts：package.json 里的 prepack 会跑 `npm run build`（需要 devDependencies
-    # 和 tsc），而 vendor 的是**构建产物**，没有也不需要那套工具链。
-    npm pack --ignore-scripts --pack-destination /tmp /opt/gate-vendored >/dev/null; \
-    node --expose-internals "$DSH_BIN" plugin --profile web add "/tmp/dsh-auth-gate-${vendored_gate}.tgz"; \
-    # dsh 会校验 profile 插件行的 peer 依赖（storage-domain 缺失会让 web 起不来），
-    # dsh-auth-gate 的 CLI 也需要它们。补软链；目标不存在时直接构建失败，避免像以前
-    # 那样发出悬空软链、等到运行时才炸（entrypoint 也会在每次启动时幂等补齐）。
-    npm_root="$(npm root --global)"; \
-    for peer in dsh-storage-domain cordis; do \
-      src="$npm_root/@deepseek-ai/dsh/node_modules/@deepseek-ai/$peer"; \
-      [ -f "$src/package.json" ] || src="$npm_root/@deepseek-ai/$peer"; \
-      test -f "$src/package.json" || { echo "找不到 peer 依赖 $peer" >&2; exit 1; }; \
-      ln -sfn "$src" "${DSH_HOME}/profiles/web/node_modules/@deepseek-ai/$peer"; \
-    done; \
-    # 构建期冒烟：证明 CLI 真能建用户，然后删掉这个临时用户文件
-    printf '%s\n' 'build-smoke-only' \
-      | node "${DSH_HOME}/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" user add build-smoke --password-stdin; \
-    test -s "${DSH_HOME}/auth/users.yaml"; \
-    rm -rf "${DSH_HOME}/auth"; \
-    # 丢掉构建期的 store 记账（它是本镜像内的绝对路径，运行期必然失配），
-    # 让运行期第一次 pnpm 操作时按 .env 定义的 DSH_HOME 重新计算并写回。
+    node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-web-startup-auth@${DSH_WEB_AUTH_VERSION}"; \
+    test -f "${DSH_HOME}/profiles/web/node_modules/dsh-web-startup-auth/lib/auth.js"; \
+    test -f "${DSH_HOME}/profiles/web/node_modules/dsh-web-startup-auth/lib/startup.js"; \
+    # 构建期冒烟：证明凭据存储真的能写、能读，然后删掉测试文件。
+    node --input-type=module -e 'const {registerCredentials}=await import(process.argv[1]); registerCredentials("build-smoke","build-smoke-password")' \
+      "${DSH_HOME}/profiles/web/node_modules/dsh-web-startup-auth/lib/credential-store.js"; \
+    test -s "${DSH_HOME}/web-auth.json"; \
+    rm -f "${DSH_HOME}/web-auth.json"; \
+    # pnpm 在构建期记录的绝对路径进入数据卷后必然失配；删掉让运行期重算。
     rm -f "${DSH_HOME}/profiles/web/node_modules/.modules.yaml"; \
     node --expose-internals "$DSH_BIN" --version
 
-# 预置 profile 必须归 node 所有。首启播种是运行期以 node 身份 `cp -a` 镜像里的
-# 这份 profile 到数据目录，而 profile 里含有 pnpm 以 600/700 建的文件
-# （package.json、.plugin-manager）—— 属主是 root 时 node 连读都读不到，
-# `cp -a` 直接失败、容器起不来（数据目录为空的全新部署必然踩到）。
 RUN chown -R node:node /opt/dsh-seed \
     && chmod -R a+rX /opt/dsh-seed
 
 # ── 阶段 2：运行镜像 ────────────────────────────────────────────────────────
 FROM ${NODE_IMAGE}
 
-# DSH_VERSION 只在 builder 阶段用到（决定 npm 装哪个版本）；运行阶段不需要，
-# 留在这里只会变成没人读的构建参数。
 ARG DSH_DEV_TOOLS=none
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/node \
     DSH_HOME=/home/node/.dsh \
-    DSH_HOST=127.0.0.1 \
-    DSH_PORT=3079 \
-    PROXY_PORT=3080 \
+    DSH_HOST=0.0.0.0 \
+    DSH_PORT=3080 \
     DSH_PERMISSION_MODE=workspace-write \
     DSH_TELEMETRY_DISABLED=1 \
     NARB_DISABLE_NATIVE_CACHE=1 \
@@ -128,8 +69,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     npm_config_fund=false \
     npm_config_audit=false
 
-# 基础运行/agent 工具。DSH_DEV_TOOLS=full 时再加编译链，供容器内现场安装带
-# 原生依赖的插件（dsh-auth-gate 已预装，不需要它）。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -139,59 +78,31 @@ RUN set -eux; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
-# Node 运行时 + 已编译好原生依赖的 dsh + pnpm
 COPY --from=builder /usr/local/ /usr/local/
-# 预置 profile（含 dsh-auth-gate），供首启或空卷 seeding
 COPY --from=builder /opt/dsh-seed /opt/dsh-seed
 
-# dsh 启动需要 Node 的 --expose-internals（HMR 插件），npm 生成的软链不带该参数，
-# 这里用一层 wrapper 保证任何方式调用 dsh 都正确。先删掉 npm 的软链，避免 COPY
-# 顺着软链覆盖到 bin.js。
+# dsh 启动需要 Node 的 --expose-internals（HMR 插件）；npm 的软链不带该参数。
 RUN rm -f /usr/local/bin/dsh
 COPY scripts/dsh-wrapper.sh /usr/local/bin/dsh
 RUN chmod 0755 /usr/local/bin/dsh
 
-# 对外代理（只转发 + 注入，不做鉴权）
-# 用 `npm ci` 并带上 package-lock.json：锁定 http-proxy 的确切版本与传递依赖，
-# 构建可复现，也避免 lockfile 与 package.json 漂移时被静默忽略。
-WORKDIR /app/proxy
-COPY proxy/package.json proxy/package-lock.json /app/proxy/
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev --no-fund --no-audit \
-    && mkdir -p /tmp/npm-cache \
-    && chown -R node:node /tmp/npm-cache \
-    && chmod 1777 /tmp/npm-cache
-COPY proxy/index.js /app/proxy/index.js
-
 COPY entrypoint.sh /app/entrypoint.sh
-# 启动时用来把卷里的登录门禁跟上镜像版本（规则见脚本头部注释）。
-COPY scripts/sync-gate.sh /app/scripts/sync-gate.sh
+COPY scripts/seed-auth.mjs /app/scripts/seed-auth.mjs
 COPY scripts/healthcheck.sh /usr/local/bin/dsh-healthcheck
-RUN chmod 0755 /app/entrypoint.sh /app/scripts/sync-gate.sh /usr/local/bin/dsh-healthcheck
+RUN chmod 0755 /app/entrypoint.sh /usr/local/bin/dsh-healthcheck
 
-# 让空命名卷/空 bind mount 首启就有可用的已装插件 profile
-# 注意：/workspace 的这次 chown 只对「命名卷」有效。生产用的是 bind mount
-# （docker-compose.yml），挂载会遮蔽这里的属主 —— 宿主目录的属主才是决定性的，
-# 因此运行时用 scripts/preflight.sh 和 entrypoint.sh 的检查兜底。详见 DESIGN.md §5.1。
+# 运行时 /workspace 通常是 bind mount；这里的 chown 只对命名卷生效。
 RUN set -eux; \
-    mkdir -p "${DSH_HOME}/profiles" /workspace; \
+    mkdir -p "${DSH_HOME}/profiles" /workspace /tmp/npm-cache; \
     cp -a /opt/dsh-seed/profiles/web "${DSH_HOME}/profiles/web"; \
-    chown -R node:node "${DSH_HOME}" /workspace /app
+    chown -R node:node "${DSH_HOME}" /workspace /app /tmp/npm-cache; \
+    chmod 1777 /tmp/npm-cache
 
 USER node
 WORKDIR /workspace
 EXPOSE 3080
 
-# 健康检查要「快」：dsh 本身几秒就能就绪，entrypoint 也是等到 dsh 回环可访问
-# 才启动代理，所以健康检查一旦连得上代理，基本就等于就绪了。
-#
-# 之前是 --interval=30s --start-period=120s，两个都过大：
-#   * start-period 内失败不计入 retries，但**失败会重置计时器**；而 120 秒窗口
-#     本身要走完，Docker 才会把状态从 starting 翻成 healthy。于是即使容器
-#     3 秒就绪，CLI 也要空等约 2 分钟。
-#   * interval=30s 意味着窗口结束后还要再等最多 30 秒才跑第一条检查。
-# 现在：15 秒内先探（覆盖正常启动），之后每 5 秒一次；retries=6 给冷启动留余量。
-HEALTHCHECK --interval=5s --timeout=5s --start-period=15s --retries=6 \
+HEALTHCHECK --interval=5s --timeout=5s --start-period=20s --retries=6 \
   CMD ["dsh-healthcheck"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

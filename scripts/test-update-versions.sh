@@ -27,7 +27,7 @@ const port = Number(process.argv[1]);
 http.createServer((q, r) => {
   const p = decodeURIComponent(q.url);
   let v = "99.9.9";
-  if (p.includes("dsh-auth-gate")) v = "99.8.8";
+  if (p.includes("dsh-web-startup-auth")) v = "99.6.6";
   if (p.includes("pnpm")) v = "99.7.7";
   r.writeHead(200, { "content-type": "application/json" });
   r.end(JSON.stringify({ "dist-tags": { latest: v } }));
@@ -100,15 +100,15 @@ else
 	fail "dsh 版本三处不一致：Dockerfile=$d compose=$c .env.example=$e"
 fi
 
-d2="$(pin DSH_AUTH_GATE_VERSION)"
-c2="$(compose_val DSH_AUTH_GATE_VERSION)"
-e2="$(env_val DSH_AUTH_GATE_VERSION)"
+d2="$(pin DSH_WEB_AUTH_VERSION)"
+c2="$(compose_val DSH_WEB_AUTH_VERSION)"
+e2="$(env_val DSH_WEB_AUTH_VERSION)"
 # 三处都要被更新且一致。**这条断言曾经是错的**：我一度以为 .env.example 里没有
-# DSH_AUTH_GATE_VERSION，于是把期望值从 dce 改成 dc，测试跟着"通过"，
+# dsh-web-startup-auth，于是把期望值从 dce 改成 dc，测试跟着"通过"，
 # 实际是 .env.example 那一项被留在了旧值 —— 静默的三处不一致：
 # 用户照 .env.example 复制出 .env 后，docker compose build 会把旧值当 build-arg
 # 传进去、覆盖 Dockerfile 的新默认值。绿测把雷盖住了。
-if [ "$d2" = "99.8.8" ] && [ "$d2" = "$c2" ] && [ "$d2" = "$e2" ]; then
+if [ "$d2" = "99.6.6" ] && [ "$d2" = "$c2" ] && [ "$d2" = "$e2" ]; then
 	pass "auth-gate 版本被更新且三处一致（$d2）"
 else
 	fail "auth-gate 不一致：Dockerfile=$d2 compose=$c2 .env.example=$e2"
@@ -186,7 +186,7 @@ if [ "$(pin DSH_VERSION)" = "$before_gt" ]; then
 else
 	fail "latest 更旧时把版本改成了 $(pin DSH_VERSION)（降级了）"
 fi
-if [ "$(pin DSH_AUTH_GATE_VERSION)" = "$(env_val DSH_AUTH_GATE_VERSION)" ]; then
+if [ "$(pin DSH_WEB_AUTH_VERSION)" = "$(env_val DSH_WEB_AUTH_VERSION)" ]; then
 	pass "降级保护下三处仍一致"
 else
 	fail "降级保护下三处不一致"

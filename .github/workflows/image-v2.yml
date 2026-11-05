@@ -1,0 +1,49 @@
+name: image-v2
+
+# 构建并冒烟 v2 镜像（无代理，dsh-web-startup-auth）。
+# 不发布、不接触任何现有部署。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - entrypoint.sh
+      - docker-compose.yml
+      - scripts/**
+      - .github/workflows/image-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: image-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 v2 镜像
+        run: |
+          set -euxo pipefail
+          docker build -t dsh-v2:smoke .
+
+      - name: 冒烟
+        run: |
+          set -euo pipefail
+          bash scripts/smoke-v2.sh dsh-v2:smoke 2>&1 | tee "$RUNNER_TEMP/v2.log"
+
+      - name: 失败时提交日志
+        if: failure()
+        run: |
+          set -uxo pipefail
+          cp "$RUNNER_TEMP/v2.log" v2-failure.txt || true
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add -f v2-failure.txt || true
+          git commit -m "chore(ci): v2 failure log [skip ci]" || true
+          git push origin HEAD:main || true

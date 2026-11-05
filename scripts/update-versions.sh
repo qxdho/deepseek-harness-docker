@@ -150,7 +150,7 @@ current_pin() {
 targets_of() {
 	case "$1" in
 	DSH_VERSION) printf 'dce' ;;
-	DSH_AUTH_GATE_VERSION) printf 'dce' ;;
+	DSH_WEB_AUTH_VERSION) printf 'dce' ;;
 	PNPM_VERSION) printf 'd' ;; # 只在 Dockerfile（compose 与 .env.example 都没有它）；
 	# 且它在上面的表里标了 :skip，永远不会走到 apply_version —— 这里写 'd' 只是
 	# 让"目标文件"与实际相符，避免下次有人取消 skip 时照着错的清单改。
@@ -199,7 +199,7 @@ apply_version() {
 # pnpm 只是构建工具，且升级它可能改变依赖解析结果 —— 默认只报告不自动写。
 ENTRIES=(
 	"DSH_VERSION:@deepseek-ai/dsh"
-	"DSH_AUTH_GATE_VERSION:dsh-auth-gate"
+	"DSH_WEB_AUTH_VERSION:dsh-web-startup-auth"
 	"PNPM_VERSION:pnpm:skip"
 )
 

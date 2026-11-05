@@ -135,11 +135,11 @@ jobs:
           # 用 awk 提取而不是 grep -oP：BSD/macOS 的 grep 没有 -P，且无匹配时返回 1
           # 会让这一步直接失败。（dshm 里已改用同样的做法。）
           dsh="$(awk -F= '/^ARG DSH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
-          gate="$(awk -F= '/^ARG DSH_AUTH_GATE_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
+          webauth="$(awk -F= '/^ARG DSH_WEB_AUTH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
-          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
+          [ -n "$webauth" ] || { echo "Dockerfile 里读不到 ARG DSH_WEB_AUTH_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
-          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "webauth=$webauth" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -157,13 +157,13 @@ jobs:
             --load \
             --tag dsh-test:smoke \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --build-arg "DSH_WEB_AUTH_VERSION=${{ steps.ver.outputs.webauth }}" \
             --cache-from type=gha,scope=amd64 \
             --cache-to type=gha,scope=amd64,mode=max \
             .
 
       - name: 冒烟测试
-        run: ./scripts/smoke-test.sh dsh-test:smoke
+        run: ./scripts/smoke-v2.sh dsh-test:smoke
 
       # 冒烟通过后才推。**只推单架构 tag**，正式 tag 由 merge 作业统一生成 ——
       # 这样正式 tag 只会指向多平台 manifest，不会先出现一份「单架构的同名镜像」。
@@ -179,7 +179,7 @@ jobs:
             --push \
             --tag "${REGISTRY}/${IMAGE_NAME}:amd64-${GITHUB_RUN_ID}" \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --build-arg "DSH_WEB_AUTH_VERSION=${{ steps.ver.outputs.webauth }}" \
             --cache-from type=gha,scope=amd64 \
             .
 
@@ -205,11 +205,11 @@ jobs:
           # 用 awk 提取而不是 grep -oP：BSD/macOS 的 grep 没有 -P，且无匹配时返回 1
           # 会让这一步直接失败。（dshm 里已改用同样的做法。）
           dsh="$(awk -F= '/^ARG DSH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
-          gate="$(awk -F= '/^ARG DSH_AUTH_GATE_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
+          webauth="$(awk -F= '/^ARG DSH_WEB_AUTH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
-          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
+          [ -n "$webauth" ] || { echo "Dockerfile 里读不到 ARG DSH_WEB_AUTH_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
-          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "webauth=$webauth" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -229,13 +229,13 @@ jobs:
             --load \
             --tag dsh-test:smoke \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --build-arg "DSH_WEB_AUTH_VERSION=${{ steps.ver.outputs.webauth }}" \
             --cache-from type=gha,scope=arm64 \
             --cache-to type=gha,scope=arm64,mode=max \
             .
 
       - name: 冒烟测试
-        run: ./scripts/smoke-test.sh dsh-test:smoke
+        run: ./scripts/smoke-v2.sh dsh-test:smoke
 
       - name: 构建并推送 arm64（供合并）
         run: |
@@ -244,7 +244,7 @@ jobs:
             --push \
             --tag "${REGISTRY}/${IMAGE_NAME}:arm64-${GITHUB_RUN_ID}" \
             --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_AUTH_GATE_VERSION=${{ steps.ver.outputs.gate }}" \
+            --build-arg "DSH_WEB_AUTH_VERSION=${{ steps.ver.outputs.webauth }}" \
             --cache-from type=gha,scope=arm64 \
             --cache-to type=gha,scope=arm64,mode=max \
             .
@@ -274,11 +274,11 @@ jobs:
           # 用 awk 提取而不是 grep -oP：BSD/macOS 的 grep 没有 -P，且无匹配时返回 1
           # 会让这一步直接失败。（dshm 里已改用同样的做法。）
           dsh="$(awk -F= '/^ARG DSH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
-          gate="$(awk -F= '/^ARG DSH_AUTH_GATE_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
+          webauth="$(awk -F= '/^ARG DSH_WEB_AUTH_VERSION=/{gsub(/[ \t\r]/, "", $2); print $2; exit}' Dockerfile)"
           [ -n "$dsh" ] || { echo "Dockerfile 里读不到 ARG DSH_VERSION" >&2; exit 1; }
-          [ -n "$gate" ] || { echo "Dockerfile 里读不到 ARG DSH_AUTH_GATE_VERSION" >&2; exit 1; }
+          [ -n "$webauth" ] || { echo "Dockerfile 里读不到 ARG DSH_WEB_AUTH_VERSION" >&2; exit 1; }
           echo "dsh=$dsh" >> "$GITHUB_OUTPUT"
-          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "webauth=$webauth" >> "$GITHUB_OUTPUT"
 
       # 镜像 tag **直接用你推送的那个 tag**，不再重新算序号。
       #
@@ -609,23 +609,6 @@ jobs:
           done
           [ "$bad" = "0" ]
 
-      - name: 代理注入单元测试
-        run: |
-          # `|| exit` 不能省：cd 失败时若不退出，npm install 会在错误目录里执行（shellcheck SC2164）。
-          cd proxy || exit 1
-          npm install --omit=dev --no-fund --no-audit
-          # 跑 proxy/ 下所有 test-*.js，别写死单个文件：
-          # 写死的话新加的用例（如 test-sse.js）在 CI 里根本不会执行。
-          shopt -s nullglob
-          files=(test-*.js)
-          shopt -u nullglob
-          [ ${#files[@]} -gt 0 ] || { echo "::error::proxy/ 下没有 test-*.js"; exit 1; }
-          rc=0
-          for f in "${files[@]}"; do
-            echo "--- $f"
-            node "$f" || rc=1
-          done
-          exit $rc
   # 管理面板二进制。安装脚本从 releases/latest/download/... 拉取，所以**必须**在推
   # main 时也发布 —— 只在打 tag 时发的话，没有 tag 的仓库永远没有可下载的产物，
   # `dshm admin install` 就会一路回退到「本机 Go 构建」并最终失败。

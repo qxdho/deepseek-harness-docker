@@ -77,7 +77,9 @@ RUN set -eux; \
       echo "vendor 里的门禁版本($vendored_gate) != DSH_AUTH_GATE_VERSION(${DSH_AUTH_GATE_VERSION})" >&2; exit 1; }; \
     # 打成 tarball 再装：pnpm 对目录会装成链接（指向 /opt/gate-vendored），
     # 而 profile 会被复制进数据卷，链接目标必须一直在镜像里；tarball 装出来是实体目录，更稳。
-    npm pack --pack-destination /tmp /opt/gate-vendored >/dev/null; \
+    # --ignore-scripts：package.json 里的 prepack 会跑 `npm run build`（需要 devDependencies
+    # 和 tsc），而 vendor 的是**构建产物**，没有也不需要那套工具链。
+    npm pack --ignore-scripts --pack-destination /tmp /opt/gate-vendored >/dev/null; \
     node --expose-internals "$DSH_BIN" plugin --profile web add "/tmp/dsh-auth-gate-${vendored_gate}.tgz"; \
     # dsh 会校验 profile 插件行的 peer 依赖（storage-domain 缺失会让 web 起不来），
     # dsh-auth-gate 的 CLI 也需要它们。补软链；目标不存在时直接构建失败，避免像以前

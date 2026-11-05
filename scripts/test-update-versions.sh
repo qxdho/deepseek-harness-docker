@@ -20,7 +20,7 @@ mkdir -p "$repo"
 cp "$root/Dockerfile" "$root/docker-compose.yml" "$root/.env.example" "$repo/"
 
 # 假 registry：按包名返回预设的 latest。端口固定但选不常用的，避免与其它测试撞。
-port=15977
+port=$(((RANDOM % 2000) + 16000))
 node -e '
 const http = require("node:http");
 const port = Number(process.argv[1]);

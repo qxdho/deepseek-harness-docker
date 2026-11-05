@@ -49,16 +49,13 @@ sudo chown -R 1000:1000 /opt/dsh/data /opt/dsh/workspace
 
 ## 2. 安装 v2 实例（先不要占用 3080）
 
-先在 v2 仓库目录本地构建镜像（v2 尚未推到 GHCR 的 `latest`）：
+云端镜像已经推到 GHCR，先安装 dshm：
 
 ```bash
-docker build -t dsh-v2:local .
-
-# 只安装 dshm，不立刻创建实例
-sudo ./install.sh --install-only
+sudo ./install.sh
 ```
 
-然后用本地镜像安装：
+然后用 v2 镜像安装：
 
 ```bash
 read -rsp '新的登录密码（≥14 位）: ' PW; echo
@@ -67,15 +64,14 @@ printf '%s\n' "$PW" | sudo dshm docker install \
   --data-dir /opt/dsh/data \
   --port 3081 \
   --bind 127.0.0.1 \
-  --image dsh-v2:local \
+  --image ghcr.io/qxdho/deepseek-harness-docker:0.2.2-rc.1-2026.11.06-1 \
   --container qxdho-dsh-v2 \
-  --no-pull \
   --password-stdin
 unset PW
 ```
 
-- `<v2 镜像 tag>` 用已构建的 v2 镜像；本地构建可用 `dsh-v2:local`，但 `--no-pull` 只有在本地已有该镜像时才成立；
-- 如果镜像在 GHCR，去掉 `--no-pull`；
+- 镜像 tag 用 `0.2.2-rc.1-2026.11.06-1`；
+
 - `dshm` 不会覆盖已有 `/opt/dsh/.env`；如果之前建过，先备份再删。
 
 启动后检查：

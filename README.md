@@ -37,7 +37,7 @@ sudo ./install.sh
 
 ```bash
 sudo dshm docker init --dir /opt/dsh \
-  --image ghcr.io/qxdho/deepseek-harness-docker:<v2 tag>
+  --image ghcr.io/qxdho/deepseek-harness-docker:0.2.2-rc.1-2026.11.06-1
 
 sudoedit /opt/dsh/.env        # 至少设置 DSH_AUTH_PASSWORD、端口、路径
 sudo dshm docker install --dir /opt/dsh
@@ -67,7 +67,7 @@ sudo dshm docker install
 
 安装完成后访问 `http://127.0.0.1:3080/`。默认只绑本机，远程访问请配反代或 SSH 隧道。
 
-> 镜像由 GitHub Actions 构建并推到 GHCR。当前 `<v2 tag>` 见 Releases / Packages；
+> 镜像由 GitHub Actions 构建并推到 GHCR。当前 v2 tag：`0.2.2-rc.1-2026.11.06-1`；
 > 在 v2 镜像成为 `latest` 之前，不要用 `latest` 安装，否则会得到 v1。
 
 ## dshm 命令

@@ -49,16 +49,28 @@ sudo chown -R 1000:1000 /opt/dsh/data /opt/dsh/workspace
 
 ## 2. 安装 v2 实例（先不要占用 3080）
 
+先在 v2 仓库目录本地构建镜像（v2 尚未推到 GHCR 的 `latest`）：
+
 ```bash
-# 在 v2 仓库目录执行
-printf '新的强密码\n' | ./dshm docker install \
+docker build -t dsh-v2:local .
+
+# 只安装 dshm，不立刻创建实例
+sudo ./install.sh --install-only
+```
+
+然后用本地镜像安装：
+
+```bash
+read -rsp '新的登录密码（≥14 位）: ' PW; echo
+printf '%s\n' "$PW" | sudo dshm docker install \
   --dir /opt/dsh \
   --data-dir /opt/dsh/data \
   --port 3081 \
   --bind 127.0.0.1 \
-  --image <v2 镜像 tag> \
+  --image dsh-v2:local \
   --no-pull \
   --password-stdin
+unset PW
 ```
 
 - `<v2 镜像 tag>` 用已构建的 v2 镜像；本地构建可用 `dsh-v2:local`，但 `--no-pull` 只有在本地已有该镜像时才成立；

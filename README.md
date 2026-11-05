@@ -51,6 +51,25 @@ cd deepseek-harness-docker
 
 安装完成后访问 `http://127.0.0.1:3080/`。默认只绑本机，远程访问请配反代或 SSH 隧道。
 
+### 本地构建 v2 镜像
+
+v2 镜像尚未推到 GHCR 的 `latest` 时，先在仓库目录构建：
+
+```bash
+docker build -t dsh-v2:local .
+
+# 只安装 dshm，不立刻启动实例
+sudo ./install.sh --install-only
+
+# 用本地镜像安装；--no-pull 表示不再访问 registry
+sudo dshm docker install \
+  --dir /opt/dsh \
+  --image dsh-v2:local \
+  --no-pull
+```
+
+`latest` 仍是 v1 时，**不要**省略 `--image dsh-v2:local`，否则会装回旧镜像。
+
 ## dshm 命令
 
 ```bash

@@ -68,6 +68,7 @@ printf '%s\n' "$PW" | sudo dshm docker install \
   --port 3081 \
   --bind 127.0.0.1 \
   --image dsh-v2:local \
+  --container qxdho-dsh-v2 \
   --no-pull \
   --password-stdin
 unset PW

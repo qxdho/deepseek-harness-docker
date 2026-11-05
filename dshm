@@ -177,7 +177,7 @@ print_url() {
 # ── 安装 ────────────────────────────────────────────────────────────────────
 cmd_docker_install() {
 	local dir="" image="${DSHM_IMAGE:-$DEFAULT_IMAGE}" port=3080 bind=127.0.0.1
-	local data_dir="" password="" stdin_pw=0 no_pull=0 dry_run=0 uid gid
+	local data_dir="" password="" stdin_pw=0 no_pull=0 dry_run=0 uid gid container="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--dir | --app-dir) dir="${2:-}"; shift ;;
@@ -185,6 +185,7 @@ cmd_docker_install() {
 		--port) port="${2:-}"; shift ;;
 		--bind) bind="${2:-}"; shift ;;
 		--image) image="${2:-}"; shift ;;
+		--container) container="${2:-}"; shift ;;
 		--password-stdin) stdin_pw=1 ;;
 		--no-pull) no_pull=1 ;;
 		--dry-run) dry_run=1 ;;
@@ -234,8 +235,11 @@ cmd_docker_install() {
 	cp "$SELF_DIR/templates/compose.yaml" "$dir/docker-compose.yml"
 
 	# .env
-	CONTAINER="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
+	[ -n "$container" ] || die "--container 不能为空"
+	case "$container" in *[!A-Za-z0-9_.-]*) die "--container 只能包含字母、数字、_ . -" ;; esac
+	CONTAINER="$container"
 	{
+		printf 'DSHM_CONTAINER=%s\n' "$container"
 		printf 'DSH_IMAGE=%s\n' "$image"
 		printf 'DSH_HTTP_PORT=%s\n' "$port"
 		printf 'DSH_BIND=%s\n' "$bind"
@@ -560,6 +564,7 @@ dshm — dsh-docker 的独立安装/管理工具
       --port 3080                      宿主端口
       --bind 127.0.0.1                 绑定地址
       --image REPO:TAG                 镜像
+      --container NAME                 容器名（默认 qxdho-dsh；迁移验证用 qxdho-dsh-v2）
       --password-stdin                 从标准输入读密码
       --no-pull                        不拉镜像（本地已有）
 

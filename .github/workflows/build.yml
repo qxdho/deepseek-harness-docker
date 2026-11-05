@@ -54,6 +54,7 @@ jobs:
           fetch-depth: 0
       - id: f
         run: |
+          # shellcheck disable=SC2034
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             base=""
@@ -67,9 +68,11 @@ jobs:
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             echo "取不到基线提交，按「有代码改动」处理"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            echo "admin=true" >> "$GITHUB_OUTPUT"
-            echo "image=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "code=true"
+              echo "admin=true"
+              echo "image=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files="$(git diff --name-only "$base" HEAD)"
@@ -103,9 +106,11 @@ jobs:
             *) code=true ;;
             esac
           done < <(printf '%s\n' "$files")
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "admin=$admin" >> "$GITHUB_OUTPUT"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "code=$code"
+            echo "admin=$admin"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
           echo "需要构建镜像：$code；需要跑面板测试：$admin"
 
   # 镜像构建：**只在打「镜像 tag」时进行，推 main 不构建。**

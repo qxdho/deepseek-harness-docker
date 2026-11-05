@@ -11,6 +11,8 @@ on:
       - entrypoint.sh
       - docker-compose.yml
       - scripts/**
+      - dshm
+      - templates/**
       - .github/workflows/image-v2.yml
 
 permissions:
@@ -47,3 +49,18 @@ jobs:
           git add -f v2-failure.txt || true
           git commit -m "chore(ci): v2 failure log [skip ci]" || true
           git push origin HEAD:main || true
+
+      - name: 用 dshm 安装并管理一次
+        run: |
+          set -euo pipefail
+          inst="$RUNNER_TEMP/dshm-instance"
+          printf 'TestPassword123!\n' | ./dshm docker install \
+            --dir "$inst" \
+            --image dsh-v2:smoke \
+            --no-pull \
+            --password-stdin
+          ./dshm --dir "$inst" docker status
+          test "$(./dshm --dir "$inst" docker config get DSH_IMAGE)" = "dsh-v2:smoke"
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/login)"
+          [ "$code" = "200" ]
+          ./dshm --dir "$inst" docker down

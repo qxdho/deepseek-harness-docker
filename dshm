@@ -496,7 +496,7 @@ cmd_docker_config() {
 	set)
 		[ -n "${1:-}" ] && [ -n "${2:-}" ] || die "用法：dshm docker config set KEY VALUE"
 		set_env "$1" "$2"
-		ok "已写入 $1；执行 dshm docker restart 生效"
+		ok "已写入 $1；执行 dshm docker up 重建生效"
 		;;
 	edit)
 		"${EDITOR:-vi}" "$ENV_FILE"

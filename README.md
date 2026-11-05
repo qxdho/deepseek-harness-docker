@@ -90,7 +90,7 @@ dshm docker uninstall [--purge]
 
 ## 配置
 
-编辑 `/opt/dsh/.env`，然后 `dshm docker restart`（改镜像/端口/路径用 `dshm docker up` 重建）。
+编辑 `/opt/dsh/.env` 后执行 `dshm docker up` 重建容器。注意：`dshm docker restart` 不会重新读取环境变量。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|

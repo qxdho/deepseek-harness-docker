@@ -1,1628 +1,634 @@
 #!/usr/bin/env bash
-# dshm — DSH 部署管理命令（在项目目录里运行：./dshm <命令>）
+# dshm — dsh-docker 的独立安装/管理工具。
 #
-# 只保留一套写法：dshm <分组> <子命令>。旧的扁平写法已移除（会提示新写法）。
-# 完整说明见 `dshm help`。
+#   dshm update                   更新 dshm 自己
+#   dshm version                  看 dshm / 镜像 / 容器版本
+#   dshm docker install           安装 dsh-docker
+#   dshm docker update [--to tag] 更新 dsh-docker 镜像
+#   dshm docker rollback          回退到上一个镜像
+#   dshm docker status|logs|up|down|restart|shell|url
+#   dshm docker config show|get|set|edit
+#   dshm docker auth reset
+#   dshm docker doctor
+#   dshm docker uninstall [--purge]
 #
-#   dshm service up|down|restart|status|logs|shell|url
-#   dshm version show|list|update
-#   dshm auth    password|user|totp
-#   dshm admin   install|uninstall|url|password|status|logs
-#   dshm dshm    install|uninstall|update
+# 不再要求 clone 仓库：模板、脚本都随 dshm 发布包走。
 set -euo pipefail
 
-# `dshm dshm install` 会把自己软链到 PATH 里，之后可能以符号链接身份被调用。
-# 所以先解析出脚本的真实路径再 cd —— 否则 `dirname "$0"` 会落在符号链接所在的
-# 目录（如 /usr/local/bin），后面所有相对路径都会找错地方。
+# ── 自身定位（支持被 symlink 到 PATH）──────────────────────────────────────
 SELF="$0"
 while [ -L "$SELF" ]; do
-	_link="$(readlink "$SELF")"
-	case "$_link" in
-	/*) SELF="$_link" ;;
-	*) SELF="$(dirname "$SELF")/$_link" ;;
+	link="$(readlink "$SELF")"
+	case "$link" in
+	/*) SELF="$link" ;;
+	*) SELF="$(dirname "$SELF")/$link" ;;
 	esac
 done
-PROJECT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-cd "$PROJECT_DIR"
-
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 CLI_NAME=dshm
-ENV_FILE=.env
-CONTAINER=qxdho-dsh
-dsh_home_in_container() { env_value_new DSH_HOME_CONTAINER /dsh; }
-cli_in_container() { printf "%s/profiles/web/node_modules/dsh-auth-gate/lib/cli.js" "$(dsh_home_in_container)"; }
 
-# ── 输出样式 ────────────────────────────────────────────────────────────────
-# 与 scripts/release.sh 共用同一份实现，避免两处颜色/格式慢慢跑偏。
-#
-# ⚠ 这里必须用上面**已经解析过符号链接**的 $PROJECT_DIR，**不要**用
-# `dirname "${BASH_SOURCE[0]}"`：BASH_SOURCE 不会解析符号链接，`dshm dshm install`
-# 之后从 PATH 调用（/usr/local/bin/dshm → 真实位置）时它会指向 /usr/local/bin，
-# 于是拼出 /usr/local/bin/scripts/log.sh —— **一执行就报 No such file or directory**，
-# 而且报错行号指向这一行，很容易误以为是安装没装上。
-# shellcheck source=scripts/log.sh
-. "$PROJECT_DIR/scripts/log.sh"
-
-require_docker() {
-	command -v docker >/dev/null 2>&1 || die "未找到 docker"
-	docker compose version >/dev/null 2>&1 || die "未找到 docker compose v2"
-}
-require_env() { [ -f "$ENV_FILE" ] || die "缺少 .env，请先运行 ./install.sh"; }
-# 容器是否在运行。**dshm 侧只有这一个实现** —— 之前散在三处（require_running、disk
-# 分支、current_dsh_version）各写一遍 `docker inspect … | grep -q true`，改判断条件时
-# 要记得改三处。（scripts/smoke-*.sh 里另有几处，那是独立的自检脚本、有自己的变量名，
-# 不共享 dshm 的函数；它们不随 dshm 一起演进，所以不强行合并。）
-container_running() {
-	docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true
-}
-
-require_running() {
-	container_running || die "容器 $CONTAINER 没在运行，先执行 ./dshm service up"
-}
-# .env 的读写统一走 lib，和 install.sh 共用一份实现，避免两套解析器慢慢跑偏。
-# shellcheck source=scripts/env-config.sh
-. ./scripts/env-config.sh
-# 旧命名卷 → 宿主目录的搬迁同样共用一份实现（install.sh 也会 source 它）
-# shellcheck source=scripts/migrate-home.sh
-. ./scripts/migrate-home.sh
-# 部署自检探针（WebSocket 逐跳握手）
-# shellcheck source=scripts/doctor.sh
-. ./scripts/doctor.sh
-
-# ── 注册为系统命令 ──────────────────────────────────────────────────────────
-is_root() { [ "$(id -u)" = "0" ]; }
-
-# dshm 自身从哪更新。可用 DSHM_REPO 覆盖（fork 或内网镜像）。
-DSHM_REPO_URL="${DSHM_REPO:-https://github.com/qxdho/deepseek-harness-docker}"
-
-# dshm 自身的版本号。**唯一真源是仓库根的 VERSION 文件**：
-#   * 在仓库里(有 VERSION 文件)时直接读它 —— 开发/自用场景
-#   * 发布版由 CI 在打包时把下面的占位符替换成实际版本 —— 部署机没有 VERSION 文件
-# 同样的版本号也注入给面板(-ldflags)，所以「面板是 dshm 的附属功能、两者同版本」
-# 这件事是被机制保证的，不靠人记。
 DSHM_VERSION_RAW="${DSHM_VERSION:-__VERSION__}"
+DSHM_REPO="${DSHM_REPO_URL:-https://github.com/qxdho/deepseek-harness-docker}"
+DEFAULT_IMAGE="ghcr.io/qxdho/deepseek-harness-docker:latest"
+DEFAULT_CONTAINER="qxdho-dsh"
 
+# shellcheck source=scripts/log.sh
+. "$SELF_DIR/scripts/log.sh"
+
+# .env 读写（get_env/set_env/env_validate_password/read_secret）
+ENV_FILE=""
+# shellcheck source=scripts/env-config.sh
+. "$SELF_DIR/scripts/env-config.sh"
+
+# ── 版本 ────────────────────────────────────────────────────────────────────
 dshm_version() {
-	# 1) 发布版：CI 已把占位符替换成实际版本，直接用
 	if [ "$DSHM_VERSION_RAW" != "__VERSION__" ]; then
 		printf '%s' "$DSHM_VERSION_RAW"
-		return
-	fi
-
-	# 2) 在 git 工作区：用 `git describe` 如实反映**手上的代码**
-	#    不能在 main 上直接读 VERSION 文件：VERSION 会在「准备发布」的那个提交里
-	#    先被 bump，而 tag 可能还没打；那时读文件会声称自己是那个版本，实际手上的
-	#    代码并没有对应的发布 tag。用 describe 判断才准：
-	#      * HEAD 正好有 tag        → 报该 tag 的版本（与那次发布完全一致）
-	#      * 在 tag 之后又有新提交   → <VERSION>-<提交数>-g<短SHA>，明确表示「领先」
-	#      * main 上还没有任何 tag   → dev + 短 SHA
-	if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1 &&
-		git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-		local desc sha
-		sha="$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
-		desc="$(git -C "$PROJECT_DIR" describe --tags --match 'v[0-9]*' 2>/dev/null || true)"
-		if [ -n "$desc" ]; then
-			# v2026.09.30 或 v2026.09.30-3-gabc1234 → 去掉 v，保留「领先几个提交」的后缀
-			printf '%s' "${desc#v}"
-			return
-		fi
-		if [ -f "$PROJECT_DIR/VERSION" ]; then
-			# 有 VERSION 说明「准备发这个版本」，但还没 tag —— 说清楚，别冒充已发布
-			printf '%s-dev' "$(tr -d ' \t\r\n' <"$PROJECT_DIR/VERSION")"
-		elif [ -n "$sha" ]; then
-			printf 'dev-%s' "$sha"
-		else
-			printf 'dev'
-		fi
-		return
-	fi
-
-	# 3) 既不是发布版，也没有 git 仓库
-	if [ -f "$PROJECT_DIR/VERSION" ]; then
-		tr -d ' \t\r\n' <"$PROJECT_DIR/VERSION"
+	elif [ -f "$SELF_DIR/VERSION" ]; then
+		tr -d ' \t\r\n' <"$SELF_DIR/VERSION"
+	elif command -v git >/dev/null 2>&1 && [ -d "$SELF_DIR/.git" ]; then
+		git -C "$SELF_DIR" describe --tags --always 2>/dev/null || printf 'dev'
 	else
 		printf 'dev'
 	fi
 }
 
-# ── 发布 tag（dshm 的版本只认 tag）─────────────────────────────────────────
-#
-# 核心原则：**只认 tag，绝不跟随 main**。跟随 main 就等于会把「你还没决定发布的、
-# 某个中间提交」装到生产上。tag 是你明确说「这个版本可以发」的唯一信号。
-#
-# 约定：dshm 的发布 tag 形如 v2026.09.30（带 v 前缀，否则 CI 的 refs/tags/v* 不触发）。
+# ── 实例目录 ────────────────────────────────────────────────────────────────
+config_file() { printf '%s/dshm/config' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
 
-# 列出全部 dshm 发布 tag（降序，最新在前）。取不到就返回非 0。
-# 把 tag 名转成「显示/比较用的版本文本」：去掉可能存在的 v 前导。
-# dshm 的发布 tag 形如 v2026.10.01-2，镜像 tag 形如 0.2.0-rc.2-2026.10.01-3。
-ver_of_tag() { printf '%s' "${1#v}"; }
-
-# 列出发布 tag。输出每行「<sha> <完整 tag 名>」，按版本降序。
-#
-# **同一提交可能同时带两类 tag**（v2026.10.01-2 与 0.2.0-rc.2-2026.10.01-3），
-# 两者都列出来：用户回退时用的是镜像 tag，自更新时用的是 v* tag，缺一不可。
-# 早先这里用 `$2 ~ /^v[0-9]/` 过滤，把镜像 tag 全滤掉了 —— 于是
-# `dshm dshm update --to <镜像tag>` 必然报「无效的版本」，而 README 与 CI 都宣称它能用。
-dshm_tags() {
-	command -v git >/dev/null 2>&1 || return 1
-	local raw
-	raw="$(timeout 20 git ls-remote --tags --refs "$DSHM_REPO_URL" 2>/dev/null)" || return 1
-	printf '%s\n' "$raw" |
-		awk -F'refs/tags/' '
-			NF == 2 && $2 != "" {
-				# 只要形如 v<数字>... 或 <数字>... 的 tag；其它（release-* 等）跳过
-				if ($2 ~ /^v?[0-9]/) print $1 "\t" $2
-			}' |
-		# -V（版本感知）而不是普通降序：字符串排序会把 2026.09.9 排在 2026.09.30 前面。
-		# 镜像 tag 以 dsh 版本开头，排序天然排在当天日期 tag 之前/之后都可能，故对
-		# 「去掉 v 前缀」的文本排序，保证同一天的 tag 相邻。
-		sort -k2,2rV
+remember_app_dir() {
+	local d="$1" cfg
+	cfg="$(config_file)"
+	mkdir -p "$(dirname "$cfg")"
+	printf 'APP_DIR=%q\n' "$d" >"$cfg"
+	chmod 600 "$cfg" 2>/dev/null || true
 }
 
-# 最新发布 tag（完整名）。优先取 v* 形式的 dshm 发布 tag —— 自更新拿的是 dshm 包，
-# 只有 v* tag 一定带包；镜像 tag 也带包（CI 会发），但 v* 更明确。
-dshm_latest_tag() {
-	local all
-	all="$(dshm_tags 2>/dev/null || true)"
-	[ -n "$all" ] || return 0
-	printf '%s\n' "$all" | awk '{print $2}' | grep -E '^v[0-9]' | head -1
+resolve_app_dir() {
+	if [ -n "${DSHM_APP_DIR:-}" ]; then
+		printf '%s' "$DSHM_APP_DIR"
+		return
+	fi
+	local cfg
+	cfg="$(config_file)"
+	if [ -f "$cfg" ]; then
+		# shellcheck source=/dev/null
+		. "$cfg"
+		if [ -n "${APP_DIR:-}" ]; then printf '%s' "$APP_DIR"; return; fi
+	fi
+	# 兼容：直接放在仓库目录里运行时，用仓库目录
+	if [ -f "$SELF_DIR/.env" ] && [ -f "$SELF_DIR/docker-compose.yml" ]; then
+		printf '%s' "$SELF_DIR"
+		return
+	fi
+	printf ''
 }
 
-# 某个 tag 对应的 commit（找不到就返回非 0）。接受带或不带 v 前缀。
-dshm_tag_sha() {
-	local want="$1"
-	command -v git >/dev/null 2>&1 || return 1
-	case "$want" in
-	v*) ;;
-	*) want="v${want}" ;;
-	esac
-	timeout 20 git ls-remote --tags --refs "$DSHM_REPO_URL" "refs/tags/${want}" 2>/dev/null |
-		awk 'NR==1{print $1}'
-}
-
-
-# 该 tag 的 release **发布包**（dshm 的完整运行目录，版本号已由 CI 写死）。
-# 这是首选下载地址：自更新的目标机器通常既没有 git 仓库也没有 VERSION 文件，
-# 用仓库里的原始文件不但版本号会退化成 dev，而且单独一个脚本根本跑不起来 ——
-# dshm 会 source 同目录的 scripts/env-config.sh 等文件。
-# 给定一个**完整 tag 名**（含 v 前缀，如 v2026.10.01-2），返回该 tag 的 release 包地址。
-#
-# 统一规则：包名 = dshm-<tag>.tar.gz。以前这里把版本拼成 `v%s`，于是对镜像 tag
-# （0.2.0-rc.2-2026.10.01-3，不带 v）会拼出 v0.2.0-... 而 404 —— 现在直接用 tag 名，
-# 两类 tag 都能对上。
-dshm_release_url() {
-	local tag="$1"
-	printf 'https://github.com/qxdho/deepseek-harness-docker/releases/download/%s/dshm-%s.tar.gz' "$tag" "$tag"
-}
-
-# 放系统命令的目录：优先 /usr/local/bin（可写 / root / 免密 sudo），否则 ~/.local/bin。
-# 只认免密 sudo，避免 `sudo -n false` 时卡在密码提示上。
-cli_dir() {
-	if [ -w /usr/local/bin ] 2>/dev/null || is_root; then
-		printf '%s' /usr/local/bin
-	elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-		printf '%s' /usr/local/bin
+default_app_dir() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '/opt/dsh'
 	else
-		printf '%s' "${HOME}/.local/bin"
+		printf '%s/dshm/default' "${XDG_DATA_HOME:-$HOME/.local/share}"
 	fi
 }
 
-install_self() {
-	hdr "把 dshm 注册为系统命令"
-	local dir target
-	dir="$(cli_dir)"
-	target="$dir/$CLI_NAME"
-	chmod +x "$PROJECT_DIR/$CLI_NAME" 2>/dev/null || true
-	# 先把目录建出来（~/.local/bin 通常还不存在），再判断可写性
-	if ! mkdir -p "$dir" 2>/dev/null; then
-		if command -v sudo >/dev/null 2>&1; then
-			sudo mkdir -p "$dir" || die "无法创建 $dir"
-		else
-			die "无法创建 $dir（需要 root 或 sudo）"
-		fi
-	fi
-	if [ -w "$dir" ] || is_root; then
-		ln -sfn "$PROJECT_DIR/$CLI_NAME" "$target"
-	elif command -v sudo >/dev/null 2>&1; then
-		sudo ln -sfn "$PROJECT_DIR/$CLI_NAME" "$target"
-	else
-		die "无法写入 $dir（需要 root、可写的目标目录，或已安装 sudo）"
-	fi
-	[ -L "$target" ] || die "创建链接失败：$target"
-	ok "已注册：${target} -> ${PROJECT_DIR}/${CLI_NAME}"
-	case ":$PATH:" in
-	*":$dir:"*)
-		info "现在可在任意目录直接运行： dshm status"
-		;;
-	*)
-		warn "$dir 不在 PATH 中，把下面一行加到 ~/.bashrc 或 ~/.zshrc："
-		printf '\n    export PATH="%s:$PATH"\n\n' "$dir"
-		;;
-	esac
+APP_DIR=""
+STATE=""
+CONTAINER="$DEFAULT_CONTAINER"
+
+set_app() {
+	APP_DIR="$1"
+	STATE="$APP_DIR/state.json"
+	ENV_FILE="$APP_DIR/.env"
 }
 
-uninstall_self() {
-	hdr "移除系统命令"
-	local dir target found=0
-	for dir in /usr/local/bin "${HOME}/.local/bin"; do
-		target="$dir/$CLI_NAME"
-		[ -L "$target" ] || continue
-		found=1
-		if [ -w "$dir" ] 2>/dev/null || is_root; then
-			rm -f "$target"
-		elif command -v sudo >/dev/null 2>&1; then
-			sudo rm -f "$target"
-		else
-			warn "无法移除 $target（权限不足）"
-			continue
-		fi
-		ok "已移除 $target"
+require_app() {
+	if [ -z "$APP_DIR" ] || [ ! -f "$APP_DIR/.env" ]; then
+		die "找不到实例。先运行 dshm docker install，或用 --dir /path 指定。"
+	fi
+	[ -f "$STATE" ] || die "缺少状态文件 $STATE（可用 dshm docker install 重建，或从备份恢复）"
+	ENV_FILE="$APP_DIR/.env"
+	CONTAINER="$(state_get container)"
+	[ -n "$CONTAINER" ] || CONTAINER="$DEFAULT_CONTAINER"
+}
+
+# ── 状态文件 ────────────────────────────────────────────────────────────────
+state_get() {
+	[ -f "$STATE" ] || return 0
+	sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$STATE" 2>/dev/null | head -1
+}
+
+write_state() { # <image> <previous>
+	local image="$1" previous="${2:-}" tmp
+	tmp="$STATE.tmp.$$"
+	cat >"$tmp" <<EOF
+{
+  "schema": 1,
+  "container": "${CONTAINER}",
+  "image": "${image}",
+  "previous_image": "${previous}",
+  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+	mv "$tmp" "$STATE"
+	chmod 600 "$STATE" 2>/dev/null || true
+}
+
+# ── docker compose ──────────────────────────────────────────────────────────
+require_docker() {
+	command -v docker >/dev/null 2>&1 || die "未安装 docker"
+	docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"
+}
+
+compose() {
+	( cd "$APP_DIR" && docker compose --env-file "$APP_DIR/.env" "$@" )
+}
+
+container_health() {
+	docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER" 2>/dev/null || true
+}
+
+wait_healthy() {
+	local port="$1" i code
+	for i in $(seq 1 180); do
+		[ "$(container_health)" = "healthy" ] && return 0
+		sleep 1
 	done
-	[ "$found" = "1" ] || info "没有找到注册的符号链接（可能未安装过）"
+	# 没有 healthcheck 时用 /login 兜底
+	for i in $(seq 1 30); do
+		code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${port}/login" 2>/dev/null || true)"
+		[ "$code" = "200" ] && return 0
+		sleep 1
+	done
+	return 1
 }
 
-# ── dshm 自更新（只认 tag）──────────────────────────────────────────────────
-#
-# **只从发布 tag 拉取，绝不跟随 main。** 跟随 main 意味着会把「你还没决定发布的
-# 某个中间提交」装到生产上；tag 是你明确说「这个版本可以发」的唯一信号。
-#
-# 适用场景：只装了 dshm（或已注册为系统命令）、没保留 git 仓库的部署机。
-# 在 git 工作区里请用 git pull —— 那样能拿到 tag 之后的提交，而且不会覆盖本地改动。
-#
-# 安全措施：
-#   1. 下载到临时文件 → `bash -n` 语法检查 → 特征串检查，再替换（断网不会留半截脚本）
-#   2. 同目录内 install（原子），保留原文件权限位
-#   3. 内容相同则跳过，--force 才强制
-#   4. 在 git 工作区里默认停下（除非 --allow-stale），避免静默覆盖你的本地改动
-self_update() {
-	hdr "更新 dshm 自身"
-	local force=0 allow_stale=0 target=""
-	# 必须用 while + shift，不能用 `for a in "$@"`：for 会**先展开整个参数列表**，
-	# 循环体里的 shift 只影响 $1、不影响已展开的迭代序列 —— 于是 `--to 2026.10.01`
-	# 在处理 --to 时正确取到版本号后，又会把同一个版本号当成新参数再走一遍，
-	# 报出莫名其妙的「未知参数：2026.10.01」。while 按语义逐个消费才正确。
+print_url() {
+	local bind port
+	bind="$(get_env DSH_BIND "$ENV_FILE")"; bind="${bind:-127.0.0.1}"
+	port="$(get_env DSH_HTTP_PORT "$ENV_FILE")"; port="${port:-3080}"
+	if [ "$bind" = "0.0.0.0" ]; then
+		printf '    http://<服务器IP>:%s/\n' "$port"
+	else
+		printf '    http://127.0.0.1:%s/（仅在宿主机可访问，请用反代或 SSH 隧道）\n' "$port"
+	fi
+}
+
+# ── 安装 ────────────────────────────────────────────────────────────────────
+cmd_docker_install() {
+	local dir="" image="${DSHM_IMAGE:-$DEFAULT_IMAGE}" port=3080 bind=127.0.0.1
+	local data_dir="" password="" stdin_pw=0 no_pull=0 dry_run=0 uid gid
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--force | -f) force=1 ;;
-		--allow-stale) allow_stale=1 ;;
-		--to)
-			target="${2:-}"
-			[ -n "$target" ] || die "--to 需要版本号（用法：./dshm dshm update --to 2026.10.01）"
-			shift
-			;;
-		--to=*) target="${1#--to=}" ;;
-		*) die "未知参数：$1（用法：./dshm dshm update [--to 版本] [--force] [--allow-stale]）" ;;
+		--dir | --app-dir) dir="${2:-}"; shift ;;
+		--data-dir) data_dir="${2:-}"; shift ;;
+		--port) port="${2:-}"; shift ;;
+		--bind) bind="${2:-}"; shift ;;
+		--image) image="${2:-}"; shift ;;
+		--password-stdin) stdin_pw=1 ;;
+		--no-pull) no_pull=1 ;;
+		--dry-run) dry_run=1 ;;
+		*) die "未知参数：$1" ;;
 		esac
 		shift
 	done
 
-	command -v curl >/dev/null 2>&1 || die "需要 curl 才能自更新（或改用 git pull）"
+	[ "$dry_run" = "1" ] || require_docker
+	[ -n "$dir" ] || dir="$(default_app_dir)"
+	case "$dir" in /*) ;; *) die "--dir 必须是绝对路径：$dir" ;; esac
+	[ -e "$dir/.env" ] && die "$dir 已经有 .env；如果要接管已有实例，请先备份后手动处理"
+	mkdir -p "$dir"
+	set_app "$dir"
 
-	local cur
-	cur="$(dshm_version)"
-
-	# 没有指定版本时，取最新 tag。取不到 tag 就明确说清 —— 绝不回退到 main。
-	if [ -z "$target" ]; then
-		target="$(dshm_latest_tag 2>/dev/null || true)"
-		if [ -z "$target" ]; then
-			die "尚未发布任何版本 tag，无法更新。
-
-  dshm 只从发布 tag 更新，不跟随 main —— 以免装到你还没决定发布的中间提交。
-  当前可用方式：
-    * 在 git 工作区里：git pull
-    * 发布一个版本：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
-		fi
-		info "最新发布版本：${target}"
-	fi
-
-	# ── tag 归一化：统一成**带 v 的完整 tag** ────────────────────────────────
-	#
-	# 这是全脚本唯一的规范形态。`dshm_latest_tag` 返回的就是带 v 的完整 tag，而用户
-	# 敲 `--to 2026.10.01-3` 时是裸版本 —— 两者必须在这里归一，否则下游会各错一半：
-	#   * `v${target}` 拼出 `vv2026.10.01-3`（release URL 404，实测）；
-	#   * `$cur != $target` 拿裸版本比带 v 的，恒真（"已是该版本"的提示永不出现）；
-	#   * `dshm-v${target}` 包名拼错。
-	# 之前这些地方各自 `v${target}`，就是因为归一化缺失。
-	case "$target" in
-	v*) ;;
-	*) target="v${target}" ;;
-	esac
-	# cur 也归一（它来自 dshm_version，可能带或不带 v）
-	case "$cur" in
-	v*) ;;
-	*) cur="v${cur}" ;;
-	esac
-
-	# 确认目标 tag 真实存在（打错版本号时立刻报错，而不是下到一个 404 页面）
-	local sha
-	sha="$(dshm_tag_sha "$target" 2>/dev/null || true)"
-	if [ -z "$sha" ]; then
-		warn "找不到 tag ${target}，已发布的版本："
-		if ! dshm_tags 2>/dev/null | awk '{print $2}' | sed 's/^/        /' ; then
-			printf '        （查询失败，检查网络）\n'
-		fi
-		die "无效的版本：${target}"
-	fi
-
-	if [ "$force" != "1" ] && [ "$(ver_of_tag "$target")" = "$cur" ]; then
-		ok "已经是该版本（${cur}），无需更新"
-		info "如确实要重新下载，加 --force"
-		return 0
-	fi
-
-	# git 工作区里默认停下：自更新会用 tag 版覆盖你的工作树文件，
-	# 包括 tag 之后你新写的提交 —— 那等于把你的改动回退了。
-	if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1 && [ "$allow_stale" != "1" ]; then
-		warn "当前目录是 git 工作区，推荐用 git pull 更新"
-		if [ "$cur" != "$target" ]; then
-			warn "若继续，会用 ${target} 的 dshm 覆盖你工作树里的文件（含 tag 之后的提交改动）"
-		fi
-		die "已停下以免覆盖你的本地改动。
-      确认要继续：./dshm dshm update --to ${target} --allow-stale"
-	fi
-
-	# 从该 tag 的 **release 包**下载。包里是 dshm 的完整运行目录：
-	#   dshm                                        脚本本身（版本号已被 CI 写死）
-	#   scripts/{env-config,migrate-home,admin}.sh  它 source 的依赖
-	#
-	# 为什么必须整包：dshm 会 source 同目录下的这几个文件，单独一个脚本在任何地方都
-	# 跑不起来。而本命令面向的是没保留 git 仓库的部署机，它没有这些文件。
-	#
-	# 为什么用 release 而不是仓库原始文件：仓库里的 dshm 带 __VERSION__ 占位符，靠
-	# git / VERSION 文件推断版本；部署机两者都没有，不替换的话版本号会退化成 dev。
-	local tgz_url sha_url
-	tgz_url="$(dshm_release_url "$target")"
-	sha_url="${tgz_url}.sha256"
-
-	local tgz workdir
-	tgz="$(mktemp "${TMPDIR:-/tmp}/dshm.XXXXXX.tgz")"
-	workdir="$(mktemp -d "${TMPDIR:-/tmp}/dshm.XXXXXX")"
-	# 任何提前 return / die 都清掉临时物；安装成功后再显式清空
-	trap 'rm -rf "$tgz" "$workdir" 2>/dev/null || true' RETURN
-
-	info "下载 $tgz_url"
-	if ! curl -fsSL -o "$tgz" "$tgz_url"; then
-		rm -f "$tgz"
-		die "下载失败：$tgz_url
-      tag ${target} 的 release 里可能还没有 dshm 发布包（CI 尚未发布完成）。
-      也可用镜像地址：DSHM_REPO 指向你的 fork / 内网镜像"
-	fi
-
-	# 校验 sha256（CI 会一并发布 .sha256）。取不到校验文件只警告不阻断 ——
-	# 可能是较早的发布没有附带，但仍然值得装。
-	local want got
-	# 末尾的 || true 必需：curl 对该文件返回非 0 时，pipefail 会让整条赋值失败，
-	# 而 set -e 会直接终止脚本 —— 下面「取不到只警告」的分支根本走不到（实测复现）。
-	want="$(curl -fsSL --max-time 30 "$sha_url" 2>/dev/null | awk 'NR==1{print $1}' || true)"
-	if [ -n "$want" ]; then
-		got="$(sha256sum "$tgz" | cut -d' ' -f1)"
-		if [ "$want" != "$got" ]; then
-			die "下载包校验失败（期望 ${want}，实际 ${got}），已放弃安装（现有文件未改动）"
-		fi
-		ok "校验通过（sha256 ${got%"${got#???????}"}…）"
+	if [ "$stdin_pw" = "1" ]; then
+		IFS= read -r password || true
 	else
-		warn "该版本没有附带 .sha256 校验文件，跳过完整性校验"
-	fi
-
-	# 先在临时目录解包并**全部**验证完，任何一步不过都不碰现有文件
-	tar -xzf "$tgz" -C "$workdir" || die "解包失败（文件可能损坏）"
-	# 包内目录名 = dshm-<完整 tag>（CI 用 pkg="dshm-${GITHUB_REF_NAME}" 打包）。
-	# 早先是 `dshm-v${target}`，而 target 那时已被剥掉 v —— 两类命名各错一半。
-	local src="$workdir/dshm-${target}"
-	[ -f "$src/dshm" ] || die "发布包里缺少 dshm（包结构异常）"
-	# 运行时依赖一个都不能少。这份清单必须与 .github/workflows/build.yml 里
-	# 打包自检的 `required=...` 以及 dshm 顶部真正 source 的文件一致 ——
-	# 正是因为这里漏了 log.sh 与 preflight.sh，线上发布包曾开箱即废
-	# （`./dshm help` → line 37: scripts/log.sh: No such file or directory）。
-	local f
-	for f in scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh \
-		scripts/preflight.sh scripts/admin.sh scripts/doctor.sh; do
-		[ -f "$src/$f" ] || die "发布包里缺少 $f（dshm 运行时会 source 它，包结构异常）"
-	done
-	# 每个脚本都过语法检查，而不只是 dshm
-	for f in "$src/dshm" "$src"/scripts/*.sh; do
-		bash -n "$f" 2>/dev/null || die "$(basename "$f") 未通过语法检查，已放弃替换（原文件未改动）"
-	done
-	# 内容自检：确认确实是本项目脚本，而不是错误页 / 代理返回的 HTML
-	grep -q 'dshm dshm' "$src/dshm" || die "下载到的内容不像 dshm（缺少预期特征），已放弃替换"
-
-	local curfile="$PROJECT_DIR/$CLI_NAME"
-	local mode
-	mode="$(stat -c '%a' "$curfile" 2>/dev/null || echo 755)"
-	# 是否需要用 sudo 安装（只判断一次，后面所有文件共用）
-	local use_sudo=0
-	if [ ! -w "$curfile" ] && [ ! -w "$PROJECT_DIR" ]; then
-		command -v sudo >/dev/null 2>&1 || die "无法写入 $PROJECT_DIR（需要它可写，或用 sudo）"
-		use_sudo=1
-	fi
-
-	if [ "$force" != "1" ] && [ -f "$curfile" ] \
-		&& [ "$(sha256sum "$curfile" | cut -d' ' -f1)" = "$(sha256sum "$src/dshm" | cut -d' ' -f1)" ]; then
-		ok "脚本内容与该版本一致，无需更新"
-		info "如确实要重新安装整个包，加 --force"
-		return 0
-	fi
-
-	# 安装：脚本 + 依赖，全部来自刚验证过的 $src，不改动其它文件
-	mkdir -p "$PROJECT_DIR/scripts"
-	if [ "$use_sudo" = "1" ]; then
-		sudo install -m "$mode" "$src/dshm" "$curfile" &&
-			sudo cp "$src/scripts/"*.sh "$PROJECT_DIR/scripts/" ||
-			die "安装失败（sudo 出错）"
-	else
-		install -m "$mode" "$src/dshm" "$curfile" &&
-			cp "$src/scripts/"*.sh "$PROJECT_DIR/scripts/" ||
-			die "安装失败"
-	fi
-	ok "已更新到 ${target}：$curfile（含 scripts/ 依赖）"
-	[ "$cur" != "$target" ] && info "版本：${cur} → ${target}"
-	info "仓库：$DSHM_REPO_URL"
-}
-
-# ── 密码合规检查 ────────────────────────────────────────────────────────────
-# 规则本身写在 scripts/env-config.sh 的 env_validate_password 里（install.sh 也用
-# 那一份），这里只把「不合规」从「返回 1」翻译成「直接退出」。
-check_password() {
-	env_validate_password "$1" || die "密码不合规（至少 14 位，且含大写/小写/数字/特殊符号）"
-}
-
-PASSWORD=""
-ask_new_password() {
-	local p1 p2
-	while :; do
-		read_secret "  新密码（≥14位，含大写/小写/数字/符号）："
+		local p1 p2
+		hdr "设置 dsh 登录密码"
+		info "至少 14 位；输入不回显"
+		read_secret "  密码："
 		p1="$SECRET"
-		read_secret "  再输一次确认："
+		read_secret "  再输一次："
 		p2="$SECRET"
-		# 非交互模式（管道）下 stdin 耗尽会一直读到空串，p1 != p2 永远成立 →
-		# 无限循环。检测到空输入直接报错，别让调用方挂住。
-		if [ ! -t 0 ] && { [ -z "$p1" ] || [ -z "$p2" ]; }; then
-			die "非交互模式下读取密码失败（输入为空或已到 EOF）；改密码请交互执行 ./dshm auth password"
-		fi
-		if [ "$p1" != "$p2" ]; then
-			printf '  %s两次输入不一致，请重新输入%s\n' "$YEL" "$RST"
-			continue
-		fi
-		check_password "$p1"
-		PASSWORD="$p1"
-		return
-	done
-}
-
-# 等待容器健康。实现放在 scripts/env-config.sh，install.sh 共用同一份 —— 此前
-# 两处各写一遍、语义已经漂移（install.sh 那版在 docker inspect 首次失败时就退出，
-# 会把容器刚创建时的瞬时错误误判成启动失败）。
-wait_healthy() {
-	wait_container_healthy "$CONTAINER" "docker logs --tail 40 $CONTAINER"
-}
-
-# 启动/重建前的统一准备：旧键改名 + 对齐默认值 + 目录属主预检。
-# up 和 restart 都要走这一步 —— 否则改了 DSH_WORKSPACE_HOST 之后直接重建容器，
-# dockerd 会把源目录建 root 属主，容器里写不进去，只能靠降级悄悄跑。
-prepare_workspace() {
-	migrate_legacy_keys
-	normalize_defaults
-	# 旧版数据在命名卷里：目标目录还是空的就先自动搬过来，否则新版起来会
-	# 「看起来像全新安装」。只在这一次会真正动手，之后目标非空即跳过。
-	auto_migrate_legacy_home
-	hdr "准备工作区"
-	# shellcheck source=scripts/preflight.sh
-	. ./scripts/preflight.sh
-	if ! check_workspace "$PWD" auto 1; then
-		die "工作区未就绪，请按上面的提示处理后重试"
+		[ "$p1" = "$p2" ] || die "两次输入不一致"
+		password="$p1"
 	fi
-	ok "工作区就绪：${DSH_WORKSPACE_DIR}"
-}
+	[ "${#password}" -ge 14 ] || die "密码至少 14 位"
+	case "$password" in *$'\n'*) die "密码不能包含换行" ;; esac
 
-# ── 镜像 tag（dsh 容器版本）────────────────────────────────────────────────
-#
-# 镜像 tag 形如 <dsh版本>-<日期>-<序号>：0.2.0-rc.2-2026.09.30-1
-#   * 带 dsh 版本 → 一眼看出镜像里是哪个 dsh
-#   * 带日期      → 看出是哪天的构建
-#   * 带序号      → 同一天多次构建互不覆盖，旧镜像仍可回退
-#
-# 为什么必须有序号：tag 一旦被同名覆盖，旧镜像就失去引用、可能被回收，回退就没了。
-# 这正是原先那个「纯 dsh 版本 tag」的坑，所以它已被移除。
+	data_dir="${data_dir:-$dir/data}"
+	case "$data_dir" in /*) ;; *) die "--data-dir 必须是绝对路径" ;; esac
+	mkdir -p "$data_dir" "$dir/workspace"
 
-img_base() {
-	# 默认值写在这里（而不是顶层常量）：函数一定在变量赋值之后才被调用，
-	# 把默认值放在函数体内就不存在「常量定义没被执行」的风险。
-	#
-	# 但**不能只认 DSH_IMAGE_BASE**：.env.example 里并没有这一项，用户能配的是
-	# DSH_IMAGE（如指向私有 registry 的镜像）。若只认前者，`version update` 会把
-	# 用户配好的 DSH_IMAGE 覆盖回默认 registry —— 配置被静默改掉。
-	# 所以：显式的 DSH_IMAGE_BASE 优先，其次从现有 DSH_IMAGE 里取仓库部分，最后才是默认值。
-	local base repo part
-	if [ -n "${DSH_IMAGE_BASE:-}" ]; then
-		printf '%s' "$DSH_IMAGE_BASE"
-		return
+	uid="${DSH_UID:-$(id -u)}"
+	gid="${DSH_GID:-$(id -g)}"
+	if [ "$uid" = "0" ]; then
+		uid=1000
+		gid=1000
+		warn "以 root 安装：容器将使用 1000:1000；必要时设置 DSH_UID/DSH_GID"
 	fi
-	base="$(env_value DSH_IMAGE "")"
-	if [ -n "$base" ]; then
-		# 去掉 :tag，只认**最后一个 `/` 之后**的冒号是标签分隔符。
-		#
-		# 早先用 `case *:*/*` 判断，会把这些情况弄错：
-		#   registry.local:5000        （没有路径）→ 被截成 `registry.local`
-		#   repo@sha256:abc123         （digest）    → 被截成 `repo@sha256`
-		# 截断后 dshm 会把这个错值 set_env 回 .env，用户配的仓库/digest 被悄悄改掉，
-		# 直到下次 compose pull 才炸。
-		repo="${base##*/}" # 最后一个 / 之后的部分
-		case "$base" in
-		*/*) ;;
-		*) repo="$base" ;;
-		esac
-		part="${repo##*:}"
-		if [ "$part" != "$repo" ]; then
-			# 只有当冒号后那段不是纯数字时才算 tag：`host:5000` 的 5000 是端口。
-			case "$part" in
-			*[!0-9]*)
-				# digest 形如 repo@sha256:...，`@` 之前没有 tag 语义，原样保留
-				case "$base" in
-				*@*) : ;;
-				*) base="${base%:*}" ;;
-				esac
-				;;
-			esac
-		fi
-		printf '%s' "$base"
-		return
-	fi
-	printf '%s' "ghcr.io/qxdho/deepseek-harness-docker"
-}
+	[ "$(id -u)" = "0" ] && chown -R "$uid:$gid" "$data_dir" "$dir/workspace" 2>/dev/null || true
 
-# GHCR 的匿名 pull token（只读，列 tag 不需要登录）
-ghcr_token() {
-	local img="$1" host repo
-	host="${img%%/*}"
-	repo="${img#"$host"/}"
-	command -v curl >/dev/null 2>&1 || return 1
-	curl -fsSL --max-time 15 \
-		"https://${host}/token?scope=repository:${repo}:pull&service=${host}" 2>/dev/null |
-		awk -F'"' '{for(i=1;i<=NF;i++) if($i=="token"){print $(i+2); exit}}'
-}
+	# compose 模板
+	[ -f "$SELF_DIR/templates/compose.yaml" ] || die "发布包缺少 templates/compose.yaml"
+	cp "$SELF_DIR/templates/compose.yaml" "$dir/docker-compose.yml"
 
-# 列出该镜像仓库的全部 tag（每行一个）。取不到返回非 0。
-# 响应形如 {"name":"...","tags":[...]}：直接按引号切会把 name 也切出来，
-# 所以先定位 "tags":[ 这一段再拆。
-img_tags() {
-	local img token host repo raw
-	img="$(img_base)"
-	token="$(ghcr_token "$img")" || return 1
-	[ -n "$token" ] || return 1
-	host="${img%%/*}"
-	repo="${img#"$host"/}"
-	# 先整段取回再解析，而不是直接接管道 —— 这样能区分「查不动」与「确实没有 tag」。
-	# 以前末尾那个 `|| true` 把 curl 失败也吞成"成功但输出为空"，于是：
-	#   * img_tag_exists 恒为假 → `version update --to <正确的 tag>` 报「无效的镜像 tag」，
-	#     回退路径在仓库抖动（500/429/网络中断）时被彻底堵死，且诊断是误导性的；
-	#   * version list 走"还没有构建"那个分支，永远看不到真正的网络错误。
-	raw="$(curl -fsSL --max-time 20 -H "Authorization: Bearer ${token}" \
-		"https://${host}/v2/${repo}/tags/list" 2>/dev/null)" || return 1
-	printf '%s' "$raw" |
-		sed -n 's/.*"tags":\[\(.*\)\]}.*/\1/p' |
-		tr ',' '\n' | sed 's/^"//; s/"$//' | grep -v '^$' || true
-}
+	# .env
+	CONTAINER="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
+	{
+		printf 'DSH_IMAGE=%s\n' "$image"
+		printf 'DSH_HTTP_PORT=%s\n' "$port"
+		printf 'DSH_BIND=%s\n' "$bind"
+		printf 'DSH_HOME_HOST=%s\n' "$data_dir"
+		printf 'DSH_HOME_CONTAINER=/dsh\n'
+		printf 'DSH_WORKSPACE_HOST=%s\n' "$dir/workspace"
+		printf 'DSH_WORKSPACE_CONTAINER=/workspace\n'
+		printf 'DSH_UID=%s\n' "$uid"
+		printf 'DSH_GID=%s\n' "$gid"
+		printf 'DSH_AUTH_USER=admin\n'
+		printf 'DSH_AUTH_PASSWORD=%s\n' "$password"
+		printf 'DSH_AUTH_TOTP=optional\n'
+		printf 'DSH_COOKIE_SECURE=0\n'
+		printf 'DSH_PUBLIC_HOST=\n'
+		printf 'DSH_DISK_MIN_MB=256\n'
+		printf 'DSH_WORKSPACE_STRICT=0\n'
+	} >"$dir/.env"
+	chmod 600 "$dir/.env"
 
-# 当天该 dsh 版本的下一个序号：已有几个 <dsh>-<日期>-* 就 +1
-img_next_seq() {
-	local dsh="$1" day="$2" n
-	n="$(img_tags 2>/dev/null | grep -cE "^${dsh}-${day}-[0-9]+$" || true)"
-	[ -n "$n" ] || n=0
-	printf '%s' "$((n + 1))"
-}
-
-# 构造镜像 tag
-
-# ── dsh 版本管理 ────────────────────────────────────────────────────────────
-# npm registry 上的可用版本。解析 JSON 优先用 jq，其次 node / python3 —— 部署机上不一定
-# 装了其中哪一个，所以按顺序回退；都没有就给出 npm 查询地址让用户自己看。
-DSH_NPM_NAME="@deepseek-ai/dsh"
-DSH_NPM_REGISTRY="${DSH_NPM_REGISTRY:-https://registry.npmjs.org}"
-
-dsh_npm_json() {
-	command -v curl >/dev/null 2>&1 || return 1
-	curl -fsSL --max-time 20 "$DSH_NPM_REGISTRY/$DSH_NPM_NAME" 2>/dev/null
-}
-
-# 从 stdin 读 JSON，交给可用的解释器执行查询，结果打到 stdout。
-#
-# 为什么要有这个分发器：同一个「jq → node → python3 依次尝试」的级联原来在
-# dsh_versions_sorted / dsh_dist_tags / dsh_latest_version 里各抄了一遍
-# （6 份实现）。想改"多支持一个解释器"或"失败时怎么报"就得改六处，必然漂移。
-#
-# 参数：<jq 表达式> <node 程序体> <python3 程序体>
-#   * node 程序体里：`s` 是读到的原始字符串，`d` 是 JSON.parse 的结果；
-#   * python3 程序体里：`d` 是解析后的 dict。
-# 三个都不可用时返回 1（调用方自己决定怎么提示）。
-json_query() {
-	local jq_expr="$1" node_body="$2" py_body="$3"
-	if command -v jq >/dev/null 2>&1; then
-		jq -r "$jq_expr" 2>/dev/null
-		return $?
-	elif command -v node >/dev/null 2>&1; then
-		node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{try{const d=JSON.parse(s);${node_body}}catch(e){process.exit(1)}})" 2>/dev/null
-		return $?
-	elif command -v python3 >/dev/null 2>&1; then
-		python3 -c "import json,sys
-d=json.load(sys.stdin)
-${py_body}" 2>/dev/null
-		return $?
-	fi
-	return 1
-}
-# 从 registry JSON 里抽出「每行一个版本，按 semver 升序」。
-#
-# **显式检查查询是否失败**，不靠调用方的 `set -o pipefail`：`json_query … | sort -V`
-# 里管道的退出码是 `sort` 的（成功），所以三个解释器全缺时本函数会"成功返回空"
-# —— 是否报错取决于调用方开没开 pipefail。本仓库调用方都带 pipefail，但这种
-# "契约随环境变化"的函数不该存在：谁在别处调用一次就中招。
-dsh_versions_sorted() {
-	local json="$1" out
-	out="$(printf '%s' "$json" | json_query '.versions | keys[]' \
-		'Object.keys(d.versions||{}).forEach(v=>console.log(v))' \
-		'print("\n".join(d.get("versions",{}).keys()))')" || return 1
-	printf '%s\n' "$out" | sort -V
-}
-
-dsh_dist_tags() {
-	local json="$1"
-	printf '%s' "$json" | json_query '."dist-tags" | to_entries | map("\(.key)=\(.value)") | join("  ")' \
-		'console.log(Object.entries(d["dist-tags"]||{}).map(([k,v])=>k+"="+v).join("  "))' \
-		'print("  ".join(f"{k}={v}" for k,v in d.get("dist-tags",{}).items()))'
-}
-
-# 当前生效的 dsh 版本：优先问运行中的容器（最准），容器没起就退回 .env / Dockerfile
-current_dsh_version() {
-	local v=""
-	if command -v docker >/dev/null 2>&1 && docker inspect "$CONTAINER" >/dev/null 2>&1; then
-		v="$(docker exec "$CONTAINER" dsh --version 2>/dev/null || true)"
-	fi
-	if [ -z "$v" ]; then
-		v="$(env_value_new DSH_VERSION "")"
-	fi
-	if [ -z "$v" ] && [ -f Dockerfile ]; then
-		# 用 awk 而非 grep -oP：BSD/macOS 自带的 grep 没有 -P，而且 grep 无匹配时
-		# 返回 1、在 pipefail 下会让整个赋值失败并终止脚本（实测复现）。
-		# scripts/update-versions.sh 里已经因为同样的原因改用 awk 了。
-		v="$(dockerfile_arg DSH_VERSION)"
-	fi
-	printf '%s' "$v"
-}
-
-
-# 从 Dockerfile 读一个 ARG 的值。两处都在读 DSH_VERSION，各写一遍迟早漂移
-# （其中一处曾用 grep -oP，BSD grep 没有 -P、且无匹配时会因 pipefail 终止脚本）。
-# 无匹配或读不到时返回空串，由调用方决定怎么兜底。
-dockerfile_arg() {
-	awk -F= -v k="ARG $1=" '
-		index($0, k) == 1 { v = substr($0, length(k) + 1); gsub(/[ \t\r]/, "", v); print v; exit }
-	' Dockerfile 2>/dev/null || true
-}
-# 该 dsh 版本在 npm 上是否存在（构建前校验，避免打错字等几分钟构建才失败）
-dsh_version_exists() {
-	local want="$1" json
-	json="$(dsh_npm_json)" || return 1
-	local all
-	all="$(dsh_versions_sorted "$json" 2>/dev/null)" || return 1
-	[ -n "$all" ] || return 1
-	printf '%s\n' "$all" | grep -qxF "$want"
-}
-
-# 该镜像 tag 是否已存在于仓库（拉取前校验）
-img_tag_exists() {
-	local want="$1"
-	img_tags 2>/dev/null | grep -qxF "$want"
-}
-
-# 从 npm 解析 dsh 的最新版（dist-tags.latest）。构建镜像前用它把版本 pin 进去，
-# 否则 Dockerfile / compose 里的默认值会一直是发布时的旧版本 —— 这是最容易踩的坑：
-# 「更新了」但装到的还是老版本。
-dsh_latest_version() {
-	local json tags
-	json="$(dsh_npm_json)" || return 1
-	tags="$(printf '%s' "$json" | json_query '."dist-tags".latest // empty' \
-		'process.stdout.write(String(d["dist-tags"].latest||""))' \
-		'sys.stdout.write(str(d.get("dist-tags",{}).get("latest","")))' || true)"
-	[ -n "$tags" ] || return 1
-	printf '%s' "$tags"
-}
-
-show_dsh_versions() {
-	local json cur latest tags all total shown
-	json="$(dsh_npm_json)" || {
-		die "无法访问 $DSH_NPM_REGISTRY（需要网络）；可手动查看：
-      $DSH_NPM_REGISTRY/$DSH_NPM_NAME"
-	}
-
-	all="$(dsh_versions_sorted "$json")" || die "解析 registry 响应失败（需要 jq、node 或 python3 之一）"
-	[ -n "$all" ] || die "registry 响应里没有版本信息"
-
-	cur="$(current_dsh_version)"
-	tags="$(dsh_dist_tags "$json" 2>/dev/null || true)"
-	latest="$(printf '%s\n' "$all" | tail -1)"
-	total="$(printf '%s\n' "$all" | wc -l | tr -d ' ')"
-
-	# --json：给管理面板（以及任何脚本）用的机器可读输出。走这里而不是让调用方去
-	# 解析中文表格 —— 那种解析一改格式就坏。
-	# 手写 JSON（不引入 jq 依赖），所以必须转义字符串：版本号理论上来自 registry，
-	# 仍然按不可信数据转义，避免一个带引号的版本号把面板的 JSON 解析带崩。
-	case "${1:-}" in
-	--json)
-		local esc esc_latest esc_tags
-		esc="$(printf '%s' "$cur" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-		# latest 也必须转义：它同样来自 registry，不能直接进 printf 的格式串
-		esc_latest="$(printf '%s' "$latest" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-		esc_tags="$(printf '%s' "$tags" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-		printf '{"current":"%s","latest":"%s","total":%s,"distTags":"%s","versions":[' \
-			"$esc" "$esc_latest" "$total" "$esc_tags"
-		local first=1 v
-		while IFS= read -r v; do
-			[ -n "$v" ] || continue
-			[ "$first" = "1" ] || printf ','
-			first=0
-			printf '"%s"' "$(printf '%s' "$v" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-		done <<EOF
-$all
-EOF
-		printf ']}\n'
+	if [ "$dry_run" = "1" ]; then
+		ok "dry-run：已生成 $dir/.env 与 $dir/docker-compose.yml（未启动）"
+		print_url
 		return 0
-		;;
-	esac
+	fi
 
-	hdr "dsh 可用版本"
-	# 列表可能很长（本仓库实测 29 个），默认只显示最近 10 个，--all 看全部。
-	shown="${DSH_VERSIONS_SHOWN:-10}"
-	case "${1:-}" in
-	--all | -a) shown="$total" ;;
-	esac
+	write_state "$image" ""
+	remember_app_dir "$dir"
 
-	printf '    当前运行：%s\n' "${cur:-未知}"
-	printf '    最新版本：%s\n' "$latest"
-	printf '    发布标签：%s\n' "${tags:-（无）}"
-	printf '    共 %s 个版本' "$total"
-	[ "$shown" -lt "$total" ] 2>/dev/null && printf '，下面显示最近 %s 个（--all 看全部）' "$shown"
-	printf '\n\n'
+	if [ "$no_pull" != "1" ]; then
+		hdr "拉取镜像"
+		compose pull || die "镜像拉取失败：$image"
+	fi
+	hdr "启动 dsh-docker"
+	compose up -d || die "docker compose up 失败"
+	if ! wait_healthy "$port"; then
+		compose logs --tail=80 || true
+		die "容器未在预期时间内健康"
+	fi
+	ok "dsh-docker 已启动"
+	hdr "访问地址"
+	print_url
+	info "实例目录：$dir"
+	info "配置：$dir/.env（含密码，权限 600）"
+}
 
-	printf '%s\n' "$all" | tail -n "$shown" | while IFS= read -r v; do
-		if [ "$v" = "$cur" ]; then
-			printf '    %s*%s %s  ← 当前\n' "$GRN" "$RST" "$v"
-		elif [ "$v" = "$latest" ]; then
-			printf '      %s  ← 最新\n' "$v"
-		else
-			printf '      %s\n' "$v"
-		fi
+# ── 生命周期 ────────────────────────────────────────────────────────────────
+cmd_docker_status() {
+	require_docker
+	require_app
+	hdr "dsh-docker 状态"
+	compose ps || true
+	info "镜像：$(state_get image)"
+	info "健康：$(container_health)"
+	info "容器：$CONTAINER"
+}
+
+cmd_docker_logs() {
+	require_docker
+	require_app
+	compose logs --tail="${1:-100}" --no-follow
+}
+
+cmd_docker_up() { require_docker; require_app; compose up -d; }
+cmd_docker_down() { require_docker; require_app; compose down; }
+cmd_docker_restart() { require_docker; require_app; compose restart; }
+cmd_docker_shell() { require_docker; require_app; docker exec -it "$CONTAINER" bash; }
+
+cmd_docker_url() {
+	require_app
+	print_url
+}
+
+# ── 更新 / 回退 ─────────────────────────────────────────────────────────────
+image_repo() {
+	local image="$1" repo part
+	repo="${image##*/}"
+	case "$image" in */*) ;; *) repo="$image" ;; esac
+	part="${repo##*:}"
+	case "$part" in *[!0-9]*) image="${image%:*}" ;; esac
+	printf '%s' "$image"
+}
+
+cmd_docker_update() {
+	local to="" image prev port
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--to) to="${2:-}"; shift ;;
+		*) die "未知参数：$1" ;;
+		esac
+		shift
 	done
-
-	printf '\n'
-	if [ -n "$cur" ] && [ "$cur" != "$latest" ]; then
-		warn "有新版本可用：$cur → $latest"
-		info "切换版本需要重建镜像（dsh 在构建期装入）："
-		info "  本地构建该版本：./dshm version update --build --dsh ${latest}"
-		info "  或先拉已构建的镜像（需镜像 tag，见 ./dshm version list）：./dshm version update --to <镜像tag>"
+	require_docker
+	require_app
+	prev="$(get_env DSH_IMAGE "$ENV_FILE")"
+	[ -n "$prev" ] || die ".env 里没有 DSH_IMAGE"
+	if [ -n "$to" ]; then
+		case "$to" in
+		*/*) image="$to" ;;
+		*) image="$(image_repo "$prev"):${to}" ;;
+		esac
 	else
-		ok "已经是最新版本"
+		image="$(image_repo "$prev"):latest"
+	fi
+	port="$(get_env DSH_HTTP_PORT "$ENV_FILE")"; port="${port:-3080}"
+
+	hdr "更新 dsh-docker"
+	info "$prev"
+	info "→ $image"
+	compose pull || die "拉取失败，未改配置"
+	set_env DSH_IMAGE "$image"
+	if ! compose up -d; then
+		set_env DSH_IMAGE "$prev"
+		die "重建失败，已恢复 $prev"
+	fi
+	if ! wait_healthy "$port"; then
+		warn "新版本不健康，回滚"
+		set_env DSH_IMAGE "$prev"
+		compose up -d || true
+		die "更新失败，已回滚到 $prev"
+	fi
+	write_state "$image" "$prev"
+	ok "已更新到 $image"
+}
+
+cmd_docker_rollback() {
+	local prev current port
+	require_docker
+	require_app
+	prev="$(state_get previous_image)"
+	current="$(state_get image)"
+	[ -n "$prev" ] || die "状态文件里没有 previous_image，无法回退"
+	port="$(get_env DSH_HTTP_PORT "$ENV_FILE")"; port="${port:-3080}"
+	hdr "回退 dsh-docker"
+	info "$current"
+	info "→ $prev"
+	set_env DSH_IMAGE "$prev"
+	compose up -d || die "回退启动失败"
+	if ! wait_healthy "$port"; then
+		die "回退后不健康，请检查：dshm docker logs"
+	fi
+	write_state "$prev" "$current"
+	ok "已回退到 $prev"
+}
+
+# ── 配置 ────────────────────────────────────────────────────────────────────
+cmd_docker_config() {
+	local sub="${1:-show}"
+	shift || true
+	require_app
+	case "$sub" in
+	show)
+		hdr "配置（$ENV_FILE）"
+		grep -v '^DSH_AUTH_PASSWORD=' "$ENV_FILE" | sed 's/^/    /'
+		info "DSH_AUTH_PASSWORD=已设置（不显示）"
+		;;
+	get)
+		[ -n "${1:-}" ] || die "用法：dshm docker config get KEY"
+		get_env "$1" "$ENV_FILE"
+		printf '\n'
+		;;
+	set)
+		[ -n "${1:-}" ] && [ -n "${2:-}" ] || die "用法：dshm docker config set KEY VALUE"
+		set_env "$1" "$2"
+		ok "已写入 $1；执行 dshm docker restart 生效"
+		;;
+	edit)
+		"${EDITOR:-vi}" "$ENV_FILE"
+		;;
+	*) die "未知 config 子命令：$sub" ;;
+	esac
+}
+
+# ── 认证 ────────────────────────────────────────────────────────────────────
+cmd_docker_auth() {
+	local sub="${1:-reset}"
+	case "$sub" in
+	reset)
+		require_docker
+		require_app
+		info "在容器内重置登录密码（交互式）"
+		docker exec -it "$CONTAINER" dsh --profile web auth-reset
+		;;
+	status)
+		require_docker
+		require_app
+		docker exec "$CONTAINER" dsh --profile web auth-reset --help >/dev/null 2>&1 || true
+		info "请用 dshm docker auth reset 重置密码"
+		;;
+	*) die "未知 auth 子命令：$sub" ;;
+	esac
+}
+
+# ── 诊断 / 卸载 ─────────────────────────────────────────────────────────────
+cmd_docker_doctor() {
+	require_docker
+	require_app
+	hdr "dsh-docker 自检"
+	info "实例目录：$APP_DIR"
+	info "容器：$CONTAINER"
+	info "健康：$(container_health)"
+	info "镜像：$(state_get image)"
+	local port code
+	port="$(get_env DSH_HTTP_PORT "$ENV_FILE")"; port="${port:-3080}"
+	code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${port}/login" 2>/dev/null || true)"
+	if [ "$code" = "200" ]; then ok "/login = 200"; else warn "/login = ${code:-无响应}"; fi
+}
+
+cmd_docker_uninstall() {
+	local purge=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--purge) purge=1 ;;
+		*) die "未知参数：$1" ;;
+		esac
+		shift
+	done
+	require_docker
+	require_app
+	hdr "卸载 dsh-docker"
+	compose down || true
+	if [ "$purge" = "1" ]; then
+		printf '这会删除 %s（含数据）。输入 DELETE 确认：' "$APP_DIR"
+		local answer
+		read -r answer
+		[ "$answer" = "DELETE" ] || die "已取消"
+		rm -rf "$APP_DIR"
+		ok "已删除 $APP_DIR"
+	else
+		ok "容器已停止；数据保留在 $APP_DIR"
+		info "彻底删除：dshm docker uninstall --purge"
 	fi
 }
 
-# ── 帮助 ────────────────────────────────────────────────────────────────────
-help_service() {
-	cat <<EOF
-
-${B}服务${RST} — 容器生命周期与运维
-  dshm service up [--build]      启动 / 应用 .env 改动
-  dshm service down              停止（数据保留）
-  dshm service restart           重启（重读 .env 并重建）
-  dshm service status            健康 / 端口 / 登录用户（并提示 dsh 是否有新版本）
-  dshm service logs              日志
-  dshm service shell             进容器
-  dshm service url               一次性 launch URL（排障）
-  dshm service doctor [URL]      部署自检：容器 / 本机 HTTP / 实时通道，以及经反代的那一跳
-EOF
+# ── 自更新 ──────────────────────────────────────────────────────────────────
+latest_tag() {
+	command -v git >/dev/null 2>&1 || return 1
+	git ls-remote --tags --refs "$DSHM_REPO" 2>/dev/null |
+		awk -F'refs/tags/' '{print $2}' |
+		grep -E '^v[0-9]' |
+		sort -V |
+		tail -1
 }
 
-help_version() {
-	cat <<EOF
-
-${B}版本${RST} — dsh 版本查询与升级
-  dshm version                   看全四个版本：配置里钉的 / 镜像 / 容器内实际运行 / npm 最新
-  dshm version list [--all]      列出「已构建的镜像」与「npm 上可装的 dsh 版本」
-  dshm version update                  拉取已构建的最新镜像（快，优先）
-  dshm version update --to <镜像tag>   拉取指定镜像（回退用），如 0.2.0-rc.2-2026.09.30-1
-                                 注意：这里要的是**镜像 tag**，不是 dsh 版本号
-  dshm version update --build [--dsh <版本>]
-                                 本地构建（慢）。不指定 --dsh 就用 npm 上的最新版
-
-  ${DIM}dsh 在构建期装入镜像，所以换版本要重建镜像、没有热切换；
-  但这样断网也能起，且版本组合有问题会在构建期就失败。
-  镜像 tag = <dsh版本>-<日期>-<序号>，序号保证同一天多次构建互不覆盖、可回退。${RST}
-EOF
+cmd_self_update() {
+	local target="" check=0 force=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--check) check=1 ;;
+		--to) target="${2:-}"; shift ;;
+		--force | -f) force=1 ;;
+		*) die "未知参数：$1" ;;
+		esac
+		shift
+	done
+	local cur latest
+	cur="$(dshm_version)"
+	if [ -z "$target" ]; then
+		latest="$(latest_tag || true)"
+		[ -n "$latest" ] || die "查不到发布 tag（需要 git 与网络）；可用 --to <tag>"
+		target="$latest"
+	fi
+	case "$target" in v*) ;; *) target="v" ;; esac
+	local cur_norm="$cur"
+	case "$cur_norm" in v*) cur_norm="${cur_norm#v}" ;; esac
+	[ "$check" = "1" ] && { printf '当前：%s\n最新：%s\n' "$cur" "$target"; return 0; }
+	if [ "$target" = "v${cur_norm}" ] && [ "$force" != "1" ]; then
+		ok "已经是该版本（$cur）"
+		return 0
+	fi
+	command -v curl >/dev/null 2>&1 || die "需要 curl"
+	local tmp tgz url sha
+	tmp="$(mktemp -d)"
+	trap 'rm -rf "$tmp"' RETURN
+	tgz="$tmp/dshm.tar.gz"
+	url="https://github.com/qxdho/deepseek-harness-docker/releases/download/${target}/dshm-${target}.tar.gz"
+	info "下载 $url"
+	curl -fsSL -o "$tgz" "$url" || die "下载失败"
+	sha="$(curl -fsSL --max-time 30 "${url}.sha256" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+	if [ -n "$sha" ]; then
+		[ "$(sha256sum "$tgz" | awk '{print $1}')" = "$sha" ] || die "sha256 校验失败"
+	else
+		warn "该版本没有 .sha256，跳过完整性校验"
+	fi
+	tar -xzf "$tgz" -C "$tmp" || die "解包失败"
+	local src="$tmp/dshm-${target}"
+	[ -f "$src/dshm" ] || die "发布包缺少 dshm"
+	[ -f "$src/scripts/log.sh" ] || die "发布包缺少 scripts"
+	[ -f "$src/templates/compose.yaml" ] || die "发布包缺少 templates"
+	bash -n "$src/dshm" || die "dshm 语法检查失败"
+	install -m 755 "$src/dshm" "$SELF"
+	cp -a "$src/scripts/." "$SELF_DIR/scripts/"
+	[ -d "$src/templates" ] && cp -a "$src/templates/." "$SELF_DIR/templates/"
+	ok "dshm 已更新到 ${target}"
 }
 
-help_auth() {
-	cat <<EOF
-
-${B}登录${RST} — 密码与账号
-  dshm auth password [用户]      改登录密码（默认 $(env_value DSH_AUTH_USER admin)）
-  dshm auth user list            列出登录用户
-  dshm auth user add 名字        新建用户 [--admin]
-  dshm auth user disable 名字    禁用用户
-  dshm auth totp enable [用户]   开启两步验证
-  dshm auth totp disable [用户]
-EOF
-}
-
-help_dshm() {
-	cat <<EOF
-
-${B}dshm${RST} — 管理 dshm 自身（管理面板是它的附属功能，两者同版本）
-
-  dshm dshm version             显示本地版本、面板是否已装、是否有新版
-  dshm dshm list                列出全部已发布版本（tag）
-  dshm dshm update              更新到最新发布版本
-  dshm dshm update --to <版本>  更新/回退到指定版本
-  dshm dshm install             把 dshm 注册为系统命令（之后任意目录可直接 dshm …）
-  dshm dshm uninstall           移除系统命令
-
-  ${DIM}只从发布 tag 更新，不跟随 main —— 以免装到你还没决定发布的中间提交。
-  --force 强制重下；--allow-stale 允许在 git 工作区里覆盖工作树文件。${RST}
-EOF
+# ── 版本 / 帮助 ─────────────────────────────────────────────────────────────
+cmd_version() {
+	hdr "版本"
+	printf '    dshm：%s\n' "$(dshm_version)"
+	if [ -n "$APP_DIR" ] && [ -f "$STATE" ]; then
+		printf '    镜像：%s\n' "$(state_get image)"
+		printf '    容器：%s\n' "$(container_health)"
+		local dshv
+		dshv="$(docker exec "$CONTAINER" dsh --version 2>/dev/null || true)"
+		printf '    容器内 dsh：%s\n' "${dshv:-（容器未运行）}"
+	else
+		printf '    实例：未安装\n'
+	fi
 }
 
 show_help() {
-	case "${1:-}" in
-	service) help_service; return ;;
-	version) help_version; return ;;
-	auth) help_auth; return ;;
-	dshm) help_dshm; return ;;
-	admin)
-		# shellcheck source=scripts/admin.sh
-		. ./scripts/admin.sh
-		admin_help
-		return
-		;;
-	esac
 	cat <<EOF
 
-${B}dshm${RST} — DSH 部署管理命令（在当前目录运行）
+dshm — dsh-docker 的独立安装/管理工具
 
-用法：${B}dshm <分组> <子命令> [参数]${RST}
-EOF
-	cat <<EOF
+  dshm update [--check] [--to tag]     更新 dshm 自己
+  dshm version                         查看 dshm / 镜像 / 容器版本
 
-${B}service${RST}   容器生命周期与运维       ${DIM}dshm service help${RST}
-${B}version${RST}   dsh 版本查询与升级        ${DIM}dshm version help${RST}
-${B}auth${RST}      登录密码与账号           ${DIM}dshm auth help${RST}
-${B}admin${RST}     管理面板（宿主机进程）   ${DIM}dshm admin help${RST}
-${B}dshm${RST}      管理 dshm 自身           ${DIM}dshm dshm help${RST}
+  dshm docker install [选项]           安装 dsh-docker
+      --dir PATH                       实例目录（默认 /opt/dsh 或 ~/.local/share/dshm/default）
+      --data-dir PATH                  数据目录（默认 <实例>/data）
+      --port 3080                      宿主端口
+      --bind 127.0.0.1                 绑定地址
+      --image REPO:TAG                 镜像
+      --password-stdin                 从标准输入读密码
+      --no-pull                        不拉镜像（本地已有）
 
-${B}disk${RST}       宿主机与容器磁盘占用 / 清理命令
-${B}migrate${RST}    把旧命名卷 dsh-home 的数据迁到宿主数据目录
-                （install.sh 与 service up 已自动执行，通常无需手工调用）
+  dshm docker status|logs|up|down|restart|shell|url
+  dshm docker update [--to tag]        更新 dsh-docker
+  dshm docker rollback                 回退到上一个镜像
+  dshm docker config show|get|set|edit
+  dshm docker auth reset               重置登录密码
+  dshm docker doctor
+  dshm docker uninstall [--purge]
 
-${DIM}改运行配置：编辑 .env 后执行 dshm service up${RST}
+全局：--dir PATH 或 DSHM_APP_DIR=... 指定实例目录。
 
 EOF
 }
+
+# ── 入口 ────────────────────────────────────────────────────────────────────
+global_dir=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--dir | --app-dir)
+		global_dir="${2:-}"
+		[ -n "$global_dir" ] || die "--dir 需要一个路径"
+		shift
+		;;
+	-h | --help | "")
+		show_help
+		exit 0
+		;;
+	*) break ;;
+	esac
+	shift
+done
+
+if [ -n "$global_dir" ]; then
+	set_app "$global_dir"
+else
+	APP_DIR="$(resolve_app_dir)"
+	[ -n "$APP_DIR" ] && set_app "$APP_DIR"
+fi
 
 cmd="${1:-help}"
 shift || true
 
-# 旧扁平写法 → 新分组写法的提示表。
-#
-# 旧写法已全部移除（只保留一套写法，否则帮助会变长、新用户不知道该学哪个），但直接
-# 报「未知命令」对老用户太不友好 —— 他们只会看到自己用惯的命令突然不工作了。
-# 这里给出确切的替代写法。
-LEGACY_CMD_MAP="
-up=service up
-down=service down
-restart=service restart
-status=service status
-logs=service logs
-shell=service shell
-url=service url
-update=version update
-version=version show
-versions=version list
-disk=disk
-pw=auth password
-passwd=auth password
-password=auth password
-user=auth user
-totp=auth totp
-migrate-home=migrate
-migrate=migrate
-install-self=dshm install
-uninstall-self=dshm uninstall
-update-self=dshm update
-self=dshm
-cli=dshm
-svc=service
-login=auth
-panel=admin
-link=dshm install
-unlink=dshm uninstall
-install-cli=dshm install
-df=disk
-list=version list
-"
-
-unknown_cmd() {
-	local old="$1" hit
-	# 精确匹配（一行一个 key=value），避免前缀误判
-	hit="$(printf '%s\n' "$LEGACY_CMD_MAP" | awk -F= -v k="$old" '$1==k{print $2; exit}')"
-	if [ -n "$hit" ]; then
-		die "命令 '${old}' 已改为分组写法：${B}dshm ${hit}${RST}
-
-  旧写法已全部移除，只保留一套写法。运行 dshm help 看完整命令表。"
-	fi
-	case "$old" in
-	svc | login | cli | panel)
-		die "分组名 '${old}' 是旧简称，已移除。请用完整名：service / auth / dshm / admin"
-		;;
-	esac
-	die "未知命令：${old}（运行 dshm help 查看帮助）"
-}
-
-# ── 命令分发 ────────────────────────────────────────────────────────────────
-#
-# 只保留一套写法：`dshm <分组> <子命令>`。旧的扁平写法（dshm up / dshm pw …）与
-# 分组简称（svc / login / cli / panel）**已全部移除** —— 同时维护两套写法会让帮助
-# 变长、新用户不知道该学哪个。旧写法会命中下面的 unknown_cmd，给出新写法提示。
-#
-# 版本管理独立成 `version` 分组（show / list / update）：它有三个命令和一整套
-# 「四个版本」的语义，塞在 service 里会让那个分组变成杂物袋；而且原来的
-# `version` 与 `versions` 只差一个字母、语义却不同，最容易看错。
-#
-# `dshm dshm` 用来管理 dshm 自身（install / uninstall / update），对齐
-# 「npm install npm」「pip install --upgrade pip」这类工具的惯例。
-#
-# 裸分组名（`dshm service`、`dshm version` …）等同该分组的 help。必须放在分组 case
-# **之前**：那个 case 会把 cmd 重新赋成内部命令名，之后再判"是否裸分组名"就太晚了。
 case "$cmd" in
-service | version | auth | dshm)
-	[ $# -eq 0 ] && set -- help
-	;;
-esac
-
-case "$cmd" in
-service)
+help) show_help ;;
+version) cmd_version ;;
+update) cmd_self_update "$@" ;;
+docker)
 	sub="${1:-help}"
 	shift || true
 	case "$sub" in
-	help | -h | --help) cmd=help; set -- service ;;
-	up | down | restart | status | logs | shell | url | doctor | diagnose) cmd="service-$sub" ;;
-	*) die "未知子命令：service $sub（支持 up / down / restart / status / logs / shell / url / doctor；运行 dshm service help）" ;;
+	install) cmd_docker_install "$@" ;;
+	help | -h | --help | "") show_help ;;
+	status) cmd_docker_status ;;
+	logs) cmd_docker_logs "$@" ;;
+	up) cmd_docker_up ;;
+	down) cmd_docker_down ;;
+	restart) cmd_docker_restart ;;
+	shell) cmd_docker_shell ;;
+	url) cmd_docker_url ;;
+	update) cmd_docker_update "$@" ;;
+	rollback) cmd_docker_rollback ;;
+	config) cmd_docker_config "$@" ;;
+	auth) cmd_docker_auth "$@" ;;
+	doctor) cmd_docker_doctor ;;
+	uninstall) cmd_docker_uninstall "$@" ;;
+	*) die "未知 docker 子命令：$sub" ;;
 	esac
 	;;
-version)
-	sub="${1:-help}"
-	shift || true
-	case "$sub" in
-	help | -h | --help | "") cmd=help; set -- version ;;
-	show) cmd=version-show ;;
-	list) cmd=version-list ;;
-	update) cmd=version-update ;;
-	*) die "未知子命令：version $sub（支持 show / list / update；运行 dshm version help）" ;;
-	esac
-	;;
-auth)
-	sub="${1:-help}"
-	shift || true
-	case "$sub" in
-	help | -h | --help) cmd=help; set -- auth ;;
-	password) cmd=auth-password ;;
-	user | totp) cmd="auth-$sub" ;;
-	*) die "未知子命令：auth $sub（支持 password / user / totp；运行 dshm auth help）" ;;
-	esac
-	;;
-dshm)
-	sub="${1:-help}"
-	shift || true
-	# 注意：这里**不再多 shift 一次**。子命令后面的参数本来就留在 $@ 里
-	# （与 `dshm service up --build` 同理），会自然传给主 case 的分支。
-	case "$sub" in
-	help | -h | --help) cmd=help; set -- dshm ;;
-	version | "") cmd=dshm-version ;;
-	list) cmd=dshm-list ;;
-	install) cmd=dshm-install ;;
-	uninstall) cmd=dshm-uninstall ;;
-	update) cmd=dshm-update ;;
-	*) die "未知子命令：dshm $sub（支持 version / list / install / uninstall / update；运行 dshm dshm help）" ;;
-	esac
-	;;
-admin)
-	# 面板命令多且实现独立，交给 scripts/admin.sh 自己分发
-	# shellcheck source=scripts/admin.sh
-	. ./scripts/admin.sh
-	admin_dispatch "$@"
-	exit $?
-	;;
-disk | migrate | help | -h | --help | "") ;;
-*)
-	unknown_cmd "$cmd"
-	;;
-esac
-
-case "$cmd" in
-service-up)
-	require_docker; require_env
-	if [ "${1:-}" = "--build" ]; then
-		hdr "本地构建镜像"
-		docker compose build
-	fi
-	prepare_workspace
-	# 启动前把生效配置列出来：改没改、改的是哪一项，一眼能看到
-	config_summary
-	hdr "启动服务"
-	docker compose up -d
-	hdr "等待健康检查"
-	if wait_healthy; then
-		bind="$(env_value DSH_BIND 127.0.0.1)"
-		port="$(env_value_new DSH_HTTP_PORT 3080)"
-		ok "服务已就绪"
-		if [ "$bind" = "0.0.0.0" ]; then
-			info "访问地址：http://<服务器IP>:${port}/"
-		else
-			info "只绑定了 127.0.0.1，请在宿主机反代到 127.0.0.1:${port}"
-		fi
-	else
-		# 不加 else 的话，失败时这个 if 返回 0，整个 ./dshm up 会以成功退出 ——
-		# 脚本化调用会把「起不来」当成「已就绪」。
-		die "容器未在预期时间内健康，请查看 ./dshm service logs"
-	fi
-	;;
-
-service-down)
-	require_docker
-	hdr "停止服务（数据保留）"
-	docker compose down
-	ok "已停止"
-	;;
-
-service-restart)
-	require_docker
-	hdr "重启服务（会重新读取 .env）"
-	# 用 `up -d` 而不是 `docker compose restart`：后者只是把现有容器里的进程重启，
-	# **不会**重读 .env，也不会因 compose 配置变化而重建容器。也就是说改了
-	# DSH_UID / DSH_WORKSPACE_HOST / 端口之后 `restart` 看着成功了、实际毫无变化。
-	# `up -d` 会按当前 .env 重建有变化的容器，符合「重启使新配置生效」的直觉；
-	# 配置没变时它等价于什么都不做（已是最新）。
-	prepare_workspace
-	docker compose up -d
-	wait_healthy || die "容器未在预期时间内健康，请查看 ./dshm service logs"
-	ok "已重启并健康"
-	;;
-
-service-logs)
-	# 先解析参数、处理 --help，再要求 docker：否则 `./dshm service logs --help`
-	# 在没有 docker 的机器上会报「未找到 docker」，而不是打印用法。
-	follow=1
-	for a in "$@"; do
-		case "$a" in
-		--no-follow) follow=0 ;;
-		-h | --help)
-			cat <<'EOF'
-
-  dshm service logs [--no-follow]
-      默认跟随滚动（Ctrl-C 退出）。
-      --no-follow   只打印最近 100 行后返回（管理面板用：面板把 dshm 调用串行化，
-                    不返回的命令会占住那把锁直到超时，把启停/升级全堵住）
-EOF
-			return 0
-			;;
-		*) die "未知参数：$a（用法：./dshm service logs [--no-follow]）" ;;
-		esac
-	done
-	require_docker
-	if [ "$follow" = "1" ]; then
-		docker compose logs -f --tail 100
-	else
-		docker compose logs --tail 100
-	fi
-	;;
-
-service-status)
-	require_docker
-	hdr "服务状态"
-	state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
-	health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo -)"
-	restarts="$(docker inspect --format '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo -)"
-	info "状态：${state}    健康：${health}    重启次数：${restarts}"
-	info "端口：$(env_value DSH_BIND 127.0.0.1):$(env_value_new DSH_HTTP_PORT 3080) -> 容器 3080"
-	info "登录用户：$(env_value DSH_AUTH_USER admin)"
-	if [ "$(env_value DSH_BIND 127.0.0.1)" = "0.0.0.0" ]; then
-		info "入口：http://<服务器IP>:$(env_value_new DSH_HTTP_PORT 3080)/"
-	else
-		info "入口：http://127.0.0.1:$(env_value_new DSH_HTTP_PORT 3080)/（仅本机；对外请用反代或 SSH 隧道）"
-	fi
-
-	# 顺手看一眼上游有没有新版本 —— 这是「不知不觉就落后了」的解药：跑 status 就能
-	# 看到，不必记得主动去查。设 DSHM_SKIP_UPDATE_CHECK=1 可跳过（离线环境）。
-	# 查询失败当作「未知」处理，绝不让 status 因此失败或刷红。
-	if [ "${DSHM_SKIP_UPDATE_CHECK:-}" != "1" ]; then
-		cur_ver="$(current_dsh_version)"
-		latest_ver="$(dsh_latest_version 2>/dev/null || true)"
-		if [ -n "$cur_ver" ] && [ -n "$latest_ver" ]; then
-			if [ "$cur_ver" = "$latest_ver" ]; then
-				info "dsh 版本：${cur_ver}（已是最新）"
-			else
-				printf '    %sdsh 版本：%s → 有新版本 %s%s\n' "$YEL" "$cur_ver" "$latest_ver" "$RST"
-				info "升级：./dshm version update"
-			fi
-		elif [ -n "$cur_ver" ]; then
-			info "dsh 版本：${cur_ver}（未能查询上游最新版）"
-		fi
-	fi
-	;;
-
-disk)
-	require_docker
-	hdr "磁盘占用"
-	info "宿主："
-	df -h / 2>/dev/null | sed 's/^/    /' || true
-	if container_running; then
-		info "容器内 $(dsh_home_in_container) 所在卷："
-		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" sh -c 'df -h "$DSH_HOME"' 2>/dev/null |
-			sed 's/^/    /' || true
-		info "占用最大的目录："
-		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" sh -c \
-			'du -xh "$DSH_HOME" --max-depth=2 2>/dev/null | sort -h | tail -10' | sed 's/^/    /' || true
-		info "npm 缓存：$(docker exec "$CONTAINER" sh -c 'du -sh /tmp/npm-cache 2>/dev/null | cut -f1' 2>/dev/null || true)"
-	else
-		info "容器未运行，只显示宿主磁盘。"
-	fi
-	info "清理："
-	info "  docker exec $CONTAINER rm -rf $(dsh_home_in_container)/.npm /tmp/npm-cache"
-	info "  docker image prune -a && docker builder prune"
-	;;
-
-service-url)
-	require_docker; require_running
-	hdr "一次性 launch URL（排障用）"
-	docker exec "$CONTAINER" cat "$(dsh_home_in_container)/web-launch-url.txt" 2>/dev/null || info "（暂无）"
-	;;
-
-service-doctor | service-diagnose)
-	require_docker; require_env
-	hdr "部署自检"
-	doc_port="$(env_value_new DSH_HTTP_PORT 3080)"
-	# 没有 curl 时不能把"测不了"说成"没响应"（会把人的排查方向带偏）
-	doc_has_curl=0
-	command -v curl >/dev/null 2>&1 && doc_has_curl=1
-
-	# 1) 容器本身
-	doc_state="$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo 'missing')"
-	case "$doc_state" in
-	running/healthy) ok "容器状态：${doc_state}" ;;
-	*) warn "容器状态：${doc_state}（先解决它，否则下面几项没有意义）" ;;
-	esac
-
-	# 2) 本机 HTTP（需要 curl）
-	if [ "$doc_has_curl" = "0" ]; then
-		info "宿主机没有 curl，跳过 HTTP 检查（本机实时通道那一步用的是 bash 内置 TCP，不受影响）"
-	else
-		# 正文要看：两个 401 的含义相反（门禁守卫正常 vs 门禁被穿过、dsh 不认识你）
-		doc_body_file="$(mktemp)"
-		doc_http="$(curl -s -o "$doc_body_file" -w '%{http_code}' --max-time 5 "http://127.0.0.1:${doc_port}/" 2>/dev/null || true)"
-		doc_body="$(head -c 400 "$doc_body_file" 2>/dev/null || true)"
-		rm -f "$doc_body_file"
-		case "$(doctor_index_verdict "$doc_http" "$doc_body")" in
-		public) ok "本机 HTTP：GET http://127.0.0.1:${doc_port}/ → 200（可直接访问）" ;;
-		gate-nav) ok "本机 HTTP：GET / → ${doc_http}（门禁生效：浏览器会被引导到登录页）" ;;
-		gate-api)
-			ok "本机 HTTP：GET / → 401（门禁生效：脚本请求未登录返回 401 是预期行为）"
-			;;
-		unreachable) warn "本机 HTTP：连不上 127.0.0.1:${doc_port}（容器没起或端口没监听到）" ;;
-		bridge-down)
-			warn "本机 HTTP：GET / → 401，且正文是 **dsh 自己**的文案 —— 请求穿过门禁却没带上 dsh 的 Cookie"
-			info "这是登录后的 launch-token 桥接没生效（门禁认你、dsh 不认你）。先看："
-			info "  ./dshm service logs | grep -i 'launch-token'"
-			info "或直接用一次性 token 换 Cookie（README 的 FAQ 有完整步骤）："
-			info "  ./dshm service logs | grep 'dsh web:'   # 取 ?token=… 后在浏览器打开 https://<域名>/?token=<那串>"
-			;;
-		*) warn "本机 HTTP：GET / → ${doc_http}（非预期；看 ./dshm service logs | tail -50）" ;;
-		esac
-	fi
-
-	# 3) 本机实时通道：直连本项目代理的升级探针（绕过反代）
-	#    探针只回两种结果：101（升级头到了）或 426（请求到了但没带升级头）。
-	doc_line="$(ws_probe_tcp 127.0.0.1 "$doc_port" "$DSH_UPGRADE_PROBE_PATH")"
-	case "$(doctor_classify "$doc_line")" in
-	upgraded) ok "本机实时通道：升级握手 → ${doc_line}" ;;
-	upgrade-stripped)
-		warn "本机实时通道：探针收到普通请求（${doc_line}）—— 连本机这一跳都没带升级头"
-		;;
-	no-response)
-		warn "本机实时通道：127.0.0.1:${doc_port} 没有任何响应 —— 代理没起来或端口不对"
-		info "看日志： ./dshm service logs | tail -50"
-		;;
-	*) warn "本机实时通道：结果异常（${doc_line}）—— 确认端口 ${doc_port} 上是我们这个代理" ;;
-	esac
-
-	# 4) 经反向代理（给了 URL 用 URL；否则用 DSH_PUBLIC_HOST 拼 https）
-	doc_base=""
-	if [ -n "${1:-}" ]; then
-		doc_base="${1%/}"
-	elif [ -n "$(env_value DSH_PUBLIC_HOST)" ]; then
-		doc_base="https://$(env_value DSH_PUBLIC_HOST)"
-	fi
-	if [ -z "$doc_base" ]; then
-		info "未提供公网地址（也没有 DSH_PUBLIC_HOST），跳过反代那一段"
-		info "要一起验： ./dshm service doctor https://你的域名"
-	elif [ "$doc_has_curl" = "0" ]; then
-		warn "宿主机没有 curl，无法验证经反代那一跳；装一个 curl 再跑本命令"
-	else
-		doc_line="$(ws_probe_url "${doc_base}${DSH_UPGRADE_PROBE_PATH}")"
-		case "$(doctor_classify "$doc_line")" in
-		upgraded) ok "经反代实时通道：${doc_base} → ${doc_line}" ;;
-		upgrade-stripped)
-			warn "经反代：探针收到普通请求（${doc_line}）—— 反代没有转发 Upgrade/Connection 头"
-			info "这就是浏览器里实时通道一直重连的原因；本机那一跳正常说明代理与 dsh 没问题"
-			doctor_proxy_hint
-			;;
-		no-response) warn "经反代：${doc_base} 没有响应（DNS / 证书 / 反代没在听 / 连接被断开）" ;;
-		*)
-			warn "经反代：${doc_base} 的结果不符合预期（${doc_line}）"
-			info "若返回的是登录跳转（30x），说明反代把请求转到了别处或改写了路径"
-			;;
-		esac
-	fi
-	;;
-
-service-shell)
-	require_docker; require_running
-	hdr "进入容器（输入 exit 退出）"
-	docker exec -it "$CONTAINER" bash
-	;;
-
-auth-password)
-	require_docker; require_running
-	user="${1:-$(env_value DSH_AUTH_USER admin)}"
-	hdr "修改登录密码"
-	info "用户：${B}${user}${RST}"
-	info "规则：至少 14 位，且包含大写 / 小写 / 数字 / 特殊符号"
-	ask_new_password
-	# 插件的 user passwd --password-stdin 在管道模式下读两行（密码 + 确认），
-	# 只喂一行会报 "passwords do not match"，所以这里喂两行。
-	if printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" \
-		| docker exec -i -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" node "$(cli_in_container)" \
-			user passwd "$user" --password-stdin; then
-		ok "密码已更新"
-	else
-		die "修改失败：请看上面的错误信息（常见原因：用户不存在 / 新密码与旧密码相同 / 密码不合规）"
-	fi
-	;;
-
-auth-user)
-	require_docker; require_running
-	sub="${1:-list}"; shift || true
-	case "$sub" in
-	list | ls)
-		hdr "登录用户列表"
-		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" node "$(cli_in_container)" user list
-		;;
-	add)
-		[ -n "${1:-}" ] || die "用法：./dshm auth user add <用户名> [--admin]"
-		name="$1"; shift || true
-		hdr "新建用户：${name}"
-		extra=""
-		for a in "$@"; do
-			case "$a" in --admin | --disabled) extra="$extra $a" ;; esac
-		done
-		ask_new_password
-		# shellcheck disable=SC2086
-		if printf '%s\n' "$PASSWORD" \
-			| docker exec -i -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" node "$(cli_in_container)" \
-				user add "$name" --password-stdin $extra; then
-			ok "用户 ${name} 已创建"
-		else
-			die "创建失败（用户名或密码不符合要求）"
-		fi
-		;;
-	disable)
-		[ -n "${1:-}" ] || die "用法：./dshm auth user disable <用户名>"
-		hdr "禁用用户：${1}"
-		docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" node "$(cli_in_container)" user disable "$1"
-		ok "已禁用（并吊销其会话）"
-		;;
-	*)
-		die "未知子命令：user $sub（支持 list / add / disable）"
-		;;
-	esac
-	;;
-
-auth-totp)
-	require_docker; require_running
-	action="${1:-}"; shift || true
-	case "$action" in enable | disable) ;; *) die "用法：./dshm auth totp <enable|disable> [用户名]" ;; esac
-	user="${1:-$(env_value DSH_AUTH_USER admin)}"
-	hdr "两步验证 ${action}：用户 ${user}"
-	docker exec -e DSH_HOME="$(dsh_home_in_container)" "$CONTAINER" node "$(cli_in_container)" user totp "$action" "$user"
-	;;
-
-version-update)
-	require_docker
-	# 参数解析放在环境检查**之前**：参数写错就该立刻报错，而不是先跑一遍工作区预检、
-	# 最后才说「未知参数」。预检会改 .env、可能要求 chown，走完再报参数错纯属浪费，
-	# 还会让人误以为是自己环境有问题。
-	# 参数：
-	#   （无）           拉取已构建的最新镜像（快，优先）
-	#   --to <镜像tag>   拉取指定镜像（回退用），如 --to 0.2.0-rc.2-2026.09.30-1
-	#   --build          本地构建（慢）。默认用 npm 上的最新 dsh 版本
-	#   --build --dsh <版本>   本地构建并指定 dsh 版本
-	target=""; build=0; dsh_ver=""
-	while [ $# -gt 0 ]; do
-		case "$1" in
-		--build) build=1 ;;
-		--dsh)
-			shift
-			dsh_ver="${1:-}"
-			[ -n "$dsh_ver" ] || die "--dsh 需要版本号（用法：./dshm version update --build --dsh 0.2.0-rc.2）"
-			;;
-		--dsh=*) dsh_ver="${1#--dsh=}" ;;
-		--to)
-			shift
-			target="${1:-}"
-			[ -n "$target" ] || die "--to 需要镜像 tag（用法：./dshm version update --to 0.2.0-rc.2-2026.09.30-1）
-      可先用 ./dshm version list 查看有哪些已构建的镜像"
-			;;
-		--to=*) target="${1#--to=}" ;;
-		--latest)
-			die "--latest 已移除。改用：
-      ./dshm version update --build            本地构建，用 npm 最新版
-      ./dshm version update --build --dsh 版本  本地构建并指定版本"
-			;;
-		-*) die "未知参数：$1（用法：./dshm version update [--to <镜像tag>] [--build [--dsh <版本>]]）" ;;
-		*) die "不接受的参数：$1（指定版本请用 --dsh 或 --to，见 ./dshm version help）" ;;
-		esac
-		shift
-	done
-
-	[ -n "$dsh_ver" ] && [ "$build" != "1" ] && die "--dsh 只在 --build 下有意义（--dsh 指定的是本地构建用的 dsh 版本）"
-
-	# 参数已确认，现在做环境检查（会改 .env、可能要求修属主，属于有副作用的操作）
-	require_env
-	# 与 up 一样先做启动前准备：旧键改名、历史默认值对齐、旧卷迁移、目录属主与
-	# 私密文件权限预检。以前 update 只改名不做预检，于是「更新后容器仍在重启循环」
-	# 时，日志里那条 sudo chown 提示没人执行，文件权限就一直不对。
-	prepare_workspace
-
-	base="$(img_base)"
-	# 不带 --to = 用 CI 构建的最新镜像；带 --to = 用指定的那个构建（回退用）。
-	# 两种情况都优先拉取预构建镜像 —— 本地构建要重新装 dsh 并编译原生依赖，很慢。
-	tag="${target:-latest}"
-
-	if [ "$build" = "1" ]; then
-		if [ -z "$dsh_ver" ]; then
-			# 不指定就用 npm 最新版。这一步解决一个很隐蔽的坑：Dockerfile /
-			# compose / .env.example 里的 DSH_VERSION 是**发布时写死的**，
-			# 不查 npm 就永远构建出那个旧版本 —— 「更新过了」但装的还是老 dsh。
-			hdr "查询 npm 上的最新 dsh 版本"
-			dsh_ver="$(dsh_latest_version)" || die "无法从 npm 查询最新版本（需要网络，以及 jq/node/python3 之一）
-      也可直接指定： ./dshm version update --build --dsh <版本>"
-			ok "将构建 dsh ${dsh_ver}"
-		else
-			# 用户明确指定了版本，先确认它在 npm 上存在 —— 打错字立即报错，
-			# 而不是等几分钟构建失败
-			if ! dsh_version_exists "$dsh_ver"; then
-				die "npm 上没有 dsh ${dsh_ver} 这个版本（可用 ./dshm version list 查看）"
-			fi
-		fi
-		# 钉进 .env：compose 用 ${DSH_VERSION:-…} 传给构建，不写就退回 Dockerfile 默认值
-		set_env DSH_VERSION "$dsh_ver"
-		set_env DSH_IMAGE "${base}:${dsh_ver}-local"
-		info "已把 DSH_VERSION=${dsh_ver} 写入 .env"
-		hdr "本地构建镜像"
-		docker compose build
-	else
-		# 拉取前先确认该 tag 真的存在，避免 compose 报一句难懂的拉取失败
-		if [ -n "$target" ] && ! img_tag_exists "$target"; then
-			warn "镜像仓库里没有 tag ${target}"
-			info "用 ./dshm version list 查看已构建的镜像"
-			die "无效的镜像 tag：${target}"
-		fi
-		set_env DSH_IMAGE "${base}:${tag}"
-		hdr "拉取预构建镜像"
-		info "${base}:${tag}"
-		if docker compose pull; then
-			ok "已拉取镜像"
-		else
-			warn "拉取失败。这个版本的镜像可能还没构建出来。"
-			info "要本地构建（较慢）：./dshm version update --build"
-			info "或先看有哪些现成镜像：./dshm version list"
-			die "没有可用的预构建镜像 ${base}:${tag}"
-		fi
-	fi
-
-	config_summary
-	hdr "重建容器"
-	docker compose up -d
-	if wait_healthy; then
-		ok "已更新（容器内 dsh 版本：$(docker exec "$CONTAINER" dsh --version 2>/dev/null || echo 未知)）"
-	else
-		die "更新后容器未健康，请查看 ./dshm service logs"
-	fi
-	;;
-
-version-show)
-	# 一次看全四个「版本」—— 用户问「我是什么版本」时，其实想知道这几件事，而它们
-	# 可能互不相同：
-	#   1. .env 里钉的（下次构建/拉取会得到什么）
-	#   2. DSH_IMAGE 标签（拉的哪个镜像）
-	#   3. 容器内实际运行（真在跑什么）
-	#   4. npm 最新（可以要什么）
-	# 只报其中一个是以前的做法，容易让人误判「我升级了但没变」。
-	hdr "dsh 版本"
-	require_docker
-
-	pinned="$(env_value_new DSH_VERSION "")"
-	[ -n "$pinned" ] || pinned="$(dockerfile_arg DSH_VERSION)"
-	img="$(env_value DSH_IMAGE "")"
-
-	running=""
-	if docker inspect "$CONTAINER" >/dev/null 2>&1; then
-		running="$(docker exec "$CONTAINER" dsh --version 2>/dev/null || true)"
-	fi
-
-	latest="$(dsh_latest_version 2>/dev/null || true)"
-
-	# 注意：printf 的 %-Ns 按**字节**算宽度，中文标签用它反而对不齐；而「中文占 2 列」
-	# 又让手工数空格很脆弱。这里把标签和其后的空格都写死，四行按**显示宽度 16 列**对齐
-	# （配置里钉的版本：=16、容器内实际运行：=16、镜像：+10 空格=16、npm 最新：+6 空格=16）。
-	printf '    %s %s\n' "配置里钉的版本：" "${pinned:-未知}"
-	[ -n "$img" ] && printf '    %s %s\n' "镜像：          " "$img"
-	printf '    %s %s\n' "容器内实际运行：" "${running:-（容器未运行）}"
-	printf '    %s %s\n' "npm 最新：      " "${latest:-（查询失败）}"
-
-	# 只在与「实际运行」不一致时告警 —— 配置改了但没应用是最常见的困惑来源
-	if [ -n "$running" ] && [ -n "$pinned" ] && [ "$running" != "$pinned" ]; then
-		warn "容器内运行的版本与配置里钉的不一致"
-		info "应用配置：./dshm service up"
-	fi
-	if [ -n "$latest" ] && [ -n "$running" ] && [ "$running" != "$latest" ]; then
-		printf '\n'
-		info "升级：./dshm version update"
-	fi
-	;;
-
-version-list)
-	# 列两类东西：能否装到某个 dsh 版本，取决于你能不能构建。
-	#   1. 已构建好的镜像 tag —— 可直接拉取（快）
-	#   2. npm 上可用的 dsh 版本 —— 需要本地构建（慢）
-	hdr "可安装的镜像（已构建）"
-	cur_img="$(env_value DSH_IMAGE "")"
-	if tags="$(img_tags 2>/dev/null)"; then
-		# 末尾的 || true 是必需的：grep 无匹配时退出码为 1，而 dshm 顶部开了
-		# set -euo pipefail —— 管道里这一步失败会让整条赋值失败，进而被 set -e 直接
-		# 终止脚本。表现是「只打印标题就退出，退出码 1，且不报任何错」，极难定位。
-		# 镜像仓库里还没有新格式 tag 时就会命中。
-		built="$(printf '%s\n' "$tags" | grep -E '^[0-9].*-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]+$' | sort -rV || true)"
-		if [ -n "$built" ]; then
-			n="$(printf '%s\n' "$built" | grep -c . || true)"
-			printf '%s\n' "$built" | head -20 | while read -r t; do
-				case "$cur_img" in
-				*":${t}") printf '    %s*%s %s  ← 当前配置\n' "$GRN" "$RST" "$t" ;;
-				*) printf '      %s\n' "$t" ;;
-				esac
-			done
-			[ "$n" -gt 20 ] && info "（共 ${n} 个，只显示最近 20 个）"
-			printf '\n'
-			info "装指定镜像（可回退）：./dshm version update --to <上面的 tag>"
-		else
-			info "镜像仓库里还没有形如 <dsh版本>-<日期>-<序号> 的构建。"
-		fi
-	else
-		warn "无法查询镜像 tag（网络或仓库权限问题）"
-	fi
-
-	printf '\n'
-	hdr "npm 上可装的 dsh 版本（需本地构建）"
-	show_dsh_versions "$@"
-	;;
-
-migrate)
-	# 旧版本把 DSH_HOME 放在命名卷 dsh-home 里；现在默认是宿主 bind 挂载。
-	# 实现放在 scripts/migrate-home.sh（install.sh 与 dshm service up 会自动调用），
-	# 这里保留显式入口，供自动迁移跳过时手工收尾。
-	require_docker
-	set +e
-	migrate_legacy_home explicit
-	rc=$?
-	set -e
-	case "$rc" in
-	1) ok "没找到旧的 dsh-home 命名卷，无需迁移" ;;
-	2) die "$(env_value DSH_HOME_HOST /dsh) 里已有数据，为避免覆盖请先自行确认；手工迁移命令见 README「从旧版本升级」" ;;
-	esac
-	;;
-
-dshm-version)
-	# dshm 自己的版本。与 dsh 容器版本完全无关（那个在 version 分组）。
-	hdr "dshm 版本"
-	cur="$(dshm_version)"
-	printf '    %s\n' "本地版本：    v${cur}"
-
-	# 面板是 dshm 的附属功能，同版本发布 —— 这里顺带确认二进制是否在位。
-	# 这里不能用 admin_dir()：它定义在 scripts/admin.sh 里，而本分支（dshm dshm version）
-	# 并没有 source 那个文件 —— 未定义时命令替换为空，实际会判断 /dsh-admin，
-	# 于是面板即使装在别处也永远显示「未安装」。直接读 .env 里的配置值即可。
-	panel_dir="$(env_value DSH_ADMIN_DIR /dsh-manager)"
-	if [ -x "$panel_dir/dsh-admin" ]; then
-		printf '    %s\n' "管理面板：    已安装（与 dshm 同版本）"
-	else
-		printf '    %s\n' "管理面板：    未安装（./dshm admin install）"
-	fi
-
-	# 只比 tag：没有 tag 就老实说无法比较，绝不去比 main。
-	# dshm_latest_tag 现在返回**完整 tag 名**（形如 v2026.10.01-2），而 cur 是裸版本；
-	# 比较与显示都要用 ver_of_tag 去掉 v，否则永远是「有新版」。
-	latest_tag="$(dshm_latest_tag 2>/dev/null || true)"
-	latest="$(ver_of_tag "$latest_tag")"
-	printf '\n'
-	if [ -z "$latest" ]; then
-		info "尚未发布任何版本 tag，无法比较是否有新版。"
-		info "发布：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
-	elif [ "$cur" = "$latest" ]; then
-		ok "已是最新发布版本（v${latest}）"
-	elif [ -n "$(git -C "$PROJECT_DIR" describe --tags --match "${latest_tag}" HEAD 2>/dev/null || true)" ]; then
-		# 本地从最新 tag 出发又有新提交（git describe 会给出 v<tag>-<n>-g<sha>）。
-		# 这是**领先**，不能报「有新版」—— 那会误导用户去执行一次回退。
-		ok "本地领先最新发布版本（v${latest} + 尚未发布的提交）"
-		info "要把这些改动发出去：./scripts/release.sh"
-	else
-		printf '    %s有新版：v%s → v%s%s\n' "$YEL" "$cur" "$latest" "$RST"
-		info "更新：./dshm dshm update"
-	fi
-	info "查看全部版本：./dshm dshm list"
-	;;
-
-dshm-list)
-	# 列出全部已发布的 dshm 版本（tag）。用户靠它决定 --to 哪个版本。
-	hdr "dshm 已发布的版本"
-	cur="$(dshm_version)"
-	tags="$(dshm_tags 2>/dev/null || true)"
-	if [ -z "$tags" ]; then
-		warn "尚未发布任何版本 tag。"
-		info "dshm 只从 tag 更新，不跟随 main —— 以免装到未决定发布的中间提交。"
-		info "发布：git tag v$(date +%Y.%m.%d) && git push origin v$(date +%Y.%m.%d)"
-		exit 0
-	fi
-	# tag 现在带完整名（v* 或镜像 tag）。用 v 前缀区分两类，并只对 v* 标「当前」
-	# —— 当前版本号是裸版本，镜像 tag 与它不同名，标在上面会误导。
-	printf '%s\n' "$tags" | while read -r sha tag; do
-		short="${sha%"${sha#???????}"}"
-		case "$tag" in
-		v*)
-			if [ "$(ver_of_tag "$tag")" = "$cur" ]; then
-				printf '    %s*%s %s  ← 当前（%s）\n' "$GRN" "$RST" "$tag" "$short"
-			else
-				printf '      %s  (%s)\n' "$tag" "$short"
-			fi
-			;;
-		*)
-			printf '      %s  (%s)  ← 镜像 tag\n' "$tag" "$short"
-			;;
-		esac
-	done
-	printf '\n'
-	info "装指定版本（可回退）：./dshm dshm update --to <上面的 tag>"
-	;;
-
-dshm-install)
-	install_self
-	;;
-
-dshm-uninstall)
-	uninstall_self
-	;;
-
-dshm-update)
-	self_update "$@"
-	;;
-
-help | -h | --help | "")
-	show_help "$@"
-	;;
-
-*)
-	die "未知命令：${cmd}（运行 dshm help 查看帮助）"
-	;;
+*) die "未知命令：$cmd（运行 dshm help）" ;;
 esac

@@ -719,7 +719,7 @@ jobs:
             pkg="dshm-v${NUM}"
           fi
           rm -rf "$pkg"
-          mkdir -p "$pkg/scripts"
+          mkdir -p "$pkg/scripts" "$pkg/templates"
           sed -e "s|^DSHM_VERSION_RAW=.*|DSHM_VERSION_RAW=\"\${DSHM_VERSION:-${NUM}}\"|" \
               -e "s|^\(\s*\)if \[ \"\$DSHM_VERSION_RAW\" != \"__VERSION__\" \]; then|\1if true; then|" \
             dshm > "$pkg/dshm"
@@ -741,6 +741,7 @@ jobs:
           # 手写清单注定会再漏，所以改成「全拷 + 白名单校验」：多拷一个文件无害，
           # 漏拷一个就让自更新把用户装挂。
           cp scripts/*.sh "$pkg/scripts/"
+          cp templates/* "$pkg/templates/"
           rm -f "$pkg"/scripts/test-*.sh "$pkg"/scripts/smoke-*.sh "$pkg"/scripts/test-lib.sh
           # 不带 VERSION 文件：版本号已写死在脚本里，留着反而多一个会过期的来源
           chmod +x "$pkg/dshm" "$pkg"/scripts/*.sh
@@ -750,7 +751,7 @@ jobs:
           # REQUIRED_SCRIPTS 也用它，两处一起改。
           rm -rf /tmp/verify && mkdir -p /tmp/verify
           tar -xzf "${pkg}.tar.gz" -C /tmp/verify
-          required="dshm scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh scripts/preflight.sh scripts/admin.sh scripts/doctor.sh"
+          required="dshm scripts/log.sh scripts/env-config.sh scripts/migrate-home.sh scripts/preflight.sh scripts/admin.sh scripts/doctor.sh templates/compose.yaml templates/env.example"
           for f in $required; do
             [ -f "/tmp/verify/${pkg}/${f}" ] || { echo "::error::发布包缺少 ${f}（dshm 运行时会 source 它）" >&2; exit 1; }
           done

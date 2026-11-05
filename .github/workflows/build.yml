@@ -563,6 +563,9 @@ jobs:
         run: |
           set -o pipefail
           ./scripts/test-all.sh -v 2>&1 | tee /tmp/test-all.log || {
+            grep -E 'FAIL|PASS=|失败：|错误：|需要 go' /tmp/test-all.log | tail -40 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
             { echo '```'; tail -120 /tmp/test-all.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           }

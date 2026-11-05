@@ -78,7 +78,19 @@ done
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 [ "$(code "$base/")" = "200" ] && pass "首页 200" || fail "首页不是 200"
-curl -s "$base/" | grep -q 'DSH 管理面板' && pass "首页含面板标题" || fail "首页内容不对"
+# 内容断言带重试：这只断言在 CI 上偶发红过一次（同一毫秒 200 通过、紧接的内容取到空串），
+# 属于典型的「进程刚可连接、还没稳定」竞态。重试几次；仍失败就把开头的字节打出来，
+# 免得只留一句"内容不对"，下次还得猜。
+page=""
+for _ in $(seq 1 20); do
+	page="$(curl -s --max-time 2 "$base/" || true)"
+	case "$page" in *"DSH 管理面板"*) break ;; esac
+	sleep 0.1
+done
+case "$page" in
+*"DSH 管理面板"*) pass "首页含面板标题" ;;
+*) fail "首页内容不对（前 100 字节：$(printf "%s" "$page" | head -c 100 | tr "\\n" " ")）" ;;
+esac
 
 [ "$(code "$base/api/status")" = "401" ] && pass "未登录 /api/status → 401" || fail "未登录应 401"
 [ "$(code -X POST -H 'Content-Type: application/json' -d '{"password":"nope"}' "$base/api/login")" = "401" ] \

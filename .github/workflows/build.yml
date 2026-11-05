@@ -46,6 +46,7 @@ jobs:
     outputs:
       code: ${{ steps.f.outputs.code }}
       admin: ${{ steps.f.outputs.admin }}
+      image: ${{ steps.f.outputs.image }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,6 +69,7 @@ jobs:
             echo "取不到基线提交，按「有代码改动」处理"
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "admin=true" >> "$GITHUB_OUTPUT"
+            echo "image=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files="$(git diff --name-only "$base" HEAD)"
@@ -82,6 +84,7 @@ jobs:
           # 面板相关的两个测试（离线 + go 单测）合计约 20s，只在 admin/ 或本 workflow
           # 改动时才跑 —— 它们只验证 admin 这个程序，与镜像内容无关。
           admin=false
+          image=false
           # 用进程替换而不是 `done <<EOF`：heredoc 的结束符 `EOF` 在 YAML 块标量里
           # 无法放在行首（会被缩进），既让 shellcheck 报「here document 未正确结束」，
           # 也让这里的意图变得含糊。进程替换没有这个问题，且循环仍在当前 shell 里跑
@@ -92,6 +95,9 @@ jobs:
             admin/* | .github/workflows/*) admin=true ;;
             esac
             case "$p" in
+            Dockerfile | entrypoint.sh | docker-compose.yml | scripts/seed-auth.mjs | scripts/healthcheck.sh | scripts/dsh-wrapper.sh) image=true ;;
+            esac
+            case "$p" in
             .github/workflows/*) code=true ;;
             *.md | LICENSE | .github/* | .gitignore | .dockerignore) ;;
             *) code=true ;;
@@ -99,6 +105,7 @@ jobs:
           done < <(printf '%s\n' "$files")
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "admin=$admin" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "需要构建镜像：$code；需要跑面板测试：$admin"
 
   # 镜像构建：**只在打「镜像 tag」时进行，推 main 不构建。**
@@ -850,3 +857,53 @@ jobs:
           echo "::error::多次重试后仍无法更新 latest release" >&2
           exit 1
 
+
+  # 合并原 image-v2 workflow：只在 main 上、且改了镜像输入时构建/冒烟。
+  # 这样一次 push 只有一个 workflow run，不再出现 build + image-v2 两条。
+  image-v2:
+    needs: changes
+    if: |
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 v2 镜像
+        run: |
+          set -euxo pipefail
+          docker build -t dsh-v2:smoke .
+
+      - name: 冒烟
+        run: |
+          set -euo pipefail
+          bash scripts/smoke-v2.sh dsh-v2:smoke 2>&1 | tee "$RUNNER_TEMP/v2.log"
+
+      - name: 失败时提交日志
+        if: failure()
+        run: |
+          set -uxo pipefail
+          cp "$RUNNER_TEMP/v2.log" v2-failure.txt || true
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add -f v2-failure.txt || true
+          git commit -m "chore(ci): v2 failure log [skip ci]" || true
+          git push origin HEAD:main || true
+
+      - name: 用 dshm 安装并管理一次
+        run: |
+          set -euo pipefail
+          inst="$RUNNER_TEMP/dshm-instance"
+          printf 'TestPassword123!\n' | ./dshm docker install \
+            --dir "$inst" \
+            --image dsh-v2:smoke \
+            --no-pull \
+            --password-stdin
+          ./dshm --dir "$inst" docker status
+          test "$(./dshm --dir "$inst" docker config get DSH_IMAGE)" = "dsh-v2:smoke"
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/login)"
+          [ "$code" = "200" ]
+          ./dshm --dir "$inst" docker down

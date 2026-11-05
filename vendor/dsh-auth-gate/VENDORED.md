@@ -60,6 +60,26 @@
 升级后同步改：`Dockerfile` 的 `ARG DSH_AUTH_GATE_VERSION`、`docker-compose.yml`、
 `.env.example`（构建时会断言 vendor 的版本等于这个 ARG）。
 
+### 同版本补丁怎么进入存量卷
+
+这里有个容易踩的坑：vendor 的 0.18.0 与上游 0.18.0 **版本号相同**，只比版本号的
+同步逻辑会把存量卷里的“上游原版 0.18.0”当成“已经是最新”，导致 0.2.2 上升级后
+登录页仍然 404。因此 `scripts/sync-gate.sh` 现在同时比较门禁目录的**内容哈希**
+（标记文件旁边的 `.sha256`）：
+
+- 版本相同、内容不同，且卷里仍是上次镜像写入的内容 → 用镜像里的构建替换；
+- 你在容器里手动改过（内容哈希与标记不一致）→ 保持不动；
+- `DSH_GATE_SYNC=off` → 完全不动。
+
+如果某个存量部署仍停在坏掉的上游 0.18.0（表现为 `/auth/login` 404、日志里
+`TypeError: Cannot read properties of undefined (reading 'Symbol(dsh-auth.guarded)')`），
+升级到带此修复的镜像并 `./dshm service up` 即可自动纠正；也可以强制重播：
+
+```bash
+docker exec qxdho-dsh rm -rf /dsh/profiles/web
+./dshm service up     # entrypoint 会从镜像重新播种（profile 里额外装的插件需自行重装）
+```
+
 ## 边界
 
 - vendor 的是**构建产物**（`lib/*.js`），不是从上游源码重新编译 —— 本机没有可靠的

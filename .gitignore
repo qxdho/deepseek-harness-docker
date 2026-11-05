@@ -17,3 +17,6 @@ admin/.admin-test.*
 .gotmp/
 .gotool/
 .tmptest-watch.sh
+
+# DSH agent worktrees/tools (local only)
+.agents/

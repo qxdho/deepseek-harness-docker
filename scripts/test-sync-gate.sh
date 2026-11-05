@@ -55,6 +55,47 @@ out="$(run_sync)"
 if [ "$(vol_ver "$root")" = "0.18.0" ]; then pass "版本相同：不改动"; else fail "版本相同却被改动"; fi
 if [ -f "$marker" ]; then pass "版本相同：补写了管理标记"; else fail "版本相同：没写标记（存量卷无法认领）"; fi
 
+# 1b. **版本相同、内容不同**：本仓库 vendor 过 0.18.0，版本号与上游相同。
+# 只比版本会让存量卷永远停在未打补丁的构建上（登录页 404），必须按内容哈希同步。
+setup samepatch 0.18.0 0.18.0
+mkdir -p "$root/seed/node_modules/dsh-auth-gate/lib" "$root/profile/node_modules/dsh-auth-gate/lib"
+printf 'patched\n' >"$root/seed/node_modules/dsh-auth-gate/lib/build-stamp"
+printf 'upstream\n' >"$root/profile/node_modules/dsh-auth-gate/lib/build-stamp"
+out="$(run_sync)"
+if [ "$(cat "$root/profile/node_modules/dsh-auth-gate/lib/build-stamp")" = "patched" ]; then
+	pass "同版本内容更新：vendor 补丁被同步进卷"
+else
+	fail "同版本内容更新：仍是 $(cat "$root/profile/node_modules/dsh-auth-gate/lib/build-stamp")"
+fi
+case "$out" in *"同版本内容更新"*) pass "同版本内容更新：输出说明了结果" ;; *) fail "同版本内容更新：没有提示：$out" ;; esac
+if [ -s "$marker.sha256" ]; then pass "同版本内容更新：写入了内容哈希标记"; else fail "同版本内容更新：没有内容哈希标记"; fi
+
+# 1b-2. 同版本内容更新 + 装过额外插件：只替换门禁目录，别冲掉别的插件
+setup samepatch-extra 0.18.0 0.18.0 extra-plugin
+mkdir -p "$root/seed/node_modules/dsh-auth-gate/lib" "$root/profile/node_modules/dsh-auth-gate/lib"
+printf 'patched\n' >"$root/seed/node_modules/dsh-auth-gate/lib/build-stamp"
+printf 'upstream\n' >"$root/profile/node_modules/dsh-auth-gate/lib/build-stamp"
+out="$(run_sync)"
+if [ "$(cat "$root/profile/node_modules/dsh-auth-gate/lib/build-stamp")" = "patched" ]; then
+	pass "同版本内容更新 + 额外插件：门禁被同步"
+else
+	fail "同版本内容更新 + 额外插件：门禁没同步"
+fi
+if has_extra "$root"; then pass "同版本内容更新 + 额外插件：额外插件仍保留"; else fail "同版本内容更新 + 额外插件：额外插件被冲掉"; fi
+
+# 1c. 版本相同、但用户手动改过内容（与上次镜像写入的哈希不一致）=> 保持不动
+setup samemanual 0.18.0 0.18.0
+mkdir -p "$root/seed/node_modules/dsh-auth-gate/lib" "$root/profile/node_modules/dsh-auth-gate/lib"
+run_sync >/dev/null
+printf 'user-edit\n' >"$root/profile/node_modules/dsh-auth-gate/lib/user-stamp"
+out="$(run_sync)"
+if [ -f "$root/profile/node_modules/dsh-auth-gate/lib/user-stamp" ]; then
+	pass "同版本手动改动：保持用户内容"
+else
+	fail "同版本手动改动：用户内容被镜像覆盖"
+fi
+case "$out" in *"手动改过"*) pass "同版本手动改动：给出了提示" ;; *) fail "同版本手动改动：没有提示：$out" ;; esac
+
 # 2. 镜像更新、没装额外插件、旧镜像没留标记（存量卷升级的典型场景）
 setup upgrade 0.18.0 0.17.4
 out="$(run_sync)"

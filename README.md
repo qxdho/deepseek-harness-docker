@@ -534,6 +534,33 @@ server {
 </details>
 
 <details>
+<summary><b>升级后登录页 404 / 门禁忽然失效？</b></summary>
+
+<br/>
+
+先确认日志里有没有这一句：
+
+```
+dsh-auth-gate: TypeError: Cannot read properties of undefined (reading 'Symbol(dsh.auth.guarded)')
+```
+
+这是 dsh 0.2.2 的 `{resource}` 路由与**上游** dsh-auth-gate 0.18.0 不兼容，插件在 apply
+阶段被跳过，于是 `/auth/login` 变成 404、容器却可能仍是 healthy。镜像里装的是本仓库
+打过补丁的构建（见 [vendor/dsh-auth-gate/VENDORED.md](vendor/dsh-auth-gate/VENDORED.md)）。
+
+存量卷最容易踩的坑是：vendor 构建与上游**版本号同为 0.18.0**，旧版同步逻辑只比版本号，
+会把卷里的上游原版当成“已是最新”而跳过。新版 `scripts/sync-gate.sh` 会比较门禁目录的
+内容哈希并自动替换；`./dshm service up` 后仍 404 的话，确认 `DSH_GATE_SYNC` 不是 `off`，
+再强制重播：
+
+```bash
+docker exec qxdho-dsh rm -rf /dsh/profiles/web
+./dshm service up     # 从镜像重新播种；profile 里额外装的插件需自行重装
+```
+
+</details>
+
+<details>
 <summary><b>日志里出现 <code>dsh proxy error: socket hang up</code>？</b></summary>
 
 <br/>
@@ -543,7 +570,7 @@ server {
 1. **空闲的 keep-alive 连接**：dsh 默认 5 秒就关掉空闲连接，而代理的连接池会留着重用。
    池子里的死连接被下一次请求命中时就报这个。代理现在对 `GET`/`HEAD` **自动重试一次**
    （`POST` 之类绝不重试，避免重复执行），所以偶发一两条不再影响页面。
-2. **dsh 正在重启**：`./dshm service update`、崩溃重启期间，在途请求都会断。看
+2. **dsh 正在重启**：`./dshm version update`、崩溃重启期间，在途请求都会断。看
    `./dshm service status` 与 `./dshm service logs` 确认。
 
 日志现在带请求上下文，便于区分：

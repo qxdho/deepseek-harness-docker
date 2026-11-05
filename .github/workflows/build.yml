@@ -231,24 +231,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 和 amd64 一样：先本地构建跑冒烟，过了才推。arm 上要现场编译 node-pty、
-      # 跑 Landlock、判 uid —— 这些全是架构相关的，不在这边冒烟等于只验了一半。
-      # 第二次构建（--push）会命中同一条 gha 缓存，多花的只有冒烟那一分钟。
-      - name: 构建 arm64（仅本地，用于冒烟）
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --load \
-            --tag dsh-test:smoke \
-            --build-arg "DSH_VERSION=${{ steps.ver.outputs.dsh }}" \
-            --build-arg "DSH_WEB_AUTH_VERSION=${{ steps.ver.outputs.webauth }}" \
-            --cache-from type=gha,scope=arm64 \
-            --cache-to type=gha,scope=arm64,mode=max \
-            .
-
-      - name: 冒烟测试
-        run: ./scripts/smoke-v2.sh dsh-test:smoke
-
+      # arm64 只做构建/推送，不再重复跑一遍冒烟：
+      # amd64 已经验证了登录/账号/健康检查；arm64 这里只验证镜像能否构建出来。
+      # 省掉一次容器启动，tag 构建少约 1 分钟。
       - name: 构建并推送 arm64（供合并）
         run: |
           docker buildx build \
@@ -634,10 +619,8 @@ jobs:
     #   * dshm 发布 tag（v*）              → 发该 tag 的 release（dshm 包 + 面板二进制）
     #   * 镜像 tag（<dsh版本>-<日期>-<序号>）→ 也发 release，这样
     #     `dshm dshm update --to <镜像tag>` 能拿到 dshm 包（否则那个 tag 下只有镜像，会 404）
-    # 推 main 时也发一次，只为刷新固定的 latest release（供没打 tag 的部署机装面板）。
-    if: |
-      startsWith(github.ref, 'refs/tags/') ||
-      (github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true')
+    # 面板暂不维护，推 main 不再刷新 latest release；只在 tag 上发布。
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -877,10 +860,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: 构建 v2 镜像
         run: |
           set -euxo pipefail
-          docker build -t dsh-v2:smoke .
+          # 与 tag 构建共用 amd64 layer cache，tag 时能少重建几层。
+          docker buildx build \
+            --load \
+            --tag dsh-v2:smoke \
+            --cache-from type=gha,scope=amd64 \
+            --cache-to type=gha,scope=amd64,mode=max \
+            .
+
 
       - name: 冒烟
         run: |

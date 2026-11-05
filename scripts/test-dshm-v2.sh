@@ -29,12 +29,12 @@ grep -q 'DSH_HOME_HOST=.*/data' "$tmp/inst/.env" && pass "数据目录写入 .en
 grep -q '^DSHM_CONTAINER=qxdho-dsh-v2$' "$tmp/inst/.env" && pass "容器名写入 .env" || fail "容器名没写入"
 grep -q 'DSH_HOST: 0.0.0.0' "$tmp/inst/docker-compose.yml" && pass "compose 使用 0.0.0.0" || fail "compose 没有 0.0.0.0"
 
-# 已存在实例时拒绝覆盖
-set +e
-"$DSHM" docker install --dir "$tmp/inst" --no-pull --dry-run --password-stdin </dev/null >/dev/null 2>&1
-rc=$?
-set -e
-[ "$rc" != "0" ] && pass "已有 .env 时拒绝覆盖" || fail "已有 .env 时仍继续"
+# 已存在 .env 时 dry-run 只读取配置，不启动
+if "$DSHM" docker install --dir "$tmp/inst" --no-pull --dry-run --password-stdin </dev/null >/dev/null 2>&1; then
+	pass "已有 .env 时 dry-run 可用"
+else
+	fail "已有 .env 时 dry-run 失败"
+fi
 
 # 短密码拒绝
 set +e

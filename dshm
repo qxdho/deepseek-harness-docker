@@ -208,8 +208,13 @@ write_env_file() { # <image> <port> <bind> <data_dir> <uid> <gid> <password> <co
 }
 
 install_existing() {
-	require_docker
 	ENV_FILE="$APP_DIR/.env"
+	if [ "${DRY_RUN:-0}" = "1" ]; then
+		ok "dry-run：使用已有 .env，不会启动"
+		print_url
+		return 0
+	fi
+	require_docker
 	[ -f "$STATE" ] && die "$APP_DIR 已经安装过；升级用 dshm docker update，回退用 rollback"
 	[ -f "$APP_DIR/docker-compose.yml" ] || write_compose_file
 
@@ -308,6 +313,7 @@ cmd_docker_install() {
 	if [ -e "$dir/.env" ]; then
 		set_app "$dir"
 		NO_PULL="$no_pull"
+		DRY_RUN="$dry_run"
 		install_existing
 		return 0
 	fi

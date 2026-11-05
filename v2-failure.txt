@@ -1,0 +1,32 @@
+== 启动 v2 容器 ==
+== 等 healthy ==
+  [32mPASS[0m 容器 healthy
+== 登录入口 ==
+  [32mPASS[0m /login = 200
+== 未登录拦截 ==
+  [32mPASS[0m 外部 Host 未登录 / = 302
+  [32mPASS[0m 未登录受保护 API = 401
+== 预置账号登录 ==
+  [32mPASS[0m 登录 = 200
+  [32mPASS[0m 登录后 status = 200
+== 账号文件与插件 ==
+  [31mFAIL[0m 缺少 web-auth.json
+  [31mFAIL[0m profile 缺少 dsh-web-startup-auth
+  [32mPASS[0m 日志无 TypeError / did not activate
+== 重启后账号保留 ==
+  [32mPASS[0m 重启后仍可登录
+
+== 失败诊断：容器日志（末 100 行）==
+[entrypoint] 预置管理员账号 'admin'
+[entrypoint] 已预置管理员 'admin' -> /home/node/.dsh/web-auth.json
+[entrypoint] 对外地址：http://smoke.local/（HTTPS 反代请给 Cookie 补 Secure）
+[entrypoint] 启动 dsh: 0.0.0.0:3080
+dsh web: listening on 0.0.0.0 over plain HTTP; restrict this port to a trusted proxy or network
+dsh web: http://smoke.local/?token=Q5vbukyMx814zzkKthB60ue-mk4ErhLG9KT2x-TqGiY
+[entrypoint] 检测到已有 web-auth.json，跳过管理员预置
+[entrypoint] 对外地址：http://smoke.local/（HTTPS 反代请给 Cookie 补 Secure）
+[entrypoint] 启动 dsh: 0.0.0.0:3080
+dsh web: listening on 0.0.0.0 over plain HTTP; restrict this port to a trusted proxy or network
+dsh web: http://smoke.local/?token=Vj1Xdv7F6Nk5YT7r23tFVE5MRiUj1_BX7DZGk1LZl2o
+
+PASS=8 FAIL=2

@@ -54,4 +54,25 @@ set -e
 # docker 无子命令时给帮助
 if "$DSHM" docker >/dev/null 2>&1; then pass "docker 无子命令显示帮助"; else fail "docker 无子命令失败"; fi
 
+
+# init -> 编辑 .env -> install 的完整离线流程（假 docker）
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+compose*) exit 0 ;;
+inspect*) echo healthy; exit 0 ;;
+*) exit 0 ;;
+esac
+FAKE
+chmod +x "$tmp/bin/docker"
+
+"$DSHM" docker init --dir "$tmp/flow" --image dsh-v2:local --container qxdho-dsh-v2 --port 3081 >/dev/null
+sed -i 's/^DSH_AUTH_PASSWORD=$/DSH_AUTH_PASSWORD=TestPassword123!/' "$tmp/flow/.env"
+HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/cfg" XDG_DATA_HOME="$tmp/data" PATH="$tmp/bin:$PATH" "$DSHM" --dir "$tmp/flow" docker install --no-pull >/dev/null
+[ -f "$tmp/flow/state.json" ] && pass "init 后 install 生成 state.json" || fail "init 后 install 没生成 state"
+grep -q '"image": "dsh-v2:local"' "$tmp/flow/state.json" && pass "state 记录镜像" || fail "state 镜像不对"
+grep -q '^DSHM_CONTAINER=qxdho-dsh-v2$' "$tmp/flow/.env" && pass "state 容器名保留" || fail "容器名丢失"
+
+
 run_tests

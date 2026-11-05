@@ -27,16 +27,32 @@
 git clone https://github.com/qxdho/deepseek-harness-docker.git
 cd deepseek-harness-docker
 
-# 安装 dshm（当前从仓库引导；发布后的 curl 安装脚本随后补上）
-./install.sh
+# 只安装 dshm，不启动实例
+sudo ./install.sh
 ```
 
-`install.sh` 会：
+安装完成后二选一。
 
-1. 把 `dshm`、脚本、模板装到系统目录；
-2. 运行 `dshm docker install`；
-3. 问登录密码、端口、绑定地址；
-4. 写 `/opt/dsh`、拉镜像、启动、等 `/login` 返回 200。
+### A. 先初始化，编辑配置，再安装
+
+```bash
+sudo dshm docker init --dir /opt/dsh \
+  --image ghcr.io/qxdho/deepseek-harness-docker:<v2 tag>
+
+sudoedit /opt/dsh/.env        # 至少设置 DSH_AUTH_PASSWORD、端口、路径
+sudo dshm docker install --dir /opt/dsh
+```
+
+`init` 只生成 `docker-compose.yml` / `.env`，不拉镜像、不启动。  
+适合先把密码、域名、端口、数据路径都想清楚再安装。
+
+### B. 直接交互式安装
+
+```bash
+sudo dshm docker install
+```
+
+会依次生成配置、问登录密码，然后拉镜像、启动、等 `/login` 返回 200。
 
 默认布局：
 
@@ -44,37 +60,22 @@ cd deepseek-harness-docker
 /opt/dsh/                  # 实例目录
 ├── docker-compose.yml
 ├── .env                   # 配置真源（含密码，权限 600）
-├── state.json             # dshm 记录当前/上一个镜像
+├── state.json             # 安装后由 dshm 写入
 ├── data/                  # -> 容器 /dsh
 └── workspace/             # -> 容器 /workspace
 ```
 
 安装完成后访问 `http://127.0.0.1:3080/`。默认只绑本机，远程访问请配反代或 SSH 隧道。
 
-### 本地构建 v2 镜像
-
-v2 镜像尚未推到 GHCR 的 `latest` 时，先在仓库目录构建：
-
-```bash
-docker build -t dsh-v2:local .
-
-# 只安装 dshm，不立刻启动实例
-sudo ./install.sh --install-only
-
-# 用本地镜像安装；--no-pull 表示不再访问 registry
-sudo dshm docker install \
-  --dir /opt/dsh \
-  --image dsh-v2:local \
-  --no-pull
-```
-
-`latest` 仍是 v1 时，**不要**省略 `--image dsh-v2:local`，否则会装回旧镜像。
+> 镜像由 GitHub Actions 构建并推到 GHCR。当前 `<v2 tag>` 见 Releases / Packages；
+> 在 v2 镜像成为 `latest` 之前，不要用 `latest` 安装，否则会得到 v1。
 
 ## dshm 命令
 
 ```bash
 dshm update                    # 更新 dshm 自己
 dshm version                   # dshm / 镜像 / 容器版本
+dshm docker init [选项]          # 只生成配置，不启动
 dshm docker install [选项]
 dshm docker status|logs|up|down|restart|shell|url
 dshm docker update [--to tag]  # 更新 dsh-docker 镜像

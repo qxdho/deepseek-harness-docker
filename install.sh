@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# dshm 引导安装器。
+# dshm 引导安装器：只安装 dshm，不替你启动实例。
 #
-#   ./install.sh                安装 dshm，然后运行 dshm docker install
-#   ./install.sh --install-only 只安装 dshm
+#   ./install.sh
 #
-# 当前从本仓库引导；发布后可以换成从 release 下载的 install.sh。
+# 之后二选一：
+#   A. dshm docker init ...   # 生成配置 -> 编辑 .env -> dshm docker install
+#   B. dshm docker install    # 交互式，直接生成并启动
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -16,15 +17,6 @@ here="$(cd "$(dirname "$0")" && pwd)"
 	echo "错误：找不到 templates/compose.yaml" >&2
 	exit 1
 }
-
-only=0
-args=()
-for a in "$@"; do
-	case "$a" in
-	--install-only) only=1 ;;
-	*) args+=("$a") ;;
-	esac
-done
 
 if [ "$(id -u)" = "0" ]; then
 	lib="${DSHM_LIB_DIR:-/usr/local/lib/dshm}"
@@ -51,14 +43,19 @@ echo "已安装 dshm：$lib/dshm"
 echo "命令：$bin/dshm"
 case ":$PATH:" in
 *":$bin:"*) ;;
-*)
-	echo "提示：$bin 不在 PATH 中，请把它加入 PATH。"
-	;;
+*) echo "提示：$bin 不在 PATH 中，请先加入 PATH。" ;;
 esac
 
-if [ "$only" = "1" ]; then
-	exit 0
-fi
+cat <<'TIP'
 
-echo
-exec "$lib/dshm" docker install "${args[@]}"
+下一步二选一：
+
+A. 先初始化，编辑配置，再安装
+   sudo dshm docker init --dir /opt/dsh --image ghcr.io/qxdho/deepseek-harness-docker:latest
+   sudoedit /opt/dsh/.env          # 至少设置 DSH_AUTH_PASSWORD
+   sudo dshm docker install --dir /opt/dsh
+
+B. 直接交互式安装（不需要先有配置文件）
+   sudo dshm docker install
+
+TIP

@@ -175,8 +175,116 @@ print_url() {
 }
 
 # ── 安装 ────────────────────────────────────────────────────────────────────
+write_compose_file() {
+	[ -f "$SELF_DIR/templates/compose.yaml" ] || die "发布包缺少 templates/compose.yaml"
+	cp "$SELF_DIR/templates/compose.yaml" "$APP_DIR/docker-compose.yml"
+}
+
+write_env_file() { # <image> <port> <bind> <data_dir> <uid> <gid> <password> <container>
+	local image="$1" port="$2" bind="$3" data_dir="$4" uid="$5" gid="$6" password="$7" container="$8"
+	[ -n "$container" ] || die "--container 不能为空"
+	case "$container" in *[!A-Za-z0-9_.-]*) die "--container 只能包含字母、数字、_ . -" ;; esac
+	CONTAINER="$container"
+	{
+		printf 'DSHM_CONTAINER=%s\n' "$container"
+		printf 'DSH_IMAGE=%s\n' "$image"
+		printf 'DSH_HTTP_PORT=%s\n' "$port"
+		printf 'DSH_BIND=%s\n' "$bind"
+		printf 'DSH_HOME_HOST=%s\n' "$data_dir"
+		printf 'DSH_HOME_CONTAINER=/dsh\n'
+		printf 'DSH_WORKSPACE_HOST=%s\n' "$APP_DIR/workspace"
+		printf 'DSH_WORKSPACE_CONTAINER=/workspace\n'
+		printf 'DSH_UID=%s\n' "$uid"
+		printf 'DSH_GID=%s\n' "$gid"
+		printf 'DSH_AUTH_USER=admin\n'
+		printf 'DSH_AUTH_PASSWORD=%s\n' "$password"
+		printf 'DSH_AUTH_TOTP=optional\n'
+		printf 'DSH_COOKIE_SECURE=0\n'
+		printf 'DSH_PUBLIC_HOST=\n'
+		printf 'DSH_DISK_MIN_MB=256\n'
+		printf 'DSH_WORKSPACE_STRICT=0\n'
+	} >"$APP_DIR/.env"
+	chmod 600 "$APP_DIR/.env"
+}
+
+install_existing() {
+	require_docker
+	ENV_FILE="$APP_DIR/.env"
+	[ -f "$STATE" ] && die "$APP_DIR 已经安装过；升级用 dshm docker update，回退用 rollback"
+	[ -f "$APP_DIR/docker-compose.yml" ] || write_compose_file
+
+	local image port bind data_dir password container p1 p2
+	image="$(get_env DSH_IMAGE "$ENV_FILE")"
+	port="$(get_env DSH_HTTP_PORT "$ENV_FILE")"; port="${port:-3080}"
+	bind="$(get_env DSH_BIND "$ENV_FILE")"; bind="${bind:-127.0.0.1}"
+	data_dir="$(get_env DSH_HOME_HOST "$ENV_FILE")"
+	password="$(get_env DSH_AUTH_PASSWORD "$ENV_FILE")"
+	container="$(get_env DSHM_CONTAINER "$ENV_FILE")"; container="${container:-$DEFAULT_CONTAINER}"
+	[ -n "$image" ] || die ".env 缺少 DSH_IMAGE"
+	[ -n "$data_dir" ] || die ".env 缺少 DSH_HOME_HOST"
+	[ -n "$(get_env DSH_WORKSPACE_HOST "$ENV_FILE")" ] || die ".env 缺少 DSH_WORKSPACE_HOST"
+	if [ -z "$password" ]; then
+		hdr "设置 dsh 登录密码"
+		read_secret "  密码："; p1="$SECRET"
+		read_secret "  再输一次："; p2="$SECRET"
+		[ "$p1" = "$p2" ] || die "两次输入不一致"
+		password="$p1"
+		set_env DSH_AUTH_PASSWORD "$password"
+	fi
+	[ "${#password}" -ge 14 ] || die "DSH_AUTH_PASSWORD 至少 14 位"
+	CONTAINER="$container"
+	mkdir -p "$data_dir" "$APP_DIR/workspace"
+
+	remember_app_dir "$APP_DIR"
+	[ "$NO_PULL" != "1" ] && { hdr "拉取镜像"; compose pull || die "镜像拉取失败：$image"; }
+	hdr "启动 dsh-docker"
+	compose up -d || die "docker compose up 失败"
+	if ! wait_healthy "$port"; then
+		compose logs --tail=80 || true
+		die "容器未在预期时间内健康"
+	fi
+	write_state "$image" ""
+	ok "dsh-docker 已启动"
+	hdr "访问地址"
+	print_url
+	info "实例目录：$APP_DIR"
+}
+
+cmd_docker_init() {
+	local dir="${APP_DIR:-}" image="${DSHM_IMAGE:-$DEFAULT_IMAGE}" port=3080 bind=127.0.0.1
+	local data_dir="" uid gid container="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--dir | --app-dir) dir="${2:-}"; shift ;;
+		--data-dir) data_dir="${2:-}"; shift ;;
+		--port) port="${2:-}"; shift ;;
+		--bind) bind="${2:-}"; shift ;;
+		--image) image="${2:-}"; shift ;;
+		--container) container="${2:-}"; shift ;;
+		*) die "未知参数：$1" ;;
+		esac
+		shift
+	done
+	[ -n "$dir" ] || dir="$(default_app_dir)"
+	case "$dir" in /*) ;; *) die "--dir 必须是绝对路径：$dir" ;; esac
+	[ -e "$dir/.env" ] && die "$dir 已经有 .env；直接编辑它，或先备份后删除"
+	mkdir -p "$dir"
+	set_app "$dir"
+	data_dir="${data_dir:-$dir/data}"
+	case "$data_dir" in /*) ;; *) die "--data-dir 必须是绝对路径" ;; esac
+	mkdir -p "$data_dir" "$dir/workspace"
+	uid="${DSH_UID:-$(id -u)}"; gid="${DSH_GID:-$(id -g)}"
+	if [ "$uid" = "0" ]; then uid=1000; gid=1000; fi
+	[ "$(id -u)" = "0" ] && chown -R "$uid:$gid" "$data_dir" "$dir/workspace" 2>/dev/null || true
+	write_compose_file
+	write_env_file "$image" "$port" "$bind" "$data_dir" "$uid" "$gid" "" "$container"
+	ok "已初始化 $dir"
+	info "下一步：编辑 $dir/.env（至少设置 DSH_AUTH_PASSWORD），然后运行："
+	info "  dshm --dir $dir docker install"
+}
+
 cmd_docker_install() {
-	local dir="" image="${DSHM_IMAGE:-$DEFAULT_IMAGE}" port=3080 bind=127.0.0.1
+	local dir="${APP_DIR:-}" image="${DSHM_IMAGE:-$DEFAULT_IMAGE}" port=3080 bind=127.0.0.1
 	local data_dir="" password="" stdin_pw=0 no_pull=0 dry_run=0 uid gid container="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
 	while [ $# -gt 0 ]; do
 		case "$1" in
@@ -197,7 +305,12 @@ cmd_docker_install() {
 	[ "$dry_run" = "1" ] || require_docker
 	[ -n "$dir" ] || dir="$(default_app_dir)"
 	case "$dir" in /*) ;; *) die "--dir 必须是绝对路径：$dir" ;; esac
-	[ -e "$dir/.env" ] && die "$dir 已经有 .env；如果要接管已有实例，请先备份后手动处理"
+	if [ -e "$dir/.env" ]; then
+		set_app "$dir"
+		NO_PULL="$no_pull"
+		install_existing
+		return 0
+	fi
 	mkdir -p "$dir"
 	set_app "$dir"
 
@@ -230,34 +343,8 @@ cmd_docker_install() {
 	fi
 	[ "$(id -u)" = "0" ] && chown -R "$uid:$gid" "$data_dir" "$dir/workspace" 2>/dev/null || true
 
-	# compose 模板
-	[ -f "$SELF_DIR/templates/compose.yaml" ] || die "发布包缺少 templates/compose.yaml"
-	cp "$SELF_DIR/templates/compose.yaml" "$dir/docker-compose.yml"
-
-	# .env
-	[ -n "$container" ] || die "--container 不能为空"
-	case "$container" in *[!A-Za-z0-9_.-]*) die "--container 只能包含字母、数字、_ . -" ;; esac
-	CONTAINER="$container"
-	{
-		printf 'DSHM_CONTAINER=%s\n' "$container"
-		printf 'DSH_IMAGE=%s\n' "$image"
-		printf 'DSH_HTTP_PORT=%s\n' "$port"
-		printf 'DSH_BIND=%s\n' "$bind"
-		printf 'DSH_HOME_HOST=%s\n' "$data_dir"
-		printf 'DSH_HOME_CONTAINER=/dsh\n'
-		printf 'DSH_WORKSPACE_HOST=%s\n' "$dir/workspace"
-		printf 'DSH_WORKSPACE_CONTAINER=/workspace\n'
-		printf 'DSH_UID=%s\n' "$uid"
-		printf 'DSH_GID=%s\n' "$gid"
-		printf 'DSH_AUTH_USER=admin\n'
-		printf 'DSH_AUTH_PASSWORD=%s\n' "$password"
-		printf 'DSH_AUTH_TOTP=optional\n'
-		printf 'DSH_COOKIE_SECURE=0\n'
-		printf 'DSH_PUBLIC_HOST=\n'
-		printf 'DSH_DISK_MIN_MB=256\n'
-		printf 'DSH_WORKSPACE_STRICT=0\n'
-	} >"$dir/.env"
-	chmod 600 "$dir/.env"
+	write_compose_file
+	write_env_file "$image" "$port" "$bind" "$data_dir" "$uid" "$gid" "$password" "$container"
 
 	if [ "$dry_run" = "1" ]; then
 		ok "dry-run：已生成 $dir/.env 与 $dir/docker-compose.yml（未启动）"
@@ -558,7 +645,10 @@ dshm — dsh-docker 的独立安装/管理工具
   dshm update [--check] [--to tag]     更新 dshm 自己
   dshm version                         查看 dshm / 镜像 / 容器版本
 
+  dshm docker init [选项]              只生成配置，不启动
+      （选项同 install；之后编辑 .env，再 dshm docker install）
   dshm docker install [选项]           安装 dsh-docker
+      已有 .env 时按配置安装，不再重新生成
       --dir PATH                       实例目录（默认 /opt/dsh 或 ~/.local/share/dshm/default）
       --data-dir PATH                  数据目录（默认 <实例>/data）
       --port 3080                      宿主端口
@@ -617,6 +707,7 @@ docker)
 	sub="${1:-help}"
 	shift || true
 	case "$sub" in
+	init) cmd_docker_init "$@" ;;
 	install) cmd_docker_install "$@" ;;
 	help | -h | --help | "") show_help ;;
 	status) cmd_docker_status ;;

@@ -58,6 +58,10 @@ The repository consists of:
   then pulls the image, prepares directories and starts the service.
 - **Login plugin** — [dsh-auth-gate](https://github.com/TecFancy/dsh-auth-gate) provides the login page,
   password authentication, optional TOTP and rate limiting, replacing the official one-time token.
+  The image ships a **vendored build** of it (`vendor/dsh-auth-gate/`): upstream does not yet handle
+  the `{resource}` route shape added in dsh 0.2.2, and installing the upstream release there makes the
+  whole gate plugin fail to apply while the container still reports healthy. See
+  [vendor/dsh-auth-gate/VENDORED.md](vendor/dsh-auth-gate/VENDORED.md).
 - **proxy** — dsh refuses `--host 0.0.0.0`, so external access is handled by this forwarding proxy. It
   also fixes the settings page being unusable over LAN/domain access.
 - **`dshm` CLI** — deployment management, grouped into `service`, `auth`, `admin` and `self`.

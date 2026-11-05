@@ -29,7 +29,7 @@ ARG NODE_IMAGE=node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf
 
 # ── 阶段 1：安装 dsh 并预置插件 ─────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS builder
-ARG DSH_VERSION=0.2.1-rc.5
+ARG DSH_VERSION=0.2.2-rc.1
 ARG PNPM_VERSION=11.7.0
 ARG DSH_AUTH_GATE_VERSION=0.18.0
 ENV DEBIAN_FRONTEND=noninteractive
@@ -62,11 +62,23 @@ RUN --mount=type=cache,target=/root/.npm \
 # 不影响「首次装插件无需联网」。
 ENV DSH_HOME=/opt/dsh-seed \
     HOME=/opt/dsh-seed
+# 登录门禁用**本仓库 vendor 的那份构建**，而不是运行时从 npm 现取：
+# 上游 0.18.0 的 wrapServer 还不认识 dsh 0.2.2 新增的 `{resource}` 路由形态，
+# 会在 apply 阶段抛 TypeError，结果是插件被跳过、门禁整体消失、容器却 healthy。
+# 补丁内容、风险与升级方式见 vendor/dsh-auth-gate/VENDORED.md。
+COPY vendor/dsh-auth-gate /opt/gate-vendored
 RUN set -eux; \
     mkdir -p "${DSH_HOME}"; \
     DSH_BIN="$(npm root --global)/@deepseek-ai/dsh/lib/bin.js"; \
     node --expose-internals "$DSH_BIN" --profile web --dump-config >/dev/null; \
-    node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-auth-gate@${DSH_AUTH_GATE_VERSION}"; \
+    # vendor 的版本必须和 DSH_AUTH_GATE_VERSION 对得上，否则"镜像里到底是哪版门禁"就说不清了
+    vendored_gate="$(node -p "require('/opt/gate-vendored/package.json').version")"; \
+    [ "$vendored_gate" = "${DSH_AUTH_GATE_VERSION}" ] || { \
+      echo "vendor 里的门禁版本($vendored_gate) != DSH_AUTH_GATE_VERSION(${DSH_AUTH_GATE_VERSION})" >&2; exit 1; }; \
+    # 打成 tarball 再装：pnpm 对目录会装成链接（指向 /opt/gate-vendored），
+    # 而 profile 会被复制进数据卷，链接目标必须一直在镜像里；tarball 装出来是实体目录，更稳。
+    npm pack --pack-destination /tmp /opt/gate-vendored >/dev/null; \
+    node --expose-internals "$DSH_BIN" plugin --profile web add "/tmp/dsh-auth-gate-${vendored_gate}.tgz"; \
     # dsh 会校验 profile 插件行的 peer 依赖（storage-domain 缺失会让 web 起不来），
     # dsh-auth-gate 的 CLI 也需要它们。补软链；目标不存在时直接构建失败，避免像以前
     # 那样发出悬空软链、等到运行时才炸（entrypoint 也会在每次启动时幂等补齐）。

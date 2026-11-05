@@ -62,6 +62,10 @@
   准备目录并启动服务。
 - **登录插件**：[dsh-auth-gate](https://github.com/TecFancy/dsh-auth-gate) 提供登录页、密码认证、
   可选两步验证与登录限流，替代官方的一次性 token。
+  镜像里装的是**本仓库 vendor 的构建**（`vendor/dsh-auth-gate/`）：上游还没适配 dsh 0.2.2 起
+  新增的 `{resource}` 路由形态，直接装上游版本会让门禁插件整体失效（容器却照样 healthy）。
+  改了什么、怎么升级、什么时候能删掉这个 vendor，见
+  [vendor/dsh-auth-gate/VENDORED.md](vendor/dsh-auth-gate/VENDORED.md)。
 - **proxy**：dsh 拒绝 `--host 0.0.0.0`，对外访问由其转发；同时修复局域网与域名访问时设置页不可用的问题。
 - **`dshm` 命令**：部署管理工具，按 `service`、`auth`、`admin`、`self` 分组。
 - **管理面板**：运行于宿主机的管理程序，提供状态、启停、日志、磁盘占用与缓存清理，并内置一个

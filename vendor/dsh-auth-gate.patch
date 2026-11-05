@@ -1,0 +1,104 @@
+--- a/lib/host/shared/guard/guard.js
++++ b/lib/host/shared/guard/guard.js
+@@ -61,7 +61,9 @@
+     return PROXY_DENIED_METHODS.has(pathname.slice(5));
+ }
+ export function isGuarded(target) {
+-    return target[GUARDED] === true;
++    // 容忍非函数/undefined：dsh 0.2.2 起路由可能是 `{resource}` 而不是 `{handler}`，
++    // 老代码直接 target[GUARDED] 会抛 TypeError 把整个插件 apply 搞挂（见 VENDORED.md）。
++    return target != null && target[GUARDED] === true;
+ }
+ /**
+  * 给一个 HTTP handler 套守卫。已守卫（幂等）则原样返回；deny 由守卫按 gate 给出的
+@@ -92,6 +94,36 @@
+     return guarded;
+ }
+ /**
++ * 形状不认识（既没有 handler 也没有 resource）时的兜底 handler：**拒绝**，不放行。
++ *
++ * 为什么是 503 而不是继续往下走：门禁不知道这条路由是什么、也就无法判断该不该放，
++ * 这时最优解是"谁都别过"，而不是"让它过" —— 后者等于给未守卫的路由开口子。
++ */
++function refuseUnguardable(res) {
++    endStatus(res, 503, "auth gate: unsupported route shape");
++}
++/**
++ * 把 dsh 0.2.2 新增的 `{resource}` 路由包成守卫版 handler。
++ *
++ * resource 是 `(Fetch Request, peer) => Response`，由 webserver 自己转成 HTTP 响应；
++ * 门禁的决策用的是 node 的 req/res，所以这里把它**转回** node handler：
++ * 先过 guardHttp 的决策，允许后再交给 webserver 的 `serveResource` 完成真正的输出。
++ * 决策/拒绝/跨站弹回的语义与 handler 路由完全一致，因此不会出现"resource 路由
++ * 悄悄绕过门禁"。
++ *
++ * 若 server 没暴露 serveResource（老版本或实现变了）→ **拒绝**（fail closed）。
++ */
++function guardResource(gate, kind, server, resource) {
++    const handler = async (req, res) => {
++        if (typeof server.serveResource !== "function") {
++            refuseUnguardable(res);
++            return;
++        }
++        await server.serveResource(req, res, new URL(req.url ?? "/", "http://x"), resource);
++    };
++    return guardHttp(gate, kind, handler);
++}
++/**
+  * 给一个 upgrade handler 套守卫。**任何**非 allow 决策（含 `{deny:{upgrade:true}}`）
+  * 都在 ws 协商前直接拒握手，不进入原 handler，也不为 socket 附加任何监听器。
+  */
+@@ -203,11 +235,27 @@
+     const upgradeOrigins = new WeakMap();
+     const fallbackOrigins = new WeakMap();
+     const guardRoute = (route, kind = route.kind) => {
+-        const handler = guardHttp(gate, kind, route.handler);
+-        if (handler === route.handler)
+-            return route;
+-        httpOrigins.set(handler, route);
+-        return { ...route, handler };
++        // handler 形态：原样（沿用上游语义）。
++        if (typeof route?.handler === "function") {
++            const handler = guardHttp(gate, kind, route.handler);
++            if (handler === route.handler)
++                return route;
++            httpOrigins.set(handler, route);
++            return { ...route, handler };
++        }
++        // dsh 0.2.2 起：路由也可以是 `{ kind, path, resource }`。转成守卫版 handler，
++        // 并**去掉 resource 字段** —— webserver 的分发先看 `"resource" in responder`，
++        // 留着它就会绕过 handler 直接执行未守卫的资源。
++        if (route !== null && typeof route === "object" && "resource" in route) {
++            const handler = guardResource(gate, kind, server, route.resource);
++            httpOrigins.set(handler, route);
++            const { resource: _unused, ...rest } = route;
++            return { ...rest, handler };
++        }
++        // 形状不认识：换成拒绝所有请求的 handler（fail closed），绝不原样放行。
++        const refused = (req, res) => refuseUnguardable(res);
++        httpOrigins.set(refused, route);
++        return { ...route, handler: refused };
+     };
+     const guardUpgradeRoute = (route) => {
+         const handler = guardUpgrade(gate, route.handler);
+@@ -216,10 +264,16 @@
+         upgradeOrigins.set(handler, route);
+         return { ...route, handler };
+     };
+-    const guardFallback = (handler) => {
+-        const guarded = guardHttp(gate, "fallback", handler);
+-        if (guarded !== handler)
+-            fallbackOrigins.set(guarded, handler);
++    const guardFallback = (responder) => {
++        // fallback 同样可能是 `{ resource }`（SPA dist 的 resource 形态）。
++        if (responder !== null && typeof responder === "object" && "resource" in responder) {
++            const guarded = guardResource(gate, "fallback", server, responder.resource);
++            fallbackOrigins.set(guarded, responder);
++            return guarded;
++        }
++        const guarded = guardHttp(gate, "fallback", responder);
++        if (guarded !== responder)
++            fallbackOrigins.set(guarded, responder);
+         return guarded;
+     };
+     for (const [path, route] of server.exact)

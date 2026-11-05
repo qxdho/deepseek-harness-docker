@@ -1,0 +1,208 @@
+import { randomBytes } from "node:crypto";
+import z from "@deepseek-ai/schemastery";
+import { registerAuthEndpoints, safeEqual, TokenGate } from "./host/features/token/index.js";
+import { wrapServer } from "./host/shared/guard/index.js";
+import { DisabledSessionSweeper, PasswordGate, makePasswordChangeWiring, registerPasswordEndpoints, verifyPassword, } from "./host/features/password/index.js";
+import { makeAdminWiring } from "./admin-wiring.js";
+import { makeBootstrapWiring } from "./bootstrap-wiring.js";
+import { TotpReplayGuard, verifyTotpCode } from "./host/features/totp/index.js";
+import { DEFAULT_TRUSTED_PROXIES, makeClientIpResolver, parseClientIpPolicy, } from "./host/shared/http/index.js";
+import { LoginRateLimiter } from "./host/shared/rate-limit/index.js";
+import { defaultUsersFilePath, loadUsersFile } from "./host/entities/user/index.js";
+import { assertGuarded } from "./host/shared/guard/index.js";
+import { makeLaunchTokenBridge } from "./launch-token-bridge.js";
+import { makeTokenResolver } from "./token-resolver.js";
+import { sessionDomainSpec, SessionStore } from "./host/entities/session/index.js";
+/** 稳定 Cordis 插件名（host 组合行 id）。 */
+export const name = "dsh-auth-gate";
+/** 硬依赖：守卫包装 webServer 的路由表；storageDomain/credentials 软读（见 apply）。 */
+export const inject = ["webServer"];
+export const Config = z.object({
+    mode: z.union([z.const("token"), z.const("password")]).default("token"),
+    sessionTtl: z.natural().default(604800),
+    cookieName: z.string().default("dsh_auth"),
+    // pattern 与 dsh-credentials 的 credential-ref 模式一致，同时挡住空串（M2 规格 §4.6）。
+    tokenRef: z
+        .string()
+        .pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)
+        .default("DSH_AUTH_TOKEN"),
+    cookieSecure: z.boolean().default(true),
+    usersFile: z.string().default(""),
+    publicHost: z.string().default(""),
+    clientIpHeader: z.string().default(""),
+    trustedProxyCidrs: z.array(z.string()).default([...DEFAULT_TRUSTED_PROXIES]),
+    revokeSweepMs: z.natural().default(5000),
+    totp: z.union([z.const("off"), z.const("optional"), z.const("required")]).default("off"),
+    logoutOrder: z.natural().max(10000).default(1000),
+});
+/**
+ * 会话层软接（M1 逻辑不变）：storageDomain 缺失 → error 日志后守卫照常挂载；
+ * 存在 → effect 内 open domain，就绪后把 SessionStore 挂到 auth.sessions，再通知 `onReady`
+ * （首次引导的启动清扫要等这一刻）。
+ */
+function mountSessionDomain(ctx, auth, log, onReady) {
+    const storageDomain = ctx.get("storageDomain");
+    if (storageDomain === undefined) {
+        log.error("storage-domain is unavailable: session persistence is disabled (guards stay mounted)");
+        return undefined;
+    }
+    return () => {
+        let closed = false;
+        const opening = storageDomain.open(sessionDomainSpec);
+        const ready = opening.then((domain) => {
+            if (closed) {
+                void domain.close();
+                return;
+            }
+            const store = new SessionStore(domain.table("sessions"));
+            auth.sessions = store;
+            onReady?.(store);
+            log.info("session domain opened: dsh_auth_sessions");
+        }, (error) => {
+            log.error(`session domain open failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        return async () => {
+            closed = true;
+            await ready.catch(() => undefined);
+            const domain = await opening.catch(() => undefined);
+            await domain?.close();
+        };
+    };
+}
+/**
+ * 端点注册（按 mode 二选一，包装后的 register；P26）。**立即执行注册**并返回合并
+ * disposer（作为 ctx.effect 的 callback 返回值；不得再包一层函数，否则会被 cordis
+ * 当作 disposer 存起来，注册永不发生，实测 404）。
+ */
+function mountAuthEndpoints(server, config, auth, resolveToken, launchTokenBridge, usersPath, limiter, replayGuard, challengeMacKey, log) {
+    const policy = parseClientIpPolicy(config.clientIpHeader, config.trustedProxyCidrs);
+    const clientIp = makeClientIpResolver(policy, log);
+    // 同一个 replayGuard 单例：登录与改密共用（D22；不同实例会放过同窗重放）。
+    const replayCheck = (username, counter, code) => replayGuard.checkAndRecord(username, counter, code);
+    if (config.mode !== "password") {
+        return registerAuthEndpoints({
+            register: (route) => server.register(route),
+            sessions: () => auth.sessions,
+            cookieName: config.cookieName,
+            cookieSecure: config.cookieSecure,
+            sessionTtl: config.sessionTtl,
+            logoutOrder: config.logoutOrder,
+            publicHost: config.publicHost,
+            validateToken: async (token) => {
+                const stored = await (resolveToken ?? (() => Promise.resolve(undefined)))();
+                return stored !== undefined && safeEqual(token, stored);
+            },
+            // 两种模式共用同一个桥实例；token 模式此前漏接，登录成功后拿不到 dsh 的
+            // browser-session cookie（issue #99）。
+            launchTokenBridge,
+            logger: log,
+        });
+    }
+    // P1 §5 改密接线：独立限速桶 + 锁内写盘入口 + hashPassword + 撤销会话，
+    // 装配在 password 切片内（root 只保留接线语义）。恒定注入，不存在静默不注册。
+    const passwordChange = makePasswordChangeWiring(usersPath, auth, replayCheck, log);
+    const loadUsers = () => loadUsersFile(usersPath);
+    return registerPasswordEndpoints({
+        register: (route) => server.register(route), // 包装后的 register（增量保险路径）
+        sessions: () => auth.sessions,
+        cookieName: config.cookieName,
+        cookieSecure: config.cookieSecure,
+        sessionTtl: config.sessionTtl,
+        usersPath,
+        loadUsers,
+        publicHost: config.publicHost,
+        verify: verifyPassword,
+        limiter,
+        clientIp,
+        totpMode: config.totp,
+        verifyTotp: (secretB32, code, nowMs) => verifyTotpCode(secretB32, code, nowMs),
+        replayCheck,
+        now: Date.now,
+        challengeMacKey,
+        launchTokenBridge,
+        logoutOrder: config.logoutOrder,
+        logger: log,
+        passwordChange,
+        // P2 管理面：装配细节（第三个独立限流桶、锁内写盘、吊销探针、双桶清理）在
+        // `src/admin-wiring.ts`；三条已认证路径共用同一个 replayGuard 单例。
+        admin: makeAdminWiring({
+            sessions: () => auth.sessions,
+            cookieName: config.cookieName,
+            usersPath,
+            publicHost: config.publicHost,
+            clientIp,
+            limiter,
+            passwordChangeLimiter: passwordChange.limiter,
+            replayCheck,
+            log,
+        }),
+    });
+}
+/**
+ * 应用 auth 门：mode 分支（token: credentials 解析器 + TokenGate；password: PasswordGate +
+ * usersPath + 限速器）→ auth 服务（一步成型，sessions 访问器闭包自引用 auth）→ 软接会话层 →
+ * 包装 webServer 四类入口 → 注册 /auth 端点（按 mode 二选一）→ 启动自检（fail loud）。
+ * apply 内无 await；password 模式不访问 credentials 服务。
+ */
+export function apply(ctx, config) {
+    const server = ctx.get("webServer");
+    if (server === undefined)
+        return;
+    const log = ctx.logger("dsh-auth-gate");
+    const resolveToken = config.mode === "token" ? makeTokenResolver(ctx, config, log) : undefined;
+    const launchTokenBridge = makeLaunchTokenBridge(ctx, log);
+    const usersPath = config.usersFile === "" ? defaultUsersFilePath() : config.usersFile;
+    const limiter = new LoginRateLimiter();
+    const replayGuard = new TotpReplayGuard();
+    // 挑战 cookie HMAC 密钥（D10）：进程级随机值，与 limiter / replayGuard 同寿命；
+    // 重启/插件重载后在途挑战 cookie 失效（用户需重新输入密码，≤5 分钟窗口）。
+    const challengeMacKey = randomBytes(32);
+    const auth = {
+        sessions: undefined,
+        gate: config.mode === "password"
+            ? new PasswordGate({ sessions: () => auth.sessions, cookieName: config.cookieName })
+            : new TokenGate({
+                // token 模式下 makeTokenResolver 必返回函数；`??` 兜底仅类型对齐（不可达且 fail-closed）
+                resolveToken: resolveToken ?? (() => Promise.resolve(undefined)),
+                sessions: () => auth.sessions,
+                cookieName: config.cookieName,
+            }),
+    };
+    ctx.provide("auth", auth);
+    const bootstrap = makeBootstrapWiring({
+        ctx,
+        server,
+        config,
+        auth,
+        usersPath,
+        launchTokenBridge,
+        log,
+    });
+    const sessionDisposer = mountSessionDomain(ctx, auth, log, bootstrap.onSessionsReady);
+    if (sessionDisposer !== undefined)
+        ctx.effect(sessionDisposer, "dsh-auth-gate: session domain");
+    // 禁用用户 → 已发会话即时失效（D8）：插件侧周期扫描 users.yaml，把变更落到会话表；
+    // 门保持 P12 的同步零 IO 语义，CLI 也不需要访问会话存储。
+    if (config.mode === "password" && config.revokeSweepMs > 0) {
+        const sweeper = new DisabledSessionSweeper({
+            sessions: () => auth.sessions,
+            loadUsers: () => loadUsersFile(usersPath),
+            intervalMs: config.revokeSweepMs,
+            log,
+        });
+        ctx.effect(() => sweeper.start(), "dsh-auth-gate: disabled session sweeper");
+    }
+    const unwrap = wrapServer(server, () => auth.gate, log);
+    ctx.effect(() => unwrap, "dsh-auth-gate: guard unwrap");
+    // 首次引导通道（`/auth/bootstrap` → `/auth/setup` → `/auth/continue`）：只在实例未配置时签发
+    // 一次性 bootstrap 会话，向导完成后关窗。三条路径在 `/auth` 前缀内，门直接放行。
+    ctx.effect(() => bootstrap.mount(), "dsh-auth-gate: bootstrap routes");
+    ctx.effect(() => mountAuthEndpoints(server, config, auth, resolveToken, launchTokenBridge, usersPath, limiter, replayGuard, challengeMacKey, log), "dsh-auth-gate: auth endpoints");
+    const failures = assertGuarded(server);
+    if (failures.length > 0) {
+        for (const failure of failures)
+            log.error(`unwrapped entry: ${failure}`);
+        throw new Error(`dsh-auth-gate: guard self-check failed: ${failures.join(", ")}`);
+    }
+}
+//# sourceMappingURL=index.js.map

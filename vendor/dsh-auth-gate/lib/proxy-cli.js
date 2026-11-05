@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+/**
+ * dsh-auth-proxy CLI：认证本地代理入口。
+ *
+ * 用法示例：
+ *   dsh-auth-proxy --listen 127.0.0.1:8443 --target https://dsh.example.com
+ */
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { createProxyServer, validateProxyOptions, } from "./host/features/proxy/index.js";
+const defaultIo = {
+    out: (line) => process.stdout.write(`${line}\n`),
+    err: (line) => process.stderr.write(`${line}\n`),
+};
+const USAGE = `Usage:
+  dsh-auth-proxy --target <upstream-url> [--listen 127.0.0.1:8443]
+                 [--strip-secure-cookie | --no-strip-secure-cookie]
+                 [--mark-proxy] [--local-token-env <VAR>] [--unsafe-plain-target]
+
+--target is required: it names the upstream origin and is never guessed
+(https with TLS verification unless --unsafe-plain-target is set).`;
+/** 环境变量名 → 值；未设置时报错（fail-closed，与 auth-gate 纪律一致）。 */
+function resolveLocalToken(argv, env) {
+    const at = argv.indexOf("--local-token-env");
+    const name = at === -1 ? undefined : argv[at + 1];
+    if (name === undefined || name.startsWith("--"))
+        throw new Error("--local-token-env requires a variable name");
+    const value = env[name];
+    if (value === undefined || value === "")
+        throw new Error(`--local-token-env ${name} is not set`);
+    return value;
+}
+function flag(argv, name) {
+    return argv.includes(name);
+}
+function valueOf(argv, name, fallback) {
+    const at = argv.indexOf(name);
+    if (at === -1)
+        return fallback;
+    const value = argv[at + 1];
+    if (value === undefined || value.startsWith("--"))
+        throw new Error(`${name} requires a value`);
+    return value;
+}
+/** 取必填参数值；缺失即报错（代理没有可猜的上游）。 */
+function required(argv, name) {
+    const at = argv.indexOf(name);
+    if (at === -1)
+        throw new Error(`${name} is required`);
+    const value = argv[at + 1];
+    if (value === undefined || value.startsWith("--"))
+        throw new Error(`${name} requires a value`);
+    return value;
+}
+/** 解析参数并完成校验（含回环监听、target 协议）。 */
+export function parseProxyArgs(argv, env) {
+    return {
+        options: {
+            listen: valueOf(argv, "--listen", "127.0.0.1:8443"),
+            target: required(argv, "--target"),
+            stripSecureCookie: !flag(argv, "--no-strip-secure-cookie"),
+            markProxy: flag(argv, "--mark-proxy"),
+            localToken: flag(argv, "--local-token-env") ? (resolveLocalToken(argv, env) ?? "") : "",
+            unsafePlainTarget: flag(argv, "--unsafe-plain-target"),
+        },
+    };
+}
+/**
+ * 当前进程是否在直接运行这个入口文件。
+ *
+ * 全局安装的 bin 是符号链接：`process.argv[1]` 是链接，`import.meta.url` 是真实文件。
+ * 比较前必须解析真实路径，否则会跳过 `main()`，进程不输出就退出。
+ *
+ * `argvPath` 缺失，或者解析不到真实文件时返回 false：两种情况下它都不可能是本入口，
+ * 而 import 本模块的进程不该因此崩溃（`node -e`、测试运行器的 argv[1] 都不是本文件）。
+ */
+export function isInvokedEntry(entryUrl, argvPath) {
+    if (argvPath === undefined || argvPath === "")
+        return false;
+    try {
+        return entryUrl === pathToFileURL(realpathSync(argvPath)).href;
+    }
+    catch {
+        return false;
+    }
+}
+export function main(argv, io) {
+    try {
+        if (argv.includes("--help") || argv.includes("-h")) {
+            io.out(USAGE);
+            return 0;
+        }
+        const { options } = parseProxyArgs(argv, process.env);
+        const { hostname, port } = validateProxyOptions(options);
+        const proxy = createProxyServer(options, (line) => io.err(line));
+        proxy.listen(port, hostname, () => {
+            io.out(`dsh-auth-proxy: listening on http://${hostname}:${String(port)} -> ${options.target}`);
+            io.out("dsh-auth-proxy: open the listen URL in your browser (auth-gate login applies)");
+        });
+        proxy.on("error", (error) => {
+            io.err(`dsh-auth-proxy: ${error instanceof Error ? error.message : String(error)}`);
+            process.exitCode = 1;
+        });
+        return 0;
+    }
+    catch (error) {
+        io.err(error instanceof Error ? error.message : String(error));
+        io.err(USAGE);
+        return 1;
+    }
+}
+if (isInvokedEntry(import.meta.url, process.argv[1])) {
+    process.exitCode = main(process.argv.slice(2), defaultIo);
+}
+//# sourceMappingURL=proxy-cli.js.map

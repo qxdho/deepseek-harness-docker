@@ -1,22 +1,44 @@
 #!/usr/bin/env bash
-# dshm 引导安装器：只安装 dshm，不替你启动实例。
+# dshm 引导安装器：只安装 dshm，不启动 dsh-docker 实例。
 #
-#   ./install.sh
+# 本地仓库：./install.sh
+# 远程安装：curl -fsSLO .../install.sh && sudo bash install.sh
 #
-# 之后二选一：
-#   A. dshm docker init ...   # 生成配置 -> 编辑 .env -> dshm docker install
-#   B. dshm docker install    # 交互式，直接生成并启动
+# 远程模式会下载 dshm-<tag>.tar.gz，并强制校验同名 .sha256。
 set -euo pipefail
 
-here="$(cd "$(dirname "$0")" && pwd)"
-[ -x "$here/dshm" ] || {
-	echo "错误：找不到 $here/dshm" >&2
-	exit 1
-}
-[ -f "$here/templates/compose.yaml" ] || {
-	echo "错误：找不到 templates/compose.yaml" >&2
-	exit 1
-}
+REPO="${DSHM_REPO:-https://github.com/qxdho/deepseek-harness-docker}"
+TAG="${DSHM_RELEASE_TAG:-v2026.11.06-1}"
+
+self="${BASH_SOURCE[0]:-}"
+here=""
+if [ -n "$self" ] && [ -f "$self" ]; then
+	here="$(cd "$(dirname "$self")" && pwd)"
+fi
+
+tmp=""
+cleanup() { [ -n "$tmp" ] && rm -rf "$tmp" || true; }
+trap cleanup EXIT
+
+if [ -n "$here" ] && [ -x "$here/dshm" ] && [ -f "$here/templates/compose.yaml" ]; then
+	src="$here"
+else
+	command -v curl >/dev/null 2>&1 || { echo "需要 curl" >&2; exit 1; }
+	command -v tar >/dev/null 2>&1 || { echo "需要 tar" >&2; exit 1; }
+	command -v sha256sum >/dev/null 2>&1 || { echo "需要 sha256sum" >&2; exit 1; }
+
+	tmp="$(mktemp -d)"
+	base="${REPO}/releases/download/${TAG}"
+	pkg="dshm-${TAG}.tar.gz"
+	echo "下载 ${base}/${pkg}"
+	curl -fsSL -o "$tmp/$pkg" "${base}/${pkg}"
+	curl -fsSL -o "$tmp/${pkg}.sha256" "${base}/${pkg}.sha256"
+	( cd "$tmp" && sha256sum -c "${pkg}.sha256" )
+	tar -xzf "$tmp/$pkg" -C "$tmp"
+	src="$tmp/dshm-${TAG}"
+	[ -x "$src/dshm" ] || { echo "发布包缺少 dshm" >&2; exit 1; }
+	[ -f "$src/templates/compose.yaml" ] || { echo "发布包缺少 templates" >&2; exit 1; }
+fi
 
 if [ "$(id -u)" = "0" ]; then
 	lib="${DSHM_LIB_DIR:-/usr/local/lib/dshm}"
@@ -27,15 +49,15 @@ else
 fi
 mkdir -p "$lib/scripts" "$lib/templates" "$bin"
 
-install -m 0755 "$here/dshm" "$lib/dshm"
-[ -f "$here/VERSION" ] && install -m 0644 "$here/VERSION" "$lib/VERSION"
-for f in "$here"/scripts/*.sh; do
+install -m 0755 "$src/dshm" "$lib/dshm"
+[ -f "$src/VERSION" ] && install -m 0644 "$src/VERSION" "$lib/VERSION"
+for f in "$src"/scripts/*.sh; do
 	case "$(basename "$f")" in
 	test-* | smoke-* | test-lib.sh) continue ;;
 	esac
 	install -m 0755 "$f" "$lib/scripts/"
 done
-install -m 0644 "$here"/templates/* "$lib/templates/"
+install -m 0644 "$src"/templates/* "$lib/templates/"
 
 ln -sfn "$lib/dshm" "$bin/dshm"
 
@@ -51,7 +73,7 @@ cat <<'TIP'
 下一步二选一：
 
 A. 先初始化，编辑配置，再安装
-   sudo dshm docker init --dir /opt/dsh --image ghcr.io/qxdho/deepseek-harness-docker:latest
+   sudo dshm docker init --dir /opt/dsh --image ghcr.io/qxdho/deepseek-harness-docker:0.2.2-rc.1-2026.11.06-1
    sudoedit /opt/dsh/.env          # 至少设置 DSH_AUTH_PASSWORD
    sudo dshm docker install --dir /opt/dsh
 

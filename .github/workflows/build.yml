@@ -764,6 +764,7 @@ jobs:
           done
           rm -rf /tmp/verify
           sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          sha256sum install.sh > install.sh.sha256
           echo "已生成 ${pkg}.tar.gz（$(wc -c < "${pkg}.tar.gz") 字节，版本 ${NUM}）"
 
       # tag 推送：每个版本一个 release（softprops 会按 tag 创建）
@@ -781,6 +782,8 @@ jobs:
             admin/dsh-admin-linux-arm64
             admin/dsh-admin-linux-arm64.sha256
             dshm-*.tar.gz
+            install.sh
+            install.sh.sha256
             dshm-*.tar.gz.sha256
       # main 推送：更新固定的 latest release。
       # 不能用 softprops 直接对 latest 做（并发会 422），先用 gh release create 保证它

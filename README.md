@@ -33,6 +33,32 @@ sudo ./install.sh
 
 安装完成后二选一。
 
+### 一键安装（只装 dshm）
+
+不 clone 仓库时，从 release 下载安装器并校验：
+
+```bash
+TAG=v2026.11.06-1
+BASE=https://github.com/qxdho/deepseek-harness-docker/releases/download/$TAG
+
+curl -fsSLO "$BASE/install.sh"
+curl -fsSLO "$BASE/install.sh.sha256"
+sha256sum -c install.sh.sha256
+sudo bash install.sh
+```
+
+`install.sh` 还会下载 `dshm-$TAG.tar.gz`，并用同名 `.sha256` 强制校验后才安装。
+
+注意：**它只安装 dshm 工具本身**，不会拉镜像、不会启动 dsh-docker；装完仍要执行下面的 A 或 B。
+
+如果不想手动校验，也可以直接：
+
+```bash
+curl -fsSL "$BASE/install.sh" | sudo bash
+```
+
+但仍建议至少固定 `TAG`，不要用浮动分支。
+
 ### A. 先初始化，编辑配置，再安装
 
 ```bash

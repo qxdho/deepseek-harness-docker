@@ -186,23 +186,36 @@ write_env_file() { # <image> <port> <bind> <data_dir> <uid> <gid> <password> <co
 	case "$container" in *[!A-Za-z0-9_.-]*) die "--container 只能包含字母、数字、_ . -" ;; esac
 	CONTAINER="$container"
 	{
+		printf '# dshm 生成的实例配置；修改后执行 dshm docker up 重建容器。\n'
+		printf '# 本文件含密码，权限必须保持 600。\n\n'
+		printf '# 容器与镜像\n'
 		printf 'DSHM_CONTAINER=%s\n' "$container"
 		printf 'DSH_IMAGE=%s\n' "$image"
+		printf '\n# 对外访问\n'
 		printf 'DSH_HTTP_PORT=%s\n' "$port"
 		printf 'DSH_BIND=%s\n' "$bind"
+		printf '\n# 数据与工作区（bind mount；属主必须与下面的 UID/GID 一致）\n'
 		printf 'DSH_HOME_HOST=%s\n' "$data_dir"
 		printf 'DSH_HOME_CONTAINER=/dsh\n'
 		printf 'DSH_WORKSPACE_HOST=%s\n' "$APP_DIR/workspace"
 		printf 'DSH_WORKSPACE_CONTAINER=/workspace\n'
 		printf 'DSH_UID=%s\n' "$uid"
 		printf 'DSH_GID=%s\n' "$gid"
-		printf 'DSH_AUTH_USER=admin\n'
-		printf 'DSH_AUTH_PASSWORD=%s\n' "$password"
-		printf 'DSH_AUTH_TOTP=optional\n'
-		printf 'DSH_COOKIE_SECURE=0\n'
-		printf 'DSH_PUBLIC_HOST=\n'
+		printf '\n# 启动保护\n'
 		printf 'DSH_DISK_MIN_MB=256\n'
 		printf 'DSH_WORKSPACE_STRICT=0\n'
+		printf '\n# 登录（dsh-web-startup-auth）\n'
+		printf '# 密码仅首次启动预置管理员用；已有 web-auth.json 后改这里无效。\n'
+		printf '# 改密码用：dshm docker auth reset\n'
+		printf 'DSH_AUTH_USER=admin\n'
+		printf 'DSH_AUTH_PASSWORD=%s\n' "$password"
+		printf '# v2 没有 TOTP；只能填 off 或 optional，required 会报错。\n'
+		printf 'DSH_AUTH_TOTP=optional\n'
+		printf '\n# HTTPS 反代（Cookie Secure 由 Nginx 的 proxy_cookie_flags 补）\n'
+		printf '# 对外域名，例如 dsh.example.com；留空则按绑定地址。\n'
+		printf 'DSH_PUBLIC_HOST=\n'
+		printf '# 只影响对外 URL 的 scheme；HTTPS 设为 1。\n'
+		printf 'DSH_COOKIE_SECURE=0\n'
 	} >"$APP_DIR/.env"
 	chmod 600 "$APP_DIR/.env"
 }

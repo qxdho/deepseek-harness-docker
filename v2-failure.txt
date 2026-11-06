@@ -1,32 +1,34 @@
 == 启动 v2 容器 ==
 == 等 healthy ==
-  [32mPASS[0m 容器 healthy
-== 登录入口 ==
-  [32mPASS[0m /login = 200
-== 未登录拦截 ==
-  [32mPASS[0m 外部 Host 未登录 / = 302
-  [32mPASS[0m 未登录受保护 API = 401
-== 预置账号登录 ==
-  [32mPASS[0m 登录 = 200
-  [32mPASS[0m 登录后 status = 200
-== 账号文件与插件 ==
-  [31mFAIL[0m 缺少 web-auth.json
-  [31mFAIL[0m profile 缺少 dsh-web-startup-auth
-  [32mPASS[0m 日志无 TypeError / did not activate
-== 重启后账号保留 ==
-  [32mPASS[0m 重启后仍可登录
-
-== 失败诊断：容器日志（末 100 行）==
 [entrypoint] 预置管理员账号 'admin'
 [entrypoint] 已预置管理员 'admin' -> /home/node/.dsh/web-auth.json
 [entrypoint] 对外地址：http://smoke.local/（HTTPS 反代请给 Cookie 补 Secure）
 [entrypoint] 启动 dsh: 0.0.0.0:3080
-dsh web: listening on 0.0.0.0 over plain HTTP; restrict this port to a trusted proxy or network
-dsh web: http://smoke.local/?token=Q5vbukyMx814zzkKthB60ue-mk4ErhLG9KT2x-TqGiY
-[entrypoint] 检测到已有 web-auth.json，跳过管理员预置
-[entrypoint] 对外地址：http://smoke.local/（HTTPS 反代请给 Cookie 补 Secure）
-[entrypoint] 启动 dsh: 0.0.0.0:3080
-dsh web: listening on 0.0.0.0 over plain HTTP; restrict this port to a trusted proxy or network
-dsh web: http://smoke.local/?token=Vj1Xdv7F6Nk5YT7r23tFVE5MRiUj1_BX7DZGk1LZl2o
+file:///usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:4745
+		throw new Error(`${binName}: failed to parse ${label} ${file}: ${String(error)}`);
+		      ^
 
-PASS=8 FAIL=2
+Error: dsh: failed to parse overlay /home/node/.dsh/profiles/web/cordis.patch.yml: YAMLException: end of the stream or a document separator is expected (6:1)
+
+ 3 | # overrides, disables, and inser ...
+ 4 | []
+ 5 | 
+ 6 | - id: workspace-controller
+-----^
+ 7 |   config:
+ 8 |     documentsDirectory: /workspace
+    at parsePatchList (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:4745:9)
+    at loadOverlayPatches (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:4715:9)
+    at loadProfileDirectory (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:1823:73)
+    at loadProfile (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:1855:9)
+    at prepareProfile (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/lib/profile-boot-e2mS45fC.js:219:18)
+    at composeProfile (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/lib/profile-boot-e2mS45fC.js:238:46)
+    at runProfile (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/lib/profile-boot-e2mS45fC.js:273:26)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async runCli (file:///usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js:215:5)
+    at async file:///usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js:252:23
+
+Node.js v24.22.2
+  [31mFAIL[0m 容器未 healthy（当前：unhealthy）
+
+PASS=0 FAIL=1

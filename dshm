@@ -102,14 +102,18 @@ set_app() {
 	ENV_FILE="$APP_DIR/.env"
 }
 
+load_container() {
+	CONTAINER="$(state_get container 2>/dev/null || true)"
+	[ -n "$CONTAINER" ] || CONTAINER="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
+}
+
 require_app() {
 	if [ -z "$APP_DIR" ] || [ ! -f "$APP_DIR/.env" ]; then
 		die "找不到实例。先运行 dshm docker install，或用 --dir /path 指定。"
 	fi
 	[ -f "$STATE" ] || die "缺少状态文件 $STATE（可用 dshm docker install 重建，或从备份恢复）"
 	ENV_FILE="$APP_DIR/.env"
-	CONTAINER="$(state_get container)"
-	[ -n "$CONTAINER" ] || CONTAINER="$DEFAULT_CONTAINER"
+	load_container
 }
 
 # ── 状态文件 ────────────────────────────────────────────────────────────────
@@ -673,8 +677,7 @@ cmd_version() {
 	hdr "版本"
 	printf '    dshm：%s\n' "$(dshm_version)"
 	if [ -n "$APP_DIR" ] && [ -f "$STATE" ]; then
-		CONTAINER="$(state_get container)"
-		CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
+		load_container
 		printf '    镜像：%s\n' "$(state_get image)"
 		printf '    容器：%s（%s）\n' "$CONTAINER" "$(container_health)"
 		local dshv

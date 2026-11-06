@@ -74,6 +74,7 @@ if [ "$workspace_ok" != "1" ]; then
   rm -f "${FALLBACK_WORKSPACE}/.dsh-write-test" 2>/dev/null || true
   log "工作区降级：改用 ${FALLBACK_WORKSPACE}"
   cd "$FALLBACK_WORKSPACE"
+  WORKSPACE="$FALLBACK_WORKSPACE"
 fi
 
 # ── 2. 播种 profile ────────────────────────────────────────────────────────
@@ -104,6 +105,22 @@ fi
 if [ ! -f "$PROFILE/node_modules/dsh-web-startup-auth/lib/auth.js" ]; then
   die "profile 里没有 dsh-web-startup-auth，请重建镜像"
 fi
+
+# dsh 首次登录默认在 <Documents>/deepseek-harness 建工作区；容器里没有 Documents。
+# 给 workspace-controller 显式指定挂载点，避免“无法创建默认工作区”。
+ensure_workspace_config() {
+  local patch="$PROFILE/cordis.patch.yml"
+  if grep -q 'documentsDirectory' "$patch" 2>/dev/null; then
+    return 0
+  fi
+  if [ -f "$patch" ]; then
+    printf '\n- id: workspace-controller\n  config:\n    documentsDirectory: "%s"\n' "$WORKSPACE" >>"$patch"
+  else
+    printf -- '- id: workspace-controller\n  config:\n    documentsDirectory: "%s"\n' "$WORKSPACE" >"$patch"
+  fi
+  log "配置默认工作区：$WORKSPACE"
+}
+ensure_workspace_config
 
 # pnpm 构建期记录的 store 绝对路径进入数据卷后必然失配。
 rm -f "$PROFILE/node_modules/.modules.yaml"

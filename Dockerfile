@@ -40,6 +40,15 @@ RUN set -eux; \
     node --expose-internals "$DSH_BIN" plugin --profile web add "dsh-web-startup-auth@${DSH_WEB_AUTH_VERSION}"; \
     test -f "${DSH_HOME}/profiles/web/node_modules/dsh-web-startup-auth/lib/auth.js"; \
     test -f "${DSH_HOME}/profiles/web/node_modules/dsh-web-startup-auth/lib/startup.js"; \
+    # dsh 默认把首次工作区放在 <Documents>/deepseek-harness；容器没有
+    # xdg-user-dir/Documents，首次登录会报“无法创建默认工作区”。显式指到挂载的
+    # /workspace，避免用户第一次打开页面就卡住。
+    patch="${DSH_HOME}/profiles/web/cordis.patch.yml"; \
+    if [ -f "$patch" ]; then \
+      printf '\n- id: workspace-controller\n  config:\n    documentsDirectory: /workspace\n' >> "$patch"; \
+    else \
+      printf -- '- id: workspace-controller\n  config:\n    documentsDirectory: /workspace\n' > "$patch"; \
+    fi; \
     # 构建期冒烟：证明凭据存储真的能写、能读，然后删掉测试文件。
     node --input-type=module -e 'const {registerCredentials}=await import(process.argv[1]); registerCredentials("build-smoke","build-smoke-password")' \
       "${DSH_HOME}/profiles/web/node_modules/dsh-web-startup-auth/lib/credential-store.js"; \

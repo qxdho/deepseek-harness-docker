@@ -69,6 +69,8 @@ echo "== 账号文件与插件 =="
 docker exec "$NAME" sh -c 'test -s "${DSH_HOME:-/home/node/.dsh}/web-auth.json"' && ok "web-auth.json 已生成" || bad "缺少 web-auth.json"
 docker exec "$NAME" sh -c 'test -f "${DSH_HOME:-/home/node/.dsh}/profiles/web/node_modules/dsh-web-startup-auth/lib/auth.js"' \
 	&& ok "dsh-web-startup-auth 已进 profile" || bad "profile 缺少 dsh-web-startup-auth"
+docker exec "$NAME" sh -c 'grep -q "documentsDirectory" "${DSH_HOME:-/home/node/.dsh}/profiles/web/cordis.patch.yml"' \
+	&& ok "默认工作区已指向挂载点" || bad "默认工作区未配置"
 if docker logs "$NAME" 2>&1 | grep -q 'TypeError\|did not activate'; then
 	bad "日志里仍有插件加载错误"
 else

@@ -45,6 +45,7 @@ RUN set -eux; \
     # /workspace，避免用户第一次打开页面就卡住。
     patch="${DSH_HOME}/profiles/web/cordis.patch.yml"; \
     if [ -f "$patch" ]; then \
+      sed -i '/^\[\]$/d' "$patch"; \
       printf '\n- id: workspace-controller\n  config:\n    documentsDirectory: /workspace\n' >> "$patch"; \
     else \
       printf -- '- id: workspace-controller\n  config:\n    documentsDirectory: /workspace\n' > "$patch"; \

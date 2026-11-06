@@ -114,6 +114,7 @@ ensure_workspace_config() {
     return 0
   fi
   if [ -f "$patch" ]; then
+    sed -i '/^\[\]$/d' "$patch"
     printf '\n- id: workspace-controller\n  config:\n    documentsDirectory: "%s"\n' "$WORKSPACE" >>"$patch"
   else
     printf -- '- id: workspace-controller\n  config:\n    documentsDirectory: "%s"\n' "$WORKSPACE" >"$patch"

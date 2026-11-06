@@ -272,7 +272,7 @@ install_existing() {
 
 cmd_docker_init() {
 	local dir="${APP_DIR:-}" image="${DSHM_IMAGE:-$DEFAULT_IMAGE}" port=3080 bind=127.0.0.1
-	local data_dir="" uid gid container="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}"
+	local data_dir="" uid gid container="${DSHM_CONTAINER:-$DEFAULT_CONTAINER}" sync=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--dir | --app-dir) dir="${2:-}"; shift ;;
@@ -281,12 +281,37 @@ cmd_docker_init() {
 		--bind) bind="${2:-}"; shift ;;
 		--image) image="${2:-}"; shift ;;
 		--container) container="${2:-}"; shift ;;
+		--sync) sync=1 ;;
 		*) die "未知参数：$1" ;;
 		esac
 		shift
 	done
 	[ -n "$dir" ] || dir="$(default_app_dir)"
 	case "$dir" in /*) ;; *) die "--dir 必须是绝对路径：$dir" ;; esac
+
+	if [ "$sync" = "1" ]; then
+		[ -f "$dir/.env" ] || die "$dir 没有 .env，--sync 只能用于已有实例"
+		set_app "$dir"
+		local stamp backup
+		stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+		backup="$dir/.env.sync-backup-$stamp"
+		cp -a "$dir/.env" "$backup"
+		[ -f "$dir/docker-compose.yml" ] && cp -a "$dir/docker-compose.yml" "$dir/docker-compose.yml.sync-backup-$stamp"
+		write_compose_file
+		# 只补缺失键，不覆盖已有值（尤其是密码、端口、容器名）。
+		if ! grep -q '^DSH_CONTAINER_HOME=' "$dir/.env"; then
+			{
+				printf '\n# 由 dshm init --sync 补充：容器 HOME / 目录选择器起点\n'
+				printf 'DSH_CONTAINER_HOME=/workspace\n'
+			} >>"$dir/.env"
+		fi
+		chmod 600 "$dir/.env"
+		ok "已同步到最新配置：$dir/docker-compose.yml"
+		info "备份：$backup"
+		info "现有 .env 值未改；执行 sudo dshm --dir $dir docker up 生效"
+		return 0
+	fi
+
 	[ -e "$dir/.env" ] && die "$dir 已经有 .env；直接编辑它，或先备份后删除"
 	mkdir -p "$dir"
 	set_app "$dir"
@@ -667,6 +692,7 @@ dshm — dsh-docker 的独立安装/管理工具
   dshm version                         查看 dshm / 镜像 / 容器版本
 
   dshm docker init [选项]              只生成配置，不启动
+      --sync                           已有实例：同步最新 compose，只补 .env 缺失键
       （选项同 install；之后编辑 .env，再 dshm docker install）
   dshm docker install [选项]           安装 dsh-docker
       已有 .env 时按配置安装，不再重新生成

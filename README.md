@@ -38,7 +38,7 @@ sudo ./install.sh
 不 clone 仓库时，从 release 下载安装器并校验：
 
 ```bash
-TAG=v2026.11.06-1
+TAG=v2026.11.06-2
 BASE=https://github.com/qxdho/deepseek-harness-docker/releases/download/$TAG
 
 curl -fsSLO "$BASE/install.sh"
@@ -102,6 +102,7 @@ sudo dshm docker install
 dshm update                    # 更新 dshm 自己
 dshm version                   # dshm / 镜像 / 容器版本
 dshm docker init [选项]          # 只生成配置，不启动
+dshm docker init --sync --dir /opt/dsh   # 已有实例：同步最新 compose，只补 .env 缺失键
 dshm docker install [选项]
 dshm docker status|logs|up|down|restart|shell|url
 dshm docker update [--to tag]  # 更新 dsh-docker 镜像

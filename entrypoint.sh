@@ -77,6 +77,11 @@ if [ "$workspace_ok" != "1" ]; then
   WORKSPACE="$FALLBACK_WORKSPACE"
 fi
 
+: "${HOME:=/workspace}"
+if ! mkdir -p "$HOME" 2>/dev/null; then
+  log "警告：HOME=$HOME 不可写；目录选择器和插件缓存可能异常"
+fi
+
 # ── 2. 播种 profile ────────────────────────────────────────────────────────
 # v1 的 profile 带 dsh-auth-gate，会和 v2 的 startup 插件冲突：备份后重播。
 if [ -f "$PROFILE/package.json" ] && grep -q 'dsh-auth-gate' "$PROFILE/package.json"; then

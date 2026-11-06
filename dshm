@@ -199,6 +199,8 @@ write_env_file() { # <image> <port> <bind> <data_dir> <uid> <gid> <password> <co
 		printf 'DSH_HOME_CONTAINER=/dsh\n'
 		printf 'DSH_WORKSPACE_HOST=%s\n' "$APP_DIR/workspace"
 		printf 'DSH_WORKSPACE_CONTAINER=/workspace\n'
+		printf '# 目录选择器默认从这里开始；默认 /workspace。\n'
+		printf 'DSH_CONTAINER_HOME=/workspace\n'
 		printf 'DSH_UID=%s\n' "$uid"
 		printf 'DSH_GID=%s\n' "$gid"
 		printf '\n# 启动保护\n'

@@ -11,7 +11,7 @@ services:
       DSH_HOME: ${DSH_HOME_CONTAINER:-/dsh}
       # 目录选择器以 HOME 为起点；让 HOME 指向工作区，打开选择器就是 /workspace。
       # 数据仍由 DSH_HOME 指向 /dsh，两者不混。
-      HOME: ${DSH_WORKSPACE_CONTAINER:-/workspace}
+      HOME: ${DSH_CONTAINER_HOME:-/workspace}
       DSH_HOST: 0.0.0.0
       DSH_PORT: 3080
       DSH_AUTH_USER: ${DSH_AUTH_USER:-admin}

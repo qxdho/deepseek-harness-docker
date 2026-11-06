@@ -124,6 +124,7 @@ dshm docker uninstall [--purge]
 | `DSH_BIND` | `127.0.0.1` | 绑定地址；`0.0.0.0` 允许局域网 |
 | `DSH_HOME_HOST` | `/opt/dsh/data` | 数据目录 |
 | `DSH_WORKSPACE_HOST` | `/opt/dsh/workspace` | 工作区 |
+| `DSH_CONTAINER_HOME` | `/workspace` | 容器 HOME；目录选择器默认从这里开始 |
 | `DSH_AUTH_USER` | `admin` | 登录用户名 |
 | `DSH_AUTH_PASSWORD` | 必填 | **仅首次安装**用于预置管理员 |
 | `DSH_PUBLIC_HOST` | 空 | 对外域名；会传给 dsh 作为 `--trusted-host/--public-url` |

@@ -74,16 +74,6 @@ HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/cfg" XDG_DATA_HOME="$tmp/data" PATH="$tmp
 grep -q '"image": "dsh-v2:local"' "$tmp/flow/state.json" && pass "state 记录镜像" || fail "state 镜像不对"
 grep -q '^DSHM_CONTAINER=qxdho-dsh-v2$' "$tmp/flow/.env" && pass "state 容器名保留" || fail "容器名丢失"
 
-# init --sync：保留已有值，补新键，重写 compose
-"$DSHM" docker init --dir "$tmp/sync" --image old:tag --container old-name >/dev/null
-sed -i 's/^DSH_HTTP_PORT=.*/DSH_HTTP_PORT=3999/' "$tmp/sync/.env"
-sed -i 's/^DSH_AUTH_PASSWORD=.*/DSH_AUTH_PASSWORD=KeepMe123456!/' "$tmp/sync/.env"
-sed -i 's|^      HOME: .*|      HOME: ${DSH_HOME_CONTAINER:-/dsh}|' "$tmp/sync/docker-compose.yml"
-"$DSHM" docker init --sync --dir "$tmp/sync" >/dev/null
-grep -q '^DSH_HTTP_PORT=3999$' "$tmp/sync/.env" && pass "sync 保留端口" || fail "sync 改了端口"
-grep -q '^DSH_AUTH_PASSWORD=KeepMe123456!$' "$tmp/sync/.env" && pass "sync 保留密码" || fail "sync 改了密码"
-grep -q '^DSH_CONTAINER_HOME=/workspace$' "$tmp/sync/.env" && pass "sync 补上 HOME 键" || fail "sync 没补 HOME"
-grep -q 'HOME: ${DSH_CONTAINER_HOME:-/workspace}' "$tmp/sync/docker-compose.yml" && pass "sync 重写 compose" || fail "sync 没重写 compose"
-ls "$tmp/sync"/.env.sync-backup-* >/dev/null 2>&1 && pass "sync 留下备份" || fail "sync 没备份"
+run_tests
 
 run_tests

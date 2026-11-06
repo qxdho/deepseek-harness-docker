@@ -673,8 +673,10 @@ cmd_version() {
 	hdr "版本"
 	printf '    dshm：%s\n' "$(dshm_version)"
 	if [ -n "$APP_DIR" ] && [ -f "$STATE" ]; then
+		CONTAINER="$(state_get container)"
+		CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
 		printf '    镜像：%s\n' "$(state_get image)"
-		printf '    容器：%s\n' "$(container_health)"
+		printf '    容器：%s（%s）\n' "$CONTAINER" "$(container_health)"
 		local dshv
 		dshv="$(docker exec "$CONTAINER" dsh --version 2>/dev/null || true)"
 		printf '    容器内 dsh：%s\n' "${dshv:-（容器未运行）}"

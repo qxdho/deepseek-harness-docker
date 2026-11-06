@@ -8,7 +8,7 @@
 set -euo pipefail
 
 REPO="${DSHM_REPO:-https://github.com/qxdho/deepseek-harness-docker}"
-TAG="${DSHM_RELEASE_TAG:-v2026.11.06-2}"
+TAG="${DSHM_RELEASE_TAG:-v2026.11.06-3}"
 
 self="${BASH_SOURCE[0]:-}"
 here=""

@@ -38,7 +38,7 @@ sudo ./install.sh
 不 clone 仓库时，从 release 下载安装器并校验：
 
 ```bash
-TAG=v2026.11.06-2
+TAG=v2026.11.06-3
 BASE=https://github.com/qxdho/deepseek-harness-docker/releases/download/$TAG
 
 curl -fsSLO "$BASE/install.sh"
